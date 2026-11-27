@@ -206,6 +206,28 @@ fn matrix3_general_log_and_bridges_including_slog_order() {
         normalize_ts_and_caller(sl.trim_end_matches('\n')),
         "[<TS>] [WARN] [<CALLER>] [\"from slog\"] [keyspaceName=ks1] [a=1] [b=2] [c=3] [d=4]"
     );
+
+    // tracing bridge dynamic level flip: a debug! call site first hit while level=INFO MUST NOT
+    // freeze Interest::never() — flipping level to DEBUG via set_level must emit on the SAME site.
+    fn hit_debug_site(seq: u32) {
+        tracing::debug!(seq = seq, "dynamic debug probe");
+    }
+    tidb_log::set_level("info").unwrap();
+    let _ = main_sink.take();
+    hit_debug_site(1);
+    assert!(
+        main_sink.take().is_empty(),
+        "debug! must be suppressed at INFO"
+    );
+    tidb_log::set_level("debug").unwrap();
+    hit_debug_site(2);
+    let dl = String::from_utf8(main_sink.take()).unwrap();
+    assert_single_line(dl.as_bytes());
+    assert_eq!(
+        normalize_ts_and_caller(dl.trim_end_matches('\n')),
+        "[<TS>] [DEBUG] [<CALLER>] [\"dynamic debug probe\"] [keyspaceName=ks1] [seq=2]"
+    );
+    tidb_log::set_level("info").unwrap();
 }
 
 #[test]

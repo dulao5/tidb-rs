@@ -57,6 +57,8 @@ struct StmtState {
     param_types: Vec<u8>,
     /// Data received with `COM_STMT_SEND_LONG_DATA`, per parameter.
     long_data: Vec<Option<Vec<u8>>>,
+    /// Bound parameters from the most recent `COM_STMT_EXECUTE` (used by `COM_STMT_FETCH` logging).
+    last_params: Vec<crate::params::Param>,
 }
 
 /// Shared connection status inspected by [`crate::Server::serve`] during graceful drain
@@ -429,47 +431,105 @@ where
     Ok(Some((handler, capability, resp.user)))
 }
 
-/// Format bound `COM_STMT_EXECUTE` parameters matching Go `PlanCacheParamList.String()`
-/// (`pkg/sessionctx/variable/session.go:2092-2098` -> `types.DatumsToStrNoErrSmart`).
+/// Go `pkg/types/datum.go:2445` `isPrintable`: valid UTF-8 with no Unicode control characters.
+fn is_printable_datum_bytes(bytes: &[u8]) -> Option<&str> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    if s.chars().any(char::is_control) {
+        return None;
+    }
+    Some(s)
+}
+
+/// Format bound `COM_STMT_EXECUTE` / `COM_STMT_FETCH` parameter matching Go
+/// `pkg/types/datum.go:2467-2525` (`datumsToString` with `handleSpecialValue=true, binaryAsHex=true`).
 fn format_param_value(p: &crate::params::Param) -> String {
+    use std::fmt::Write as _;
+
     use crate::value::Value;
+    const LOG_DATUM_LEN: usize = 2048;
+
     match &p.value {
-        Value::Null => "<nil>".to_owned(),
-        Value::Int(i) => i.to_string(),
-        Value::UInt(u) => u.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::Double(f) => f.to_string(),
-        Value::Decimal(s) => s.clone(),
-        Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
-        Value::DateTime(dt) => {
-            if dt.microsecond > 0 {
-                format!(
-                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
-                    dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.microsecond
-                )
+        Value::Null => "NULL".to_owned(),
+        Value::Bytes(b) => {
+            let original_len = (b.len() > LOG_DATUM_LEN).then_some(b.len());
+            let slice = if b.len() > LOG_DATUM_LEN {
+                &b[..LOG_DATUM_LEN]
             } else {
-                format!(
-                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                    dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
-                )
+                b.as_slice()
+            };
+            let mut out = if let Some(s) = is_printable_datum_bytes(slice) {
+                let mut q = String::with_capacity(s.len() + 2);
+                q.push('"');
+                q.push_str(s);
+                q.push('"');
+                q
+            } else {
+                let mut h = String::with_capacity(2 + slice.len() * 2);
+                h.push_str("0x");
+                for byte in slice {
+                    let _ = write!(&mut h, "{byte:02X}");
+                }
+                h
+            };
+            if let Some(orig) = original_len {
+                let _ = write!(&mut out, " len({orig})");
             }
+            out
         }
-        Value::Time(d) => {
-            let sign = if d.negative { "-" } else { "" };
-            if d.microseconds > 0 {
-                format!(
-                    "{sign}{:02}:{:02}:{:02}.{:06}",
-                    d.hours, d.minutes, d.seconds, d.microseconds
-                )
+        other => {
+            let s = match other {
+                Value::Int(i) => i.to_string(),
+                Value::UInt(u) => u.to_string(),
+                Value::Float(f) => f.to_string(),
+                Value::Double(f) => f.to_string(),
+                Value::Decimal(s) => s.clone(),
+                Value::DateTime(dt) => {
+                    if dt.microsecond > 0 {
+                        format!(
+                            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
+                            dt.year,
+                            dt.month,
+                            dt.day,
+                            dt.hour,
+                            dt.minute,
+                            dt.second,
+                            dt.microsecond
+                        )
+                    } else {
+                        format!(
+                            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                            dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
+                        )
+                    }
+                }
+                Value::Time(d) => {
+                    let sign = if d.negative { "-" } else { "" };
+                    if d.microseconds > 0 {
+                        format!(
+                            "{sign}{:02}:{:02}:{:02}.{:06}",
+                            d.hours, d.minutes, d.seconds, d.microseconds
+                        )
+                    } else {
+                        format!("{sign}{:02}:{:02}:{:02}", d.hours, d.minutes, d.seconds)
+                    }
+                }
+                Value::Null | Value::Bytes(_) => unreachable!(),
+            };
+            if s.len() > LOG_DATUM_LEN {
+                let orig = s.len();
+                let mut trunc =
+                    String::from_utf8_lossy(&s.as_bytes()[..LOG_DATUM_LEN]).into_owned();
+                let _ = write!(&mut trunc, " len({orig})");
+                trunc
             } else {
-                format!("{sign}{:02}:{:02}:{:02}", d.hours, d.minutes, d.seconds)
+                s
             }
         }
     }
 }
 
-/// Format a `COM_STMT_EXECUTE` statement + parameters for `command dispatched failed`
-/// (Go `conn_stmt.go:660-670` `preparedStmt2String` + `executor.FormatSQL`).
+/// Format a `COM_STMT_EXECUTE` / `COM_STMT_FETCH` statement + parameters for
+/// `command dispatched failed` (Go `conn_stmt.go:660-670` `preparedStmt2String` + `executor.FormatSQL`).
 pub fn format_stmt_execute_sql_for_log(
     sql: &str,
     params: &[crate::params::Param],
@@ -508,8 +568,7 @@ fn format_cmd_sql_for_log(
         command::STMT_EXECUTE | command::STMT_FETCH if body.len() >= 4 => {
             let id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
             if let Some(st) = stmts.get(&id) {
-                let normalized = tidb_parser::normalize(&st.sql, redact_mode);
-                format_sql_for_conn_log(&normalized, max_len)
+                format_stmt_execute_sql_for_log(&st.sql, &st.last_params, redact_mode)
             } else {
                 tidb_base::mysql::Command2Str
                     .get(&cmd)
@@ -781,11 +840,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                         );
                     }
                     let label = tidb_metrics::error_label(e.code);
-                    match write_err(&mut self.io, self.capability, &e).await {
-                        Ok(()) => (Some(label), !fatal_close),
-                        Err(e) => {
-                            debug!(connection_id, error = %e, "write error packet failed");
-                            (Some(label), false)
+                    if fatal_close {
+                        // Go conn.go:1194-1197: on ErrResultUndetermined, close the connection
+                        // immediately without sending an error packet to the client.
+                        (Some(label), false)
+                    } else {
+                        match write_err(&mut self.io, self.capability, &e).await {
+                            Ok(()) => (Some(label), true),
+                            Err(e) => {
+                                debug!(connection_id, error = %e, "write error packet failed");
+                                (Some(label), false)
+                            }
                         }
                     }
                 }
@@ -857,6 +922,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                     .get_mut(&id)
                     .ok_or_else(|| SqlError::unknown_stmt(id, "stmt_reset"))?;
                 stmt.long_data.iter_mut().for_each(|d| *d = None);
+                stmt.last_params.clear();
                 self.write_ok(&OkInfo::default()).await
             }
             command::SET_OPTION => match Reader::new(body).u16()? {
@@ -896,6 +962,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                 param_count,
                 param_types: Vec::new(),
                 long_data: vec![None; usize::from(param_count)],
+                last_params: Vec::new(),
             },
         );
 
@@ -992,6 +1059,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             Vec::new()
         };
         let stmt_sql = stmt.sql.clone();
+        stmt.last_params = params.clone();
         self.last_sql =
             format_stmt_execute_sql_for_log(&stmt_sql, &params, self.handler.redact_mode());
         self.handler.execute_flags(id, flags);

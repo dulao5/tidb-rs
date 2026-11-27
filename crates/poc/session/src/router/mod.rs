@@ -885,22 +885,7 @@ impl Router {
         stmt_id: u32,
         sql: &str,
     ) -> Result<PreparedInfo, SqlError> {
-        let stmt = match tidb_sql::ir::parse_one(sql) {
-            Ok(s) => s,
-            Err(e) => {
-                let vars = self.new.session().vars();
-                if !vars.in_restricted_sql {
-                    return Err(log_and_wrap_parse_error(
-                        self.conn_id,
-                        &vars.session_alias,
-                        &vars.enable_redact_log,
-                        sql,
-                        e,
-                    ));
-                }
-                return Err(e);
-            }
-        };
+        let stmt = tidb_sql::ir::parse_one(sql)?;
         // Not on the new stack when the InfoSchema versions differ: its column definitions
         // would come from another version, and a later fallback would fail check_columns.
         let candidate = Self::candidate(&stmt, true).and_then(|()| {

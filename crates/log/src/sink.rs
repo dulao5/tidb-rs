@@ -196,8 +196,11 @@ impl RotatingFileSink {
             let _ = std::thread::Builder::new()
                 .name("tidb-log-gzip".to_owned())
                 .spawn(move || {
-                    let _ = compress_file_gzip(&src);
+                    // Serialize compression and archive retention under one lock (matching
+                    // lumberjack's single mill goroutine) so concurrent cleanups never race
+                    // against an in-progress gzip or compress the same file twice.
                     let _guard = cleanup_lock.lock();
+                    let _ = compress_file_gzip(&src);
                     cleanup_archives(&path_for_cleanup, max_days, max_backups, true);
                 });
         } else {
@@ -269,21 +272,36 @@ impl LogSink for RotatingFileSink {
 fn compress_file_gzip(src: &Path) -> io::Result<()> {
     let mut dst_os = src.as_os_str().to_os_string();
     dst_os.push(".gz");
-    let dst = PathBuf::from(dst_os);
-    let mut reader = File::open(src)?;
-    let out = File::create(&dst)?;
-    let mut encoder = GzEncoder::new(BufWriter::new(out), Compression::default());
-    let mut buf = [0u8; 32 * 1024];
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
+    let dst = PathBuf::from(&dst_os);
+    let mut tmp_os = dst_os;
+    tmp_os.push(".tmp");
+    let tmp = PathBuf::from(tmp_os);
+
+    let write_res = (|| -> io::Result<()> {
+        let mut reader = File::open(src)?;
+        let out = File::create(&tmp)?;
+        let mut encoder = GzEncoder::new(BufWriter::new(out), Compression::default());
+        let mut buf = [0u8; 32 * 1024];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            encoder.write_all(&buf[..n])?;
         }
-        encoder.write_all(&buf[..n])?;
+        let mut inner = encoder.finish()?;
+        inner.flush()?;
+        inner.get_ref().sync_data()?;
+        Ok(())
+    })();
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
     }
-    let mut inner = encoder.finish()?;
-    inner.flush()?;
-    drop(reader);
+    if let Err(e) = fs::rename(&tmp, &dst) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
     let _ = fs::remove_file(src);
     Ok(())
 }
@@ -372,12 +390,9 @@ fn cleanup_archives(base_path: &Path, max_days: usize, max_backups: usize, compr
                 let _ = fs::remove_file(p);
             }
         } else if compress_gzip && let Some(plain) = grp.plain {
-            if grp.gz.is_some() {
-                // Already have the .gz archive: remove duplicate uncompressed leftover.
-                let _ = fs::remove_file(plain);
-            } else {
-                to_compress.push(plain);
-            }
+            // Never delete a plain backup on the strength of an existing `.gz` (which could be
+            // half-written from a prior crash): recompress into `.gz.tmp` and atomically rename.
+            to_compress.push(plain);
         }
     }
 

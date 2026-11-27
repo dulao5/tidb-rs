@@ -112,6 +112,19 @@ impl Visit for EventVisitor {
 }
 
 impl<S: Subscriber> Layer<S> for UnifiedTracingLayer {
+    fn register_callsite(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        // Never cache Interest::never() / Interest::always() for non-TRACE levels so runtime level
+        // flips (e.g. POST /settings log_level=debug) take effect on already-visited call sites.
+        if map_level(metadata.level()).is_none() {
+            tracing::subscriber::Interest::never()
+        } else {
+            tracing::subscriber::Interest::sometimes()
+        }
+    }
+
     fn enabled(&self, metadata: &tracing::Metadata<'_>, _ctx: Context<'_, S>) -> bool {
         let Some(level) = map_level(metadata.level()) else {
             return false;

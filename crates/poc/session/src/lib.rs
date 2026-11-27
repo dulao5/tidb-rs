@@ -1028,21 +1028,7 @@ impl Session {
     }
 
     async fn prepare_inner(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
-        let lowered = match tidb_sql::parse_and_lower(sql) {
-            Ok(l) => l,
-            Err(e) => {
-                if e.code == tidb_base::errno::ErrParse {
-                    return Err(router::log_and_wrap_parse_error(
-                        self.connection_id,
-                        "",
-                        tidb_base::errors::redact_log_enabled_load(),
-                        sql,
-                        e,
-                    ));
-                }
-                return Err(e);
-            }
-        };
+        let lowered = tidb_sql::parse_and_lower(sql)?;
         self.prepare_lowered(stmt_id, lowered).await
     }
 

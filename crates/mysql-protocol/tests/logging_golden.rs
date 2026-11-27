@@ -96,6 +96,11 @@ impl SessionHandler for LogTestSession {
             tokio::time::sleep(self.slow_sleep).await;
             return Ok(Response::Ok(OkInfo::default()));
         }
+        if sql == "TRIGGER UNDETERMINED" {
+            let src =
+                tidb_base::terror::ErrResultUndetermined.fast_gen_by_args(tidb_base::go_args![]);
+            return Err(SqlError::new(1105, "result undetermined").with_source_err(src));
+        }
         if sql == "SELECT * FROM test.no_such_table" {
             let src = tidb_base::terror::ClassSchema
                 .new_std(tidb_base::errno::ErrNoSuchTable)
@@ -204,7 +209,7 @@ async fn golden_command_dispatched_failed_and_graceful_drain() {
             .tcp_port(addr.port())
             .user(Some("root")),
     );
-    let mut conn = mysql_async::Conn::new(opts).await.unwrap();
+    let mut conn = mysql_async::Conn::new(opts.clone()).await.unwrap();
     // Clear startup "server is running MySQL protocol" line.
     let _ = sink.take();
 
@@ -280,7 +285,7 @@ async fn golden_command_dispatched_failed_and_graceful_drain() {
          [err=\"fail to parse SQL, and must redact the whole error when enable log redaction\"]"
     );
 
-    // COM_STMT_EXECUTE appends ` [arguments: ...]` when redact != ON.
+    // COM_STMT_EXECUTE appends ` [arguments: ...]` matching Go DatumsToStringSmart when redact != ON.
     conn.query_drop("SET REDACT OFF").await.unwrap();
     let stmt = conn
         .prep("SELECT * FROM test.t WHERE a = ? AND b = ?")
@@ -293,9 +298,59 @@ async fn golden_command_dispatched_failed_and_graceful_drain() {
         "[<TS>] [INFO] [<CALLER>] [\"command dispatched failed\"] [conn=1] [session_alias=] \
          [connInfo=\"id:1, addr:127.0.0.1:<PORT> status:10, collation:utf8mb4_0900_ai_ci, user:root\"] \
          [command=Execute] [status=\"inTxn:0, autocommit:1\"] \
-         [sql=\"SELECT * FROM test.t WHERE a = ? AND b = ? [arguments: (42, hello)]\"] \
+         [sql=\"SELECT * FROM test.t WHERE a = ? AND b = ? [arguments: (42, \\\"hello\\\")]\"] \
          [txn_mode=PESSIMISTIC] [timestamp=0] \
          [err=\"[schema:1146]Table 'test.t' doesn't exist\"]"
+    );
+
+    // NULL, non-printable hex (0x...), and >2048 truncation with ` len(N)` match Go DatumsToStringSmart.
+    let long_s = "a".repeat(2050);
+    let fmt_args = tidb_mysql_protocol::format_stmt_execute_sql_for_log(
+        "SELECT ?, ?, ?",
+        &[
+            Param {
+                ty: tidb_mysql_protocol::ColumnType::Null,
+                unsigned: false,
+                value: tidb_mysql_protocol::Value::Null,
+            },
+            Param {
+                ty: tidb_mysql_protocol::ColumnType::VarString,
+                unsigned: false,
+                value: tidb_mysql_protocol::Value::Bytes(vec![0x00, 0x01, 0xff]),
+            },
+            Param {
+                ty: tidb_mysql_protocol::ColumnType::VarString,
+                unsigned: false,
+                value: tidb_mysql_protocol::Value::Bytes(long_s.into_bytes()),
+            },
+        ],
+        RedactLogDisable,
+    );
+    let expected_trunc = format!(
+        "SELECT ?, ?, ? [arguments: (NULL, 0x0001FF, \"{}\" len(2050))]",
+        "a".repeat(2048)
+    );
+    assert_eq!(fmt_args, expected_trunc);
+
+    // ErrResultUndetermined (Go conn.go:1194-1197): logs WARN and closes the connection directly
+    // WITHOUT writing a MySQL error packet to the client.
+    let mut conn2 = mysql_async::Conn::new(opts).await.unwrap();
+    let err2 = conn2
+        .query_drop("TRIGGER UNDETERMINED")
+        .await
+        .expect_err("connection must close on ErrResultUndetermined");
+    assert!(
+        !matches!(err2, mysql_async::Error::Server(_)),
+        "ErrResultUndetermined must close connection without sending a MySQL ERR packet, got: {err2:?}"
+    );
+    let l_undet = String::from_utf8(sink.take()).unwrap();
+    assert!(
+        l_undet.contains("[\"result undetermined, close this connection\"]"),
+        "expected result undetermined WARN log, got: {l_undet}"
+    );
+    assert!(
+        !l_undet.contains("command dispatched failed"),
+        "ErrResultUndetermined must not emit command dispatched failed: {l_undet}"
     );
 
     // Graceful shutdown with ONE IDLE pooled client still open:

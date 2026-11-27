@@ -370,6 +370,7 @@ fn main() {
         Ok(rt) => rt,
         Err(e) => {
             error!(error = %e, "failed to start the async runtime");
+            let _ = tidb_log::sync();
             std::process::exit(1);
         }
     };
@@ -386,6 +387,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             error!(error = %e, "invalid admission configuration");
+            let _ = tidb_log::sync();
             std::process::exit(2);
         }
     };
