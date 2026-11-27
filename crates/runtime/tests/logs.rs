@@ -1,6 +1,5 @@
-//! The runtime's warnings reach a `tracing` subscriber such as tidb-server's (PR #10 review:
-//! they were `log` records, which the server's subscriber never saw). Own test binary: it
-//! installs the global subscriber.
+//! The runtime's structured warnings and panic recovery logs reach `tidb_base::structured_log`
+//! directly (D00.3 Batch 1). Own test binary: it installs the global structured logger.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -14,16 +13,6 @@ use tidb_runtime::SliceConfig;
 
 #[derive(Clone, Default)]
 struct Buf(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Buf {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 
 struct TestStructuredLogger(Buf);
 
@@ -48,16 +37,11 @@ impl StructuredLogger for TestStructuredLogger {
 }
 
 #[test]
-fn stall_and_panic_are_logged_through_tracing() {
+fn stall_and_panic_are_logged_through_structured_log() {
     let buf = Buf::default();
     let structured: &'static TestStructuredLogger =
         Box::leak(Box::new(TestStructuredLogger(buf.clone())));
     let _ = tidb_base::structured_log::register_logger(structured);
-    let w = buf.clone();
-    tracing_subscriber::fmt()
-        .with_writer(move || w.clone())
-        .with_ansi(false)
-        .init();
 
     let rt = Runtime::new(RuntimeConfig {
         worker_threads: 1,
@@ -88,12 +72,17 @@ fn stall_and_panic_are_logged_through_tracing() {
         assert_eq!(h.await.unwrap(), None);
     });
     let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "expected 2 structured log lines:\n{out}");
     assert!(
-        out.contains("poll stall") && out.contains("test-log-stall"),
-        "{out}"
+        lines[0].starts_with("[WARN] [poll stall: a task ran without yielding] [cause=Str(")
+            && lines[0].contains("[task=Str(\"test-log-stall\")] [elapsed=Duration(")
+            && lines[0].ends_with("[threshold=Duration(20000000)]"),
+        "unexpected stall log line: {}",
+        lines[0]
     );
-    assert!(
-        out.contains("panic in the recoverable goroutine") && out.contains("boom for the log"),
-        "{out}"
+    assert_eq!(
+        lines[1],
+        "[ERROR] [panic in the recoverable goroutine] [r=Str(\"boom for the log\")] [stack trace=Str(\"\")]"
     );
 }

@@ -1,31 +1,24 @@
 # Runtime logging parity ratchet (specs/D00.3-logging/spec.md §6).
 # Rule A must stay 0. Rules B and C only decrease.
 rule	crate	count
-B	tidb-codec	1
-B	tidb-domain	7
-B	tidb-executor	20
+B	tidb-domain	6
+B	tidb-executor	18
 B	tidb-expr-pushdown	5
 B	tidb-infoschema	10
 B	tidb-kv	4
-B	tidb-parser	1
 B	tidb-planner	11
 B	tidb-server	4
 B	tidb-session	12
 B	tidb-sessiontxn	4
 B	tidb-statistics	2
 B	tidb-store	14
-B	tidb-types	10
 C	tidb-domain	2
-C	tidb-executor	11
+C	tidb-executor	8
 C	tidb-expr-pushdown	1
 C	tidb-expression	11
 C	tidb-infoschema	3
-C	tidb-memory	2
-C	tidb-parser	1
 C	tidb-planner	12
-C	tidb-runtime	1
 C	tidb-server	1
 C	tidb-session	11
-C	tidb-store	7
+C	tidb-store	5
 C	tidb-systable	4
-C	tidb-types	7

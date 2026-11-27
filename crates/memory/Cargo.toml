@@ -18,8 +18,6 @@ arc-swap = "1"
 parking_lot = "0.12"
 # TrackedAlloc implements allocator_api2::Allocator (A1 3.3, M-MEM).
 allocator-api2 = "0.2"
-# "memory exceeds quota", "kill initiated", ... (Go: logutil.BgLogger(), i.e. zap).
-tracing = "0.1"
 # Heap statistics in place of Go runtime.ReadMemStats (A1 3.2: jemalloc stats; the server's
 # global allocator is jemalloc).
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }

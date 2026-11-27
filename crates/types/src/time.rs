@@ -581,7 +581,10 @@ impl Time {
 
         let (mut s, err) = date_format_result(self.date_format(tf_str));
         if err.is_err() {
-            log::error!("never happen because we've control the format!; category=fatal");
+            tidb_base::log_error!(
+                "never happen because we've control the format!",
+                "category" => "fatal",
+            );
         }
 
         let fsp = self.fsp();
@@ -2259,6 +2262,7 @@ impl Duration {
     /// and 10:10:10.000000 round 0 -> 10:10:10
     // go: Duration.RoundFrac L2 ([M-ERRVAL, M-F2I] loc cannot be nil, so Go's time.Local fallback is gone)
     pub fn round_frac(self, fsp: isize, loc: &Arc<Location>) -> (Duration, Result<(), Error>) {
+        // log-skip: pkg/types/time.go:1541 Rust loc: &Arc<Location> is non-nullable so nil timezone fallback cannot occur
         let tz = loc;
 
         let (fsp, err) = check_fsp(fsp);
@@ -4433,6 +4437,7 @@ pub fn date_fsp(date: &[u8]) -> isize {
 /// See: https://dev.mysql.com/doc/refman/8.0/en/datetime.html
 // go: DateTimeIsOverflow L2 (the context location cannot be nil, so the time.Local fallback is gone)
 pub fn date_time_is_overflow(ctx: &Context, date: Time) -> Result<bool, Error> {
+    // log-skip: pkg/types/time.go:3476 Rust Context::location() is non-nullable so nil timezone fallback cannot occur
     let tz = ctx.location();
 
     let (b, e);

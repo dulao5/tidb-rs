@@ -8,14 +8,14 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-# Logging of terror.Log / logutil (Go: zap).
-log = "0.4"
 # Errors (M-ERR), Go fmt and the Go time package (time.Location, time.Time).
 tidb-base = { workspace = true }
 # pkg/parser/charset (block D02.2): collation registry and the GBK encoder of gbk_bin.
 tidb-parser = { workspace = true }
 
 [dev-dependencies]
+# Whole-line log parity golden tests for tidb-parser and tidb-types.
+tidb-log = { workspace = true }
 # The govec replay tests read the JSON records (test code only; the crate's own JSON decoding
 # is tidb-base's port of Go encoding/json).
 serde_json = { workspace = true }

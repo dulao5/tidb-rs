@@ -370,12 +370,11 @@ impl ExecPool {
                     metrics::panic();
                     // Go: logutil.BgLogger().Error("panic in the recoverable goroutine", ...),
                     // after recoverFn.
-                    let msg = e.to_string();
                     let stack = bt.unwrap_or_default();
                     guard.fire(TaskExit::Panicked(e));
                     tidb_base::log_error!(
                         "panic in the recoverable goroutine",
-                        "r" => &msg,
+                        "r" => tidb_base::panic_guard::panic_payload_log_value(payload.as_ref()),
                         "stack trace" => &stack,
                     );
                     None

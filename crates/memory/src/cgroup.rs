@@ -17,7 +17,7 @@
 //! - `errors.Wrapf(err, f, ...)` is the message `f + ": " + err.Error()`; `os.Open` errors
 //!   are Go's `*os.PathError` texts (`gostd::os`). `errors.Wrapf(nil, ...)` is nil, so an
 //!   empty value file reads as 0 without an error, as in Go (`readInt64Value`).
-//! - `log.Warn` is `tracing::warn!`.
+//! - `log.Warn` is `tidb_base::log_warn!`.
 //! - The `root` argument of the unexported Go functions ("/" in production, a fixture
 //!   directory in tests) is kept: the `*_at` functions.
 //! - Only `InContainer` has Go build tags (linux / !linux); the rest of the package builds
@@ -115,7 +115,7 @@ pub fn get_memory_inactive_file_usage() -> Result<u64, Error> {
 fn memory_details(root: &[u8]) -> Result<Option<(Vec<u8>, Vec<Vec<u8>>, Vec<i32>)>, Error> {
     let path = detect_control_path(&join_bytes(&[root, procPathCGroup.as_bytes()]), "memory")?;
     if path.is_empty() {
-        tracing::warn!("no cgroup memory controller detected");
+        tidb_base::log_warn!("no cgroup memory controller detected");
         return Ok(None);
     }
     let (mount, ver) = get_cgroup_details(
@@ -139,6 +139,7 @@ fn unknown_version(ver: &[i32]) -> Error {
 /// root is always "/" in the production. It will be changed for testing.
 // go: getCgroupMemInactiveFileUsage L1
 pub(crate) fn get_cgroup_mem_inactive_file_usage_at(root: &[u8]) -> Result<u64, Error> {
+    // log-skip: pkg/util/cgroup/cgroup_memory.go:72 emitted in shared helper memory_details
     let Some((path, mount, ver)) = memory_details(root)? else {
         return Ok(0);
     };
@@ -158,6 +159,7 @@ pub(crate) fn get_cgroup_mem_inactive_file_usage_at(root: &[u8]) -> Result<u64, 
 /// getCgroupMemUsage reads the memory cgroup's current memory usage (in bytes).
 // go: getCgroupMemUsage L1
 pub(crate) fn get_cgroup_mem_usage_at(root: &[u8]) -> Result<u64, Error> {
+    // log-skip: pkg/util/cgroup/cgroup_memory.go:107 emitted in shared helper memory_details
     let Some((path, mount, ver)) = memory_details(root)? else {
         return Ok(0);
     };

@@ -2792,11 +2792,15 @@ pub fn new_dec_from_uint(i: u64) -> MyDecimal {
 pub fn new_dec_from_float_for_test(f: f64) -> MyDecimal {
     let mut dec = MyDecimal::default();
     if let Err(err) = dec.from_float64(f) {
-        // Go: log.Panic("encountered error", zap.Error(err), zap.String("DecimalStr", ...))
-        panic!(
-            "encountered error: {err}, DecimalStr: {}",
-            tidb_base::gostd::strconv::format_float(f, b'g', -1, 64)
+        let dec_str = tidb_base::gostd::strconv::format_float(f, b'g', -1, 64);
+        tidb_base::log_target!(
+            tidb_base::structured_log::LogTarget::Main,
+            tidb_base::structured_log::LogLevel::Panic,
+            "encountered error",
+            "error" => &err,
+            "DecimalStr" => &dec_str,
         );
+        panic!("encountered error: {err}, DecimalStr: {dec_str}");
     }
     dec
 }
@@ -2806,7 +2810,13 @@ pub fn new_dec_from_float_for_test(f: f64) -> MyDecimal {
 pub fn new_dec_from_string_for_test(s: &str) -> MyDecimal {
     let mut dec = MyDecimal::default();
     if let Err(err) = dec.from_string(s.as_bytes()) {
-        // Go: log.Panic("encountered error", zap.Error(err), zap.String("DecimalStr", s))
+        tidb_base::log_target!(
+            tidb_base::structured_log::LogTarget::Main,
+            tidb_base::structured_log::LogLevel::Panic,
+            "encountered error",
+            "error" => &err,
+            "DecimalStr" => s,
+        );
         panic!("encountered error: {err}, DecimalStr: {s}");
     }
     dec
