@@ -1342,55 +1342,19 @@ fn run_winop(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
     }
 }
 
-/// Records in `selectbuild` whose `.vi` or `plan.names` differ from Go v8.5.8 strictly because of
-/// owner-approved rulings `R29` and `R32` (`specs/D04.1-privilege/spec.md` §5.2 item 1, §5.3 item
-/// 4, §6.1 D5 option A):
-/// - `R29` (2,321 records): `tidb-rs` registers table-read `SelectPriv` (`column = "*"`, error
-///   `1142`) at `build_data_source` and removes Go's case-sensitive `collectPrivsForCount` patch.
-/// - `R32` (+2 lowercase `count(*)` records on non-PK-handle tables whose `.vi` already matched Go
-///   verbatim): `orig_tbl_name` is now populated on implicit `_tidb_rowid` columns in `plan.names`.
-///
-/// Pinned so any unexpected drift fails CI.
-const EXPECTED_R29_R32_NORMALIZED: usize = 2323;
-
-/// Normalizes `FieldName.orig_tbl_name` (`names[i][3]`) on implicit `_tidb_rowid` columns in
-/// `plan` JSON trees from the underlying table name back to Go v8.5.8's `""` per ruling R32
-/// (`specs/D04.1-privilege/spec.md` §5.2 item 1, §6.1 D5 option A). Returns the number of
-/// `_tidb_rowid` entries normalized; only touches entries where `col == "_tidb_rowid"`,
-/// `orig_col == "_tidb_rowid"`, and `orig_tbl != ""` (including aliased tables where
-/// `tbl_name != orig_tbl_name`).
-fn normalize_r32_rowid_orig_tbl_in_plan(plan: &mut Value) -> usize {
-    let mut count = 0;
-    if let Some(obj) = plan.as_object_mut() {
-        if let Some(names) = obj.get_mut("names").and_then(Value::as_array_mut) {
-            for entry in names {
-                if let Some(arr) = entry.as_array_mut()
-                    && arr.len() >= 5
-                    && arr[2].as_str() == Some("_tidb_rowid")
-                    && arr[4].as_str() == Some("_tidb_rowid")
-                    && arr[3].as_str().is_some_and(|s| !s.is_empty())
-                {
-                    arr[3] = json!("");
-                    count += 1;
-                }
-            }
-        }
-        if let Some(children) = obj.get_mut("children").and_then(Value::as_array_mut) {
-            for c in children {
-                count += normalize_r32_rowid_orig_tbl_in_plan(c);
-            }
-        }
-    }
-    count
-}
+/// Records in `selectbuild` whose `.vi` differs from Go v8.5.8 strictly because of owner-approved
+/// ruling `R29` (`specs/D04.1-privilege/spec.md` §5.1–§5.2, §6.1 D1 option A): `tidb-rs` registers
+/// table-read `SelectPriv` (`column = "*"`, error `1142`) at `build_data_source` and removes Go's
+/// case-sensitive `collectPrivsForCount` patch. Pinned so any unexpected drift fails CI.
+const EXPECTED_R29_NORMALIZED: usize = 2321;
 
 /// Checks whether `got` equals Go's `out` once the exact `R29` table-read `("*", 1142)` entries
 /// for the statement's resolved base tables (including those folded into `TableDual` by
 /// `WHERE 0` / `LIMIT 0`, per specs/D04.1-privilege/spec.md §5.1), Go's superseded
-/// `collectPrivsForCount` `"*"` entries, and `R32` `_tidb_rowid` `orig_tbl_name` / full-table
-/// `VisitInfo` entries are accounted for. Returns `true` only when every resolved base table
-/// actually emitted its exact `R29` entry in `got["vi"]` and every other field (`plan`,
-/// `plan_id`, `col_id`, `opt_flag`, remaining `vi`, `w`) matches Go byte-for-byte.
+/// `collectPrivsForCount` `"*"` entries, and `R32` `_tidb_rowid` full-table `VisitInfo` entries
+/// are accounted for. Returns `true` only when every resolved base table actually emitted its
+/// exact `R29` entry in `got["vi"]` and every other field (`plan`, `plan_id`, `col_id`,
+/// `opt_flag`, remaining `vi`, `w`) matches Go byte-for-byte.
 fn matches_with_r29_vi_normalization(
     out: &Value,
     got: &Value,
@@ -1486,9 +1450,6 @@ fn matches_with_r29_vi_normalization(
 
     let mut norm_out = out_obj.clone();
     let mut norm_got = got_obj.clone();
-    if let Some(plan) = norm_got.get_mut("plan") {
-        normalize_r32_rowid_orig_tbl_in_plan(plan);
-    }
     norm_out.insert("vi".into(), Value::Array(rem_out_vi));
     norm_got.insert("vi".into(), Value::Array(rem_got_vi));
     norm_out == norm_got
@@ -1615,22 +1576,6 @@ fn govec_selectbuild() {
                     }
                 } else if matches_with_r29_vi_normalization(out, &got, &resolved_tables) {
                     r29_normalized += 1;
-                } else if op == "aggop" || op == "winop" {
-                    // R32: aggop/winop plans on non-PK-handle tables populate `orig_tbl_name` on
-                    // `_tidb_rowid` inside `plan.names` where Go v8.5.8 left `""`.
-                    let mut norm_got = got.clone();
-                    let changed = norm_got
-                        .get_mut("plan")
-                        .map_or(0, normalize_r32_rowid_orig_tbl_in_plan);
-                    if changed > 0 && &norm_got == out {
-                        equal += 1;
-                    } else {
-                        diffs.push(format!(
-                            "{sql} {}: {}",
-                            args[2],
-                            first_diff(out, &got, String::new()).unwrap_or_default()
-                        ));
-                    }
                 } else {
                     diffs.push(format!(
                         "{sql} {}: {}",
@@ -1653,8 +1598,8 @@ fn govec_selectbuild() {
     }
     assert!(diffs.is_empty(), "{} differences", diffs.len());
     assert_eq!(
-        r29_normalized, EXPECTED_R29_R32_NORMALIZED,
-        "R29/R32-normalized record count changed"
+        r29_normalized, EXPECTED_R29_NORMALIZED,
+        "R29-normalized record count changed"
     );
     assert!(
         unparsed.is_empty(),

@@ -2150,9 +2150,10 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
                 ]));
             }
             let col = Expr::Column((**column).clone()).into_ref();
+            let col_uid = column.unique_id;
             let name = Arc::clone(&self.names[i]);
             self.ctx_stack_append(col, Arc::clone(&name));
-            self.precollect_col_names(&name);
+            self.precollect_col_names(&name, Some(col_uid));
             return Ok(());
         } else if self.plan_ctx.is_none()
             && let Some(src) = self.source_table
@@ -2175,8 +2176,12 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
 
         let plan = self.plan_ctx.as_ref().expect("plan ctx").plan;
         if let Some((col, name)) = find_field_name_from_natural_using_join(self.arena, plan, v)? {
+            let col_uid = match col.as_ref() {
+                Expr::Column(c) => Some(c.unique_id),
+                _ => None,
+            };
             self.ctx_stack_append(col, Arc::clone(&name));
-            self.precollect_col_names(&name);
+            self.precollect_col_names(&name, col_uid);
             return Ok(());
         }
         // for i := len(planCtx.builder.outerSchemas) - 1; i >= 0; i--: empty (see the doc).
@@ -2198,13 +2203,25 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
     /// `infoschema.TableIsView` needs the builder's InfoSchema (not there yet; views are not
     /// built, D09.1) and `b.nameMapCTE` the CTE builder (D09.5): neither applies.
     // go: expressionRewriter.precollectColNames L2 (no view or CTE names yet)
-    fn precollect_col_names(&mut self, field_name: &FieldName) {
+    fn precollect_col_names(&mut self, field_name: &FieldName, col_unique_id: Option<i64>) {
         let Some(pc) = self.plan_ctx.as_mut() else {
             return;
         };
+        // R32 (D5 option A): `_tidb_rowid` keeps `orig_tbl_name == ""` on the wire (matching Go),
+        // so resolve its physical table name via `PlanBuilder.rowid_orig_tbl`.
+        let table = if !field_name.orig_tbl_name.l.is_empty() {
+            field_name.orig_tbl_name.l.clone()
+        } else if field_name.orig_col_name.l == tidb_model::ExtraHandleName.l
+            && let Some(uid) = col_unique_id
+            && let Some(tbl) = pc.builder.rowid_orig_tbl.get(&uid)
+        {
+            tbl.clone()
+        } else {
+            String::new()
+        };
         let col_name = VisitedColumn {
             name: field_name.orig_col_name.l.clone(),
-            table: field_name.orig_tbl_name.l.clone(),
+            table,
             schema: field_name.db_name.l.clone(),
         };
 

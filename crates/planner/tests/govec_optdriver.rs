@@ -1003,44 +1003,6 @@ fn first_diff(a: &Value, b: &Value, path: String) -> Option<String> {
     }
 }
 
-/// Records in `optdriver` whose `plan.names` differs from Go v8.5.8 strictly because of ruling
-/// `R32` (`specs/D04.1-privilege/spec.md` §5.2 item 1, §6.1 D5 option A): `tidb-rs` populates
-/// `orig_tbl_name = table_info.name` on implicit `_tidb_rowid` columns where Go left `""`.
-const EXPECTED_R32_NORMALIZED: usize = 901;
-
-fn normalize_r32_rowid_orig_tbl_in_plan(plan: &mut Value) -> usize {
-    let mut count = 0;
-    if let Some(obj) = plan.as_object_mut() {
-        if let Some(names) = obj.get_mut("names").and_then(Value::as_array_mut) {
-            for entry in names {
-                if let Some(arr) = entry.as_array_mut()
-                    && arr.len() >= 5
-                    && arr[2].as_str() == Some("_tidb_rowid")
-                    && arr[4].as_str() == Some("_tidb_rowid")
-                    && arr[3].as_str().is_some_and(|s| !s.is_empty())
-                {
-                    arr[3] = json!("");
-                    count += 1;
-                }
-            }
-        }
-        if let Some(children) = obj.get_mut("children").and_then(Value::as_array_mut) {
-            for c in children {
-                count += normalize_r32_rowid_orig_tbl_in_plan(c);
-            }
-        }
-    }
-    count
-}
-
-fn matches_with_r32_rowid_normalization(out: &Value, got: &Value) -> bool {
-    let mut norm = got.clone();
-    let changed = norm
-        .get_mut("plan")
-        .map_or(0, normalize_r32_rowid_orig_tbl_in_plan);
-    changed > 0 && &norm == out
-}
-
 #[test]
 fn govec_optdriver() {
     let mut s = String::new();
@@ -1055,7 +1017,6 @@ fn govec_optdriver() {
     let mut blocked: BTreeMap<String, usize> = BTreeMap::new();
     let (mut diffs, mut unparsed) = (Vec::new(), Vec::new());
     let mut records = 0usize;
-    let mut r32_normalized = 0usize;
     for line in lines {
         let rec: Value = serde_json::from_str(line).unwrap();
         records += 1;
@@ -1133,9 +1094,6 @@ fn govec_optdriver() {
         };
         if &got == out {
             *counts.entry(op.to_owned()).or_default() += 1;
-        } else if op == "optimize" && matches_with_r32_rowid_normalization(out, &got) {
-            *counts.entry(op.to_owned()).or_default() += 1;
-            r32_normalized += 1;
         } else {
             diffs.push(format!(
                 "{op} {}: {}",
@@ -1152,7 +1110,7 @@ fn govec_optdriver() {
     collate::set_new_collation_enabled_for_test(true);
     assert_eq!(records as u64, header["records"].as_u64().unwrap());
     eprintln!(
-        "optdriver: {records} records, equal to Go {counts:?} ({r32_normalized} R32-normalized), blocked {blocked:?}, {} not parsed, {} differences",
+        "optdriver: {records} records, equal to Go {counts:?}, blocked {blocked:?}, {} not parsed, {} differences",
         unparsed.len(),
         diffs.len()
     );
@@ -1160,10 +1118,6 @@ fn govec_optdriver() {
         eprintln!("{d}");
     }
     assert!(diffs.is_empty(), "{} differences", diffs.len());
-    assert_eq!(
-        r32_normalized, EXPECTED_R32_NORMALIZED,
-        "R32-normalized record count changed"
-    );
     assert!(
         unparsed.is_empty(),
         "Go parses, Rust does not: {unparsed:?}"

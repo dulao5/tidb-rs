@@ -169,7 +169,12 @@ fn priv_handle() -> Arc<Handle> {
     Arc::new(Handle::new(mp))
 }
 
-fn plan_as(tables: &Arc<MockIs>, handle: &Arc<Handle>, user: &str, sql: &str) -> Result<(), Error> {
+fn plan_as(
+    tables: &Arc<MockIs>,
+    handle: &Arc<Handle>,
+    user: &str,
+    sql: &str,
+) -> Result<Vec<Arc<tidb_types::field_name::FieldName>>, Error> {
     let out = parse(sql, &ParseOptions::default()).unwrap_or_else(|e| panic!("parse {sql}: {e}"));
     let mut stmt = out.stmts.into_iter().next().unwrap();
     let mut vars = SessionVars::new(Box::new(Acc));
@@ -215,8 +220,8 @@ fn plan_as(tables: &Arc<MockIs>, handle: &Arc<Handle>, user: &str, sql: &str) ->
         instance_plan_cache: None,
         privilege_manager: Some(pm),
     };
-    optimize_ast_node(&parts, &mut vars, &mut node_w, &*is_dyn)?;
-    Ok(())
+    let (_plan, names) = optimize_ast_node(&parts, &mut vars, &mut node_w, &*is_dyn)?;
+    Ok(names)
 }
 
 /// Pins ruling R32 across regular SELECT, PointGet fast path, and derived tables.
@@ -292,4 +297,63 @@ fn r32_tidb_rowid_requires_full_table_select() {
                 .unwrap_or_else(|e| panic!("{user} should pass `{sql}`, got {e}"));
         }
     }
+
+    // Wire metadata parity: `_tidb_rowid` MUST keep `orig_tbl_name == ""` (matching Go MySQL
+    // `org_table`), while real columns keep `orig_tbl_name == "t"`, across both unaliased and
+    // aliased tables; aliased `_tidb_rowid` still denies partial-column users against table `'t'`.
+    let names = plan_as(
+        &tables,
+        &handle,
+        "root",
+        "SELECT a, _tidb_rowid FROM test.t",
+    )
+    .expect("root select");
+    assert_eq!(names[0].orig_tbl_name.o, "t");
+    assert_eq!(names[1].col_name.o, "_tidb_rowid");
+    assert_eq!(names[1].tbl_name.o, "t");
+    assert_eq!(names[1].orig_tbl_name.o, "");
+
+    let alias_names = plan_as(
+        &tables,
+        &handle,
+        "root",
+        "SELECT s._tidb_rowid FROM test.t AS s",
+    )
+    .expect("root aliased select");
+    assert_eq!(alias_names[0].tbl_name.o, "s");
+    assert_eq!(alias_names[0].orig_tbl_name.o, "");
+
+    let alias_err = plan_as(
+        &tables,
+        &handle,
+        "u_cola",
+        "SELECT s._tidb_rowid FROM test.t AS s",
+    )
+    .expect_err("u_cola must be denied aliased _tidb_rowid");
+    assert_eq!(alias_err.code(), 1143);
+    assert!(
+        String::from_utf8_lossy(&alias_err.error())
+            .contains("for column '_tidb_rowid' in table 't'")
+    );
+
+    // Even a column-level `SELECT(_tidb_rowid)` grant does NOT satisfy R32 (`column = ""`).
+    let mut mp_col_rowid = MySQLPrivilege::new();
+    mp_col_rowid.add_user(UserRecord::new("%", "u_rowid_col", PrivilegeType(0)));
+    mp_col_rowid.add_column_priv(ColumnsPrivRecord::new(
+        "u_rowid_col",
+        "%",
+        "test",
+        "t",
+        "_tidb_rowid",
+        SelectPriv,
+    ));
+    let handle_col_rowid = Arc::new(Handle::new(mp_col_rowid));
+    let col_rowid_err = plan_as(
+        &tables,
+        &handle_col_rowid,
+        "u_rowid_col",
+        "SELECT _tidb_rowid FROM test.t",
+    )
+    .expect_err("column-level SELECT(_tidb_rowid) must still be denied by R32");
+    assert_eq!(col_rowid_err.code(), 1143);
 }

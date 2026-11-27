@@ -253,6 +253,10 @@ pub struct PlanBuilder<'ast> {
     pub window_specs: Vec<WindowSpecW<'ast>>,
     /// Index from lower-case window name to position in `window_specs`.
     pub window_spec_index: BTreeMap<String, usize>,
+    /// R32 (D5 option A): maps each implicit hidden `_tidb_rowid` column's `unique_id` to its
+    /// physical lowercase table name so `precollect_col_names` enforces full-table `SELECT`
+    /// without polluting `FieldName.orig_tbl_name` (which stays `""` on the MySQL wire, matching Go).
+    pub rowid_orig_tbl: BTreeMap<i64, String>,
 }
 
 /// PlanBuilderOpt is used to adjust the plan builder.
