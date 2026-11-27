@@ -471,3 +471,62 @@ fn r31_missing_table_1142_vs_1146_oracle_closed() {
         assert_eq!(err.code(), 1146, "user={user:?}: {err}");
     }
 }
+
+/// Pins `check_privilege` dynamic privilege verification and Go-compatible
+/// `ErrPrivilegeCheckFail` formatting (`[PRIV1 PRIV2]` / static privilege name).
+#[test]
+fn check_privilege_dynamic_and_fallback_error_formatting() {
+    use tidb_base::mysql::ExtendedPriv;
+    use tidb_planner::core::optimizer::check_privilege;
+    use tidb_planner::core::planbuilder::VisitInfo;
+    use tidb_privilege::DynamicPrivRecord;
+
+    let mut mp = MySQLPrivilege::new();
+    mp.add_user(UserRecord::new("%", "u_none", PrivilegeType(0)));
+    mp.add_user(UserRecord::new("%", "u_dyn", PrivilegeType(0)));
+    mp.add_dynamic_priv(DynamicPrivRecord::new("u_dyn", "%", "BACKUP_ADMIN", false));
+    let handle = Arc::new(Handle::new(mp));
+
+    let dyn_visit = VisitInfo {
+        privilege: ExtendedPriv.0,
+        dynamic_privs: vec![
+            "SYSTEM_VARIABLES_ADMIN".to_owned(),
+            "BACKUP_ADMIN".to_owned(),
+        ],
+        dynamic_with_grant: false,
+        ..Default::default()
+    };
+
+    let pm_none = UserPrivileges::new("u_none", "%", Arc::clone(&handle));
+    let err = check_privilege(&[], &pm_none, std::slice::from_ref(&dyn_visit))
+        .expect_err("u_none lacks dynamic priv");
+    let msg = String::from_utf8_lossy(&err.error()).into_owned();
+    assert!(
+        msg.contains("[SYSTEM_VARIABLES_ADMIN BACKUP_ADMIN]"),
+        "expected Go slice formatting in ErrPrivilegeCheckFail, got: {msg}"
+    );
+
+    let pm_dyn = UserPrivileges::new("u_dyn", "%", Arc::clone(&handle));
+    assert!(check_privilege(&[], &pm_dyn, std::slice::from_ref(&dyn_visit)).is_ok());
+
+    // Grantable requirement rejects non-grantable dynamic grant.
+    let mut dyn_grant = dyn_visit;
+    dyn_grant.dynamic_with_grant = true;
+    assert!(check_privilege(&[], &pm_dyn, &[dyn_grant]).is_err());
+
+    // Static privilege fallback error (when v.err is None) uses PrivilegeType::string().
+    let static_visit = VisitInfo {
+        privilege: SelectPriv.0,
+        db: "test".to_owned(),
+        table: "t".to_owned(),
+        column: "*".to_owned(),
+        err: None,
+        ..Default::default()
+    };
+    let err = check_privilege(&[], &pm_none, &[static_visit]).expect_err("u_none lacks SELECT");
+    let msg = String::from_utf8_lossy(&err.error()).into_owned();
+    assert!(
+        msg.contains("'Select'"),
+        "unexpected static fallback: {msg}"
+    );
+}

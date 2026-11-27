@@ -5890,13 +5890,17 @@ impl<'ast> PlanBuilder<'ast> {
                 )));
             } else {
                 let extra_col = Arc::new(ds.new_extra_handle_schema_col(ctx));
+                // R32 (D5 option A): track physical table by unique_id so privilege collection
+                // enforces full-table SELECT on `_tidb_rowid` while keeping `orig_tbl_name == ""`
+                // on the wire (matching Go MySQL column metadata).
+                self.rowid_orig_tbl
+                    .insert(extra_col.unique_id, table_info.name.l.clone());
                 handle_cols = Some(new_int_handle_cols(Arc::clone(&extra_col)));
                 ds.columns.push(Arc::new(new_extra_handle_col_info()));
                 schema.append([Arc::clone(&extra_col)]);
                 names.push(Arc::new(FieldName {
                     db_name: db_name.clone(),
                     tbl_name: table_info.name.clone(),
-                    orig_tbl_name: table_info.name.clone(),
                     col_name: ExtraHandleName.clone(),
                     orig_col_name: ExtraHandleName.clone(),
                     ..FieldName::default()
