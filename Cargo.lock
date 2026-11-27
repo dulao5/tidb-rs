@@ -4072,6 +4072,17 @@ dependencies = [
 name = "tidb-query-smoke"
 version = "0.0.0"
 dependencies = [
+ "bytes",
+ "protobuf",
+ "tidb-base",
+ "tidb-chunk",
+ "tidb-codec",
+ "tidb-expr-pushdown",
+ "tidb-expression",
+ "tidb-kv",
+ "tidb-parser",
+ "tidb-sessionctx",
+ "tidb-types",
  "tidb_query_datatype",
  "tidb_query_expr",
  "tipb",
