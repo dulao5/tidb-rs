@@ -663,6 +663,16 @@ impl PhysicalIndexLookUpReader {
     /// GetAvgTableRowSize return the average row size of each final row.
     // go: PhysicalIndexLookUpReader.GetAvgTableRowSize L1 [M-CTX]
     pub fn get_avg_table_row_size(&self, ctx: &PlanCtx<'_>) -> f64 {
+        self.get_avg_table_row_size_with_vars(ctx.vars)
+    }
+
+    /// `GetAvgTableRowSize` taking `&SessionVars` directly (used by `tidb-executor` where no
+    /// mutable `PlanCtx` is available, matching `PhysicalTableReader::get_net_data_size`).
+    // glue: PhysicalIndexLookUpReader.GetAvgTableRowSize for &SessionVars callers
+    pub fn get_avg_table_row_size_with_vars(
+        &self,
+        vars: &tidb_sessionctx::variable::session::SessionVars,
+    ) -> f64 {
         let table_plan = self
             .table_plan
             .as_deref()
@@ -670,8 +680,8 @@ impl PhysicalIndexLookUpReader {
         let default_coll = HistColl::default();
         let tbl_stats = get_tbl_stats(table_plan);
         let coll = tbl_stats.map_or(&default_coll, |v| &**v);
-        crate::cardinality::row_size::get_avg_row_size(
-            ctx,
+        crate::cardinality::row_size::get_avg_row_size_with_vars(
+            vars,
             coll,
             &table_plan.schema().columns,
             false,

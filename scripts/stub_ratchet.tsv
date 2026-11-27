@@ -3,7 +3,7 @@
 area	stubs
 chunk	2
 domain	1
-executor	86
+executor	90
 expr-pushdown	1
 expression	1
 infoschema	17

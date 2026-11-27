@@ -2082,13 +2082,22 @@ impl PhysicalIndexScan {
     /// NeedExtraOutputCol indicates whether this index scan needs an extra physical table ID column.
     // go: PhysicalIndexScan.NeedExtraOutputCol L1 [M-CTX]
     pub fn need_extra_output_col(&self, ctx: &PlanCtx<'_>) -> bool {
+        self.need_extra_output_col_with_vars(ctx.vars)
+    }
+
+    /// `NeedExtraOutputCol` taking `&SessionVars` directly (used by `tidb-executor`).
+    // glue: PhysicalIndexScan.NeedExtraOutputCol for &SessionVars callers
+    pub fn need_extra_output_col_with_vars(
+        &self,
+        vars: &tidb_sessionctx::variable::session::SessionVars,
+    ) -> bool {
         if self.table.partition.is_none() {
             return false;
         }
         if self.index.global {
             return true;
         }
-        if !self.by_items.is_empty() && ctx.vars.stmt_ctx().use_dynamic_partition_prune() {
+        if !self.by_items.is_empty() && vars.stmt_ctx().use_dynamic_partition_prune() {
             return true;
         }
         false
