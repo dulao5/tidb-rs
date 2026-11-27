@@ -17,7 +17,7 @@
 | 类别 | 含义 | 原因（reason） |
 |---|---|---|
 | `new_stack` | B 在新栈上执行（路由 engine = `new`） | `ok`，或 `error`（新栈返回了 Go 移植的错误） |
-| `fallback` | B 由原型执行，或 strict 模式下因只能由原型执行而返回 1235（engine = `poc` / `none`） | 路由原因：`kind`、`ast`、`session`、`schema_version`、某个 `blocked-by` 的块名、`new_stack_off` 等 |
+| `fallback` | B 由原型执行，或 strict 模式下因只能由原型执行而返回 1235（engine = `poc` / `none`） | 路由原因：`kind`、`ast`、`session`、`schema_lease`、`schema_version`、某个 `blocked-by` 的块名、`new_stack_off` 等 |
 | `error` | 发给了 B，但无法归属到某条路径 | 连接错误、超时、在路由前被拒（如 PREPARE 失败）、路由跟踪读不到 |
 | `skipped` | 根本没有发给 B | runner 的原因：写语句只在 A 上执行、事务中、会话已分叉、文件其余部分无法运行等 |
 

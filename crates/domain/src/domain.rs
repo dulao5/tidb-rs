@@ -20,7 +20,7 @@
 //!   are not ported.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tidb_base::Error;
@@ -98,6 +98,8 @@ pub struct Domain {
     /// `instancePlanCache`: set once by `InitInstancePlanCache` (plan_cache.rs).
     pub(crate) instance_plan_cache:
         std::sync::OnceLock<Arc<dyn tidb_sessionctx::context::InstancePlanCache>>,
+    /// Whether the blocked schema ts lookup was logged (`report_schema_ts_blocked`).
+    schema_ts_blocked_reported: AtomicBool,
 }
 
 /// `NewDomain`: the part schema loading needs (the store and the InfoCache).
@@ -111,6 +113,7 @@ pub fn new_domain(store: Arc<dyn Storage>) -> Domain {
         store,
         m: tokio::sync::Mutex::new(()),
         instance_plan_cache: std::sync::OnceLock::new(),
+        schema_ts_blocked_reported: AtomicBool::new(false),
     }
 }
 
@@ -231,9 +234,18 @@ impl Domain {
             .await
         {
             Ok(ts) => ts,
+            // The stub below returns `blocked(...)` on every load (once a second from the
+            // sync loop). Go warns on every failure, which with TiKV normally never happens;
+            // the blocked lookup is reported once per domain instead of on every load.
+            Err(e) if tidb_base::blocked::blocked_by(&e).is_some() => {
+                self.report_schema_ts_blocked(&e, needed_schema_version);
+                0
+            }
             Err(e) => {
-                log::warn!(
-                    "failed to get schema version, error: {e}, version: {needed_schema_version}"
+                tidb_base::log_warn!(
+                    "failed to get schema version",
+                    "error" => &e,
+                    "version" => needed_schema_version,
                 );
                 0
             }
@@ -285,20 +297,26 @@ impl Domain {
                 Ok((is, related_changes, diff_types)) => {
                     let is = Arc::new(is);
                     self.info_cache.insert(Arc::clone(&is), schema_ts);
-                    log::info!(
-                        "diff load InfoSchema success, isV2: true, currentSchemaVersion: {current_schema_version}, neededSchemaVersion: {needed_schema_version}, elapsed time: {:?}, gotSchemaVersion: {}, phyTblIDs: {:?}, actionTypes: {:?}, diffTypes: {diff_types:?}",
-                        start_time.elapsed(),
-                        is.schema_meta_version(),
-                        related_changes.phy_tbl_ids,
-                        related_changes.action_types,
+                    let diff_type_strs: Vec<&str> = diff_types.iter().map(String::as_str).collect();
+                    tidb_base::log_info!(
+                        "diff load InfoSchema success",
+                        "isV2" => true,
+                        "currentSchemaVersion" => current_schema_version,
+                        "neededSchemaVersion" => needed_schema_version,
+                        "elapsed time" => start_time.elapsed(),
+                        "gotSchemaVersion" => is.schema_meta_version(),
+                        "phyTblIDs" => related_changes.phy_tbl_ids.as_slice(),
+                        "actionTypes" => related_changes.action_types.as_slice(),
+                        "diffTypes" => diff_type_strs.as_slice(),
                     );
                     return Ok((is, false, current_schema_version, Some(related_changes)));
                 }
                 // We can fall back to full load, don't need to return the error.
-                Err(e) => log::error!("failed to load schema diff, error: {e}"),
+                Err(e) => tidb_base::log_error!("failed to load schema diff", "error" => &e),
             }
         }
 
+        // log-skip: pkg/domain/domain.go:375 failpoint mock-load-schema-long-time not ported
         // full load.
         let schemas = self.fetch_all_schemas_with_tables(&m).await?;
         let policies = self.fetch_policies(&m).await?;
@@ -317,11 +335,15 @@ impl Domain {
             .init_with_db_infos(schemas, policies, resource_groups, needed_schema_version)
             .await?;
         let is = Arc::new(builder.build(start_ts).await);
-        log::info!(
-            "full load InfoSchema success, isV2: true, currentSchemaVersion: {current_schema_version}, neededSchemaVersion: {needed_schema_version}, elapsed time: {:?}",
-            start_time.elapsed()
+        tidb_base::log_info!(
+            "full load InfoSchema success",
+            "isV2" => true,
+            "currentSchemaVersion" => current_schema_version,
+            "neededSchemaVersion" => needed_schema_version,
+            "elapsed time" => start_time.elapsed(),
         );
 
+        // log-skip: pkg/domain/domain.go:424 only InfoSchema v2 exists in tidb-rs (no v1/v2 switch)
         // isV1V2Switch is never true (module doc): Go's Upsert branch is not reached.
         self.info_cache.insert(Arc::clone(&is), schema_ts);
         Ok((is, false, current_schema_version, None))
@@ -329,8 +351,10 @@ impl Domain {
 
     /// Returns the timestamp of a schema version, which is the commit timestamp of the
     /// schema diff. Go reads it with `store/helper`'s `GetMvccByEncodedKeyWithTS` (TiKV's
-    /// MVCC debug API, D07.1, not ported); without it Go returns "cannot get store from
-    /// domain" (a store that is not a `helper.Storage`), and the caller uses 0.
+    /// MVCC debug API, part of the store driver D07.1, not ported); a store that is not a
+    /// `helper.Storage` gets "cannot get store from domain", and the caller uses 0. Until
+    /// the helper is ported this returns [`tidb_base::blocked::blocked`], which the caller reports
+    /// once ([`Domain::report_schema_ts_blocked`]) and then also uses 0.
     // glue: stub of Domain.getTimestampForSchemaVersionWithNonEmptyDiff, blocked-by:D07.1 (store/helper GetMvccByEncodedKeyWithTS: the commit ts of the schema diff)
     async fn get_timestamp_for_schema_version_with_non_empty_diff(
         &self,
@@ -339,7 +363,29 @@ impl Domain {
         _start_ts: u64,
     ) -> Result<u64, Error> {
         let _ = m.encode_schema_diff_key(version);
-        Err(tidb_base::errors::new("cannot get store from domain"))
+        Err(tidb_base::blocked::blocked(
+            "D07.1",
+            "the commit ts of a schema version (TiKV MVCC API of store/helper)",
+        ))
+    }
+
+    /// Logs once per domain that the commit ts of schema versions is not available: the
+    /// first schema load at startup reaches the stub above, and every later load (once a
+    /// second) would otherwise log the same warning again.
+    // glue: log-once report of the stubbed schema ts lookup above (no Go counterpart)
+    fn report_schema_ts_blocked(&self, err: &Error, version: i64) {
+        if self
+            .schema_ts_blocked_reported
+            .swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
+        tidb_base::log_warn!(
+            "schema version commit ts is not available, logged once",
+            "error" => err,
+            "version" => version,
+            "reason" => "store/helper GetMvccByEncodedKeyWithTS (TiKV MVCC API) is not ported; schema versions are cached with ts 0, so a snapshot read loads its schema again",
+        );
     }
 
     // go: Domain.fetchPolicies L1
@@ -452,7 +498,10 @@ impl Domain {
             let Some(diff) = diff else {
                 // Empty diff means the txn of generating schema version is committed, but the txn of `runDDLJob` is not or fail.
                 // It is safe to skip the empty diff because the infoschema is new enough and consistent.
-                log::info!("diff load InfoSchema get empty schema diff, version: {used_version}");
+                tidb_base::log_info!(
+                    "diff load InfoSchema get empty schema diff",
+                    "version" => used_version,
+                );
                 self.info_cache.insert_empty_schema_version(used_version);
                 continue;
             };
@@ -504,6 +553,9 @@ impl Domain {
     /// Reload reloads InfoSchema at a fresh TSO.
     // go: Domain.Reload L2 (the validator / self-version report are the caller's, module doc)
     pub async fn reload(&self) -> Result<ReloadResult, Error> {
+        // log-skip: pkg/domain/domain.go:837 SchemaSyncer.UpdateSelfVersion is owned by caller
+        // log-skip: pkg/domain/domain.go:845 SchemaValidator.Reset is owned by caller
+        // log-skip: pkg/domain/domain.go:857 schema lease check is owned by caller
         let ver = self
             .store
             .current_version(tidb_kv::txn_scope_var::GlobalTxnScope)
@@ -533,10 +585,11 @@ impl Domain {
         // Updating the self version in etcd (SchemaSyncer.UpdateSelfVersion), resetting the
         // validator on a full load and renewing the lease (SchemaValidator.Update) are the
         // caller's (module doc).
-        log::debug!(
-            "reload InfoSchema, version {}, hit cache {hit_cache}, took {:?}",
-            is.schema_meta_version(),
-            start_time.elapsed()
+        tidb_base::log_debug!(
+            "reload InfoSchema",
+            "version" => is.schema_meta_version(),
+            "hit cache" => hit_cache,
+            "took" => start_time.elapsed(),
         );
         Ok(ReloadResult {
             is,

@@ -1343,17 +1343,18 @@ fn run_winop(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
 }
 
 /// Records in `selectbuild` whose `.vi` differs from Go v8.5.8 strictly because of owner-approved
-/// ruling `R29` (`specs/D04.1-privilege/spec.md` §5.2 item 1, §5.3 item 4): `tidb-rs` registers
+/// ruling `R29` (`specs/D04.1-privilege/spec.md` §5.1–§5.2, §6.1 D1 option A): `tidb-rs` registers
 /// table-read `SelectPriv` (`column = "*"`, error `1142`) at `build_data_source` and removes Go's
 /// case-sensitive `collectPrivsForCount` patch. Pinned so any unexpected drift fails CI.
 const EXPECTED_R29_NORMALIZED: usize = 2321;
 
 /// Checks whether `got` equals Go's `out` once the exact `R29` table-read `("*", 1142)` entries
 /// for the statement's resolved base tables (including those folded into `TableDual` by
-/// `WHERE 0` / `LIMIT 0`, per specs/D04.1-privilege/spec.md §5.1) and Go's superseded
-/// `collectPrivsForCount` `"*"` entries are accounted for. Returns `true` only when every
-/// resolved base table actually emitted its exact `R29` entry in `got["vi"]` and every other
-/// field (`plan`, `plan_id`, `col_id`, `opt_flag`, remaining `vi`, `w`) matches Go byte-for-byte.
+/// `WHERE 0` / `LIMIT 0`, per specs/D04.1-privilege/spec.md §5.1), Go's superseded
+/// `collectPrivsForCount` `"*"` entries, and `R32` `_tidb_rowid` full-table `VisitInfo` entries
+/// are accounted for. Returns `true` only when every resolved base table actually emitted its
+/// exact `R29` entry in `got["vi"]` and every other field (`plan`, `plan_id`, `col_id`,
+/// `opt_flag`, remaining `vi`, `w`) matches Go byte-for-byte.
 fn matches_with_r29_vi_normalization(
     out: &Value,
     got: &Value,
@@ -1394,10 +1395,30 @@ fn matches_with_r29_vi_normalization(
         return false;
     }
 
+    // R32: `_tidb_rowid` references now register full-table SelectPriv (`column = ""`, 1143)
+    // where Go v8.5.8 emitted none.
+    let r32_rowid_entries: Vec<Value> = resolved_tables
+        .iter()
+        .map(|(db, tbl)| {
+            json!([
+                4,
+                db,
+                tbl,
+                "",
+                format!(
+                    "[planner:1143]SELECT command denied to user ''@'' for column '_tidb_rowid' in table '{tbl}'"
+                ),
+                1143
+            ])
+        })
+        .collect();
+
     let mut rem_got_vi = Vec::with_capacity(got_vi.len());
     for entry in got_vi {
         if let Some(pos) = expected_entries.iter().position(|e| e == entry) {
             expected_entries.remove(pos);
+        } else if r32_rowid_entries.contains(entry) {
+            // R32 `_tidb_rowid` entry (not emitted by Go v8.5.8).
         } else {
             rem_got_vi.push(entry.clone());
         }

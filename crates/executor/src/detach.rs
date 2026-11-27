@@ -12,7 +12,10 @@ use std::sync::Arc;
 
 use tidb_sessionctx::exprctx::BuildContextRef;
 
-use crate::distsql::{IndexReaderExecutor, IndexReaderExecutorContext};
+use crate::distsql::{
+    IndexLookUpExecutor, IndexLookUpExecutorContext, IndexReaderExecutor,
+    IndexReaderExecutorContext,
+};
 use crate::internal::exec::executor::Executor;
 use crate::table_reader::{TableReaderExecutor, TableReaderExecutorContext};
 
@@ -74,11 +77,16 @@ pub fn index_reader_executor_context_detach(
     }
 }
 
-/// `indexLookUpExecutorContext.Detach`: the index lookup's context (D12.1).
-// go: indexLookUpExecutorContext.Detach L2 (boundary stub, blocked-by:D12.1)
-pub fn index_look_up_executor_context_detach() -> Option<()> {
-    // glue: stub, blocked-by:D12.1 (IndexLookUpExecutor)
-    None
+/// `indexLookUpExecutorContext.Detach`: detaches the index lookup's execution context from
+/// the session. Under N2 (`M-CTX`) the expression context is already a static snapshot, so
+/// this detaches `table_ctx` and returns the detached context cleanly (spec §14 item 6).
+// go: indexLookUpExecutorContext.Detach L2 (N2: ExprContext is already static; returns detached context cleanly per spec §14.6)
+pub fn index_look_up_executor_context_detach(
+    ilu_ctx: &IndexLookUpExecutorContext,
+) -> IndexLookUpExecutorContext {
+    let mut new_ctx = ilu_ctx.clone();
+    new_ctx.table_ctx = table_reader_executor_context_detach(&ilu_ctx.table_ctx);
+    new_ctx
 }
 
 /// `projectionExecutorContext.Detach` (D12.2, VS1-35).
@@ -176,11 +184,62 @@ pub fn index_reader_executor_detach(e: &IndexReaderExecutor) -> Option<Box<dyn E
     Some(Box::new(new_exec))
 }
 
-/// `IndexLookUpExecutor.Detach` (D12.1).
-// go: IndexLookUpExecutor.Detach L2 (boundary stub, blocked-by:D12.1)
-pub fn index_look_up_executor_detach() -> Option<Box<dyn Executor>> {
-    // glue: stub, blocked-by:D12.1 (IndexLookUpExecutor)
-    None
+/// `IndexLookUpExecutor.Detach`: detaches the index lookup executor from the session context.
+// go: IndexLookUpExecutor.Detach L1
+pub fn index_look_up_executor_detach(e: &IndexLookUpExecutor) -> Option<Box<dyn Executor>> {
+    let new_exec = IndexLookUpExecutor {
+        ctx: index_look_up_executor_context_detach(&e.ctx),
+        base: e.base.clone_without_children(),
+        index_usage_reporter: e.index_usage_reporter.clone(),
+        table: e.table.as_ref().map(Arc::clone),
+        index: Arc::clone(&e.index),
+        ranges: e.ranges.clone(),
+        grouped_ranges: e.grouped_ranges.clone(),
+        dag_pb: e.dag_pb.clone(),
+        start_ts: e.start_ts,
+        txn_scope: e.txn_scope.clone(),
+        read_replica_scope: e.read_replica_scope.clone(),
+        is_staleness: e.is_staleness,
+        handle_idx: e.handle_idx.clone(),
+        handle_cols: e.handle_cols.clone(),
+        primary_key_index: e.primary_key_index.as_ref().map(Arc::clone),
+        table_request: e.table_request.clone(),
+        columns: e.columns.clone(),
+        partition_id_map: e.partition_id_map.clone(),
+        data_reader_builder: e.data_reader_builder.clone(),
+        idx_net_data_size: e.idx_net_data_size,
+        avg_row_size: e.avg_row_size,
+        partition_table_mode: e.partition_table_mode,
+        pruned_partitions: e.pruned_partitions.clone(),
+        partition_range_map: e.partition_range_map.clone(),
+        finished_tx: None,
+        result_rx: None,
+        result_curr: None,
+        idx_worker_handle: None,
+        tbl_worker_handles: Vec::new(),
+        mem_tracker: e.mem_tracker.as_ref().map(Arc::clone),
+        check_index_value: e.check_index_value.clone(),
+        grouped_kv_ranges: e.grouped_kv_ranges.clone(),
+        worker_started: false,
+        by_items: e.by_items.clone(),
+        keep_order: e.keep_order,
+        desc: e.desc,
+        index_paging: e.index_paging,
+        cor_col_in_idx_side: e.cor_col_in_idx_side,
+        cor_col_in_tbl_side: e.cor_col_in_tbl_side,
+        cor_col_in_access: e.cor_col_in_access,
+        idx_plans: e.idx_plans.clone(),
+        idx_plan_un_nature_orders: e.idx_plan_un_nature_orders.clone(),
+        tbl_plans: e.tbl_plans.clone(),
+        idx_cols: e.idx_cols.clone(),
+        col_lens: e.col_lens.clone(),
+        pushed_limit: e.pushed_limit,
+        stats: None,
+        select_result_hook: e.select_result_hook.clone(),
+        dummy: e.dummy,
+        index_look_up_push_down: e.index_look_up_push_down,
+    };
+    Some(Box::new(new_exec))
 }
 
 /// `ProjectionExec.Detach` (D12.2, VS1-35).

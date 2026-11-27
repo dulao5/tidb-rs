@@ -18,7 +18,6 @@ tidb-sessionctx = { workspace = true }
 tidb-infoschema = { workspace = true }
 # BoxFuture: the providers wait for TSO futures (N3: async).
 futures = { workspace = true }
-log = "0.4"
 
 [dev-dependencies]
 futures = { workspace = true }

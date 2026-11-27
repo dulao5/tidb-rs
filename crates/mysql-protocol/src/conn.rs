@@ -3,13 +3,12 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use futures::FutureExt;
-
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::auth::{Credential, generate_salt};
 use crate::codec::{Reader, put_lenenc_int, put_lenenc_str};
@@ -52,14 +51,48 @@ impl From<SqlError> for ConnError {
 /// State of a prepared statement kept by the protocol layer.
 #[derive(Debug)]
 struct StmtState {
+    sql: String,
     param_count: u16,
     /// Parameter types from the last execute that sent them (`new-params-bound-flag`).
     param_types: Vec<u8>,
     /// Data received with `COM_STMT_SEND_LONG_DATA`, per parameter.
     long_data: Vec<Option<Vec<u8>>>,
+    /// Bound parameters from the most recent `COM_STMT_EXECUTE` (used by `COM_STMT_FETCH` logging).
+    last_params: Vec<crate::params::Param>,
+}
+
+/// Shared connection status inspected by [`crate::Server::serve`] during graceful drain
+/// (Go `clientConn.status` + `SessionVars.InTxn()`, `server.go:1031`).
+pub(crate) struct ConnStatus {
+    /// True while awaiting the next client packet (`connStatusReading`).
+    idle_reading: AtomicBool,
+    /// True while the connection has an open explicit transaction (`SERVER_STATUS_IN_TRANS`).
+    in_txn: AtomicBool,
+}
+
+impl ConnStatus {
+    pub(crate) fn new() -> Self {
+        Self {
+            idle_reading: AtomicBool::new(false),
+            in_txn: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn set_reading(&self, reading: bool, in_txn: bool) {
+        self.in_txn.store(in_txn, Ordering::Release);
+        self.idle_reading.store(reading, Ordering::Release);
+    }
+
+    /// True if graceful drain must wait for this connection (dispatching a command OR inside
+    /// an explicit transaction). Idle connections outside a transaction are skipped immediately,
+    /// matching Go `server.go:1031`.
+    pub(crate) fn needs_drain_wait(&self) -> bool {
+        !(self.idle_reading.load(Ordering::Acquire) && !self.in_txn.load(Ordering::Acquire))
+    }
 }
 
 /// Runs a connection to completion. Errors are logged, never propagated.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run<S, F>(
     stream: S,
     peer: String,
@@ -68,6 +101,7 @@ pub(crate) async fn run<S, F>(
     config: &ServerConfig,
     factory: &F,
     admission: Option<tidb_runtime::Admission>,
+    status: Arc<ConnStatus>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
     F: SessionFactory,
@@ -77,18 +111,22 @@ pub(crate) async fn run<S, F>(
     let accepted = Instant::now();
     let io = PacketIo::new(MaybeTls::Plain(stream), config.max_allowed_packet);
     let mut conn = match handshake(io, &peer, connection_id, config, factory).await {
-        Ok((mut io, Some((handler, capability)))) => {
+        Ok((mut io, Some((handler, capability, user)))) => {
             io.flush_counts();
             Conn {
                 io,
                 capability,
                 handler,
+                peer: peer.clone(),
+                user,
+                last_sql: String::new(),
                 stmts: HashMap::new(),
                 next_stmt_id: 1,
                 started,
                 last_active: accepted,
                 admission,
                 token: None,
+                status,
             }
         }
         Ok((_, None)) => return,
@@ -106,15 +144,64 @@ pub(crate) async fn run<S, F>(
     debug!(connection_id, "connection closed");
 }
 
-/// The text of a panic payload (Go's `fmt.Errorf("%v", r)`).
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_owned()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "panic".to_owned()
+/// Default `QueryLogMaxLen` matching Go `executor.FormatSQL` (4096 bytes).
+pub const QUERY_LOG_MAX_LEN: usize = 4096;
+
+/// Live `tidb_query_log_max_len` read from `tidb_sessionctx::variable::tidb_vars::QueryLogMaxLen`.
+pub fn current_query_log_max_len() -> usize {
+    let v = tidb_sessionctx::variable::tidb_vars::QueryLogMaxLen.load(Ordering::SeqCst);
+    if v <= 0 { 0 } else { v as usize }
+}
+
+/// Format SQL for `command dispatched failed` (Go `executor.FormatSQL` + `QueryReplacer`):
+/// replaces `\r`, `\n`, `\t` with single spaces `' '` and truncates at `max_len` with
+/// `"(len:<total>)"` (no extra space before `(len:...)`, matching Go `adapter.go:1498`).
+// glue: legacy protocol-layer FormatSQL mirror (tidb-executor carries the layered FormatSQL)
+pub fn format_sql_for_conn_log(sql: &str, max_len: usize) -> String {
+    let mut folded = String::with_capacity(sql.len());
+    for ch in sql.chars() {
+        match ch {
+            '\r' | '\n' | '\t' => folded.push(' '),
+            c => folded.push(c),
+        }
     }
+    if max_len == 0 || folded.len() <= max_len {
+        return folded;
+    }
+    let mut end = max_len;
+    while end > 0 && !folded.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}(len:{})", &folded[..end], folded.len())
+}
+
+/// Format an error for the `err` field of `command dispatched failed` (Go `conn.go:1241-1257`
+/// `errStrForLog`):
+/// - When `redact_mode != "OFF"` and error is `ErrParse` (1064): fixed redaction message.
+/// - For `ErrKeyExists` (1062), `ErrParse` (1064), or `ErrTableNotExists` (1146): message only,
+///   no stack trace.
+/// - For all other errors: `errors.ErrorStack(err)` (full stack regardless of
+///   `disable-error-stack`).
+// go: errStrForLog L1
+pub fn err_str_for_log(err: &SqlError, redact_mode: &str) -> Vec<u8> {
+    const ERR_KEY_EXISTS: u16 = 1062;
+    const ERR_PARSE: u16 = 1064;
+    const ERR_TABLE_NOT_EXISTS: u16 = 1146;
+
+    if redact_mode != tidb_base::errors::RedactLogDisable && err.code == ERR_PARSE {
+        return b"fail to parse SQL, and must redact the whole error when enable log redaction"
+            .to_vec();
+    }
+    if matches!(err.code, ERR_KEY_EXISTS | ERR_PARSE | ERR_TABLE_NOT_EXISTS) {
+        if let Some(src) = &err.source_err {
+            return src.error();
+        }
+        return err.message.as_bytes().to_vec();
+    }
+    if let Some(src) = &err.source_err {
+        return src.error_stack();
+    }
+    err.message.as_bytes().to_vec()
 }
 
 /// `tidb_server_connections` for one connection: up when created, down when dropped.
@@ -151,8 +238,8 @@ async fn write_err<S: AsyncRead + AsyncWrite + Unpin>(
     io.flush().await
 }
 
-/// The session and effective capability flags of an authenticated connection.
-type Accepted<F> = Option<(<F as SessionFactory>::Session, u32)>;
+/// The session, effective capability flags, and authenticated username.
+type Accepted<F> = Option<(<F as SessionFactory>::Session, u32, String)>;
 
 /// Performs the connection phase, including the TLS upgrade after an SSLRequest. Returns the
 /// (possibly upgraded) packet stream, and `None` after an orderly rejection (an ERR packet was
@@ -303,12 +390,21 @@ where
     }
 
     let host = peer_host(peer);
-    let verified = match factory.lookup_user(&resp.user, host).await {
-        Some(cred @ Credential::NativePassword(_)) => cred.verify_native(salt, &auth),
+    let account = factory.lookup_account(&resp.user, &host).await;
+    let verified = match &account {
+        Some(acc) => match &acc.credential {
+            cred @ Credential::NativePassword(_) => cred.verify_native(salt, &auth),
+        },
         None => false,
     };
     if !verified {
-        let e = SqlError::access_denied(&resp.user, host, !auth.is_empty());
+        let e = SqlError::access_denied(&resp.user, &host, !auth.is_empty());
+        write_err(io, capability, &e).await.map_err(io_err)?;
+        return Ok(None);
+    }
+    let account = account.expect("verified implies Some");
+    if account.account_locked {
+        let e = SqlError::account_locked(&resp.user, &host);
         write_err(io, capability, &e).await.map_err(io_err)?;
         return Ok(None);
     }
@@ -317,6 +413,8 @@ where
         connection_id,
         user: resp.user.clone(),
         peer: peer.to_string(),
+        auth_user: account.auth_user,
+        auth_host: account.auth_host,
         database: resp.database.clone(),
         collation: resp.collation,
         capability,
@@ -341,14 +439,244 @@ where
     ok.extend_from_slice(&[0, 0]);
     io.write_packet(&ok).await.map_err(io_err)?;
     io.flush().await.map_err(io_err)?;
-    Ok(Some((handler, capability)))
+    Ok(Some((handler, capability, resp.user)))
 }
 
-/// Host part of an `ip:port` peer address.
-fn peer_host(peer: &str) -> &str {
-    match peer.rsplit_once(':') {
+/// Go `pkg/types/datum.go:2445` `isPrintable`: valid UTF-8 with no Unicode control characters.
+fn is_printable_datum_bytes(bytes: &[u8]) -> Option<&str> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    if s.chars().any(char::is_control) {
+        return None;
+    }
+    Some(s)
+}
+
+/// Format bound `COM_STMT_EXECUTE` / `COM_STMT_FETCH` parameter matching Go
+/// `pkg/types/datum.go:2467-2525` (`datumsToString` with `handleSpecialValue=true, binaryAsHex=true`).
+fn format_param_value(p: &crate::params::Param) -> String {
+    use std::fmt::Write as _;
+
+    use crate::value::Value;
+    const LOG_DATUM_LEN: usize = 2048;
+
+    match &p.value {
+        Value::Null => "NULL".to_owned(),
+        Value::Bytes(b) => {
+            let original_len = (b.len() > LOG_DATUM_LEN).then_some(b.len());
+            let slice = if b.len() > LOG_DATUM_LEN {
+                &b[..LOG_DATUM_LEN]
+            } else {
+                b.as_slice()
+            };
+            let mut out = if let Some(s) = is_printable_datum_bytes(slice) {
+                let mut q = String::with_capacity(s.len() + 2);
+                q.push('"');
+                q.push_str(s);
+                q.push('"');
+                q
+            } else {
+                let mut h = String::with_capacity(2 + slice.len() * 2);
+                h.push_str("0x");
+                for byte in slice {
+                    let _ = write!(&mut h, "{byte:02X}");
+                }
+                h
+            };
+            if let Some(orig) = original_len {
+                let _ = write!(&mut out, " len({orig})");
+            }
+            out
+        }
+        other => {
+            let s = match other {
+                Value::Int(i) => i.to_string(),
+                Value::UInt(u) => u.to_string(),
+                Value::Float(f) => f.to_string(),
+                Value::Double(f) => f.to_string(),
+                Value::Decimal(s) => s.clone(),
+                Value::DateTime(dt) => {
+                    if dt.microsecond > 0 {
+                        format!(
+                            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
+                            dt.year,
+                            dt.month,
+                            dt.day,
+                            dt.hour,
+                            dt.minute,
+                            dt.second,
+                            dt.microsecond
+                        )
+                    } else {
+                        format!(
+                            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                            dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
+                        )
+                    }
+                }
+                Value::Time(d) => {
+                    let sign = if d.negative { "-" } else { "" };
+                    if d.microseconds > 0 {
+                        format!(
+                            "{sign}{:02}:{:02}:{:02}.{:06}",
+                            d.hours, d.minutes, d.seconds, d.microseconds
+                        )
+                    } else {
+                        format!("{sign}{:02}:{:02}:{:02}", d.hours, d.minutes, d.seconds)
+                    }
+                }
+                Value::Null | Value::Bytes(_) => unreachable!(),
+            };
+            if s.len() > LOG_DATUM_LEN {
+                let orig = s.len();
+                let mut trunc =
+                    String::from_utf8_lossy(&s.as_bytes()[..LOG_DATUM_LEN]).into_owned();
+                let _ = write!(&mut trunc, " len({orig})");
+                trunc
+            } else {
+                s
+            }
+        }
+    }
+}
+
+/// Format a `COM_STMT_EXECUTE` / `COM_STMT_FETCH` statement + parameters for
+/// `command dispatched failed` (Go `conn_stmt.go:660-670` `preparedStmt2String` + `executor.FormatSQL`).
+pub fn format_stmt_execute_sql_for_log(
+    sql: &str,
+    params: &[crate::params::Param],
+    redact_mode: &str,
+) -> String {
+    let mut out = tidb_parser::normalize(sql, redact_mode);
+    if redact_mode != tidb_base::errors::RedactLogEnable && !params.is_empty() {
+        let formatted = if params.len() == 1 {
+            format!(" [arguments: {}]", format_param_value(&params[0]))
+        } else {
+            let joined: Vec<String> = params.iter().map(format_param_value).collect();
+            format!(" [arguments: ({})]", joined.join(", "))
+        };
+        out.push_str(&tidb_base::redact::string(redact_mode, &formatted));
+    }
+    format_sql_for_conn_log(&out, current_query_log_max_len())
+}
+
+/// Format the last command body for `command dispatched failed` (Go `conn.go:2742-2768`),
+/// normalizing SQL via `tidb_parser::normalize` when `redact_mode != "OFF"`.
+fn format_cmd_sql_for_log(
+    cmd: u8,
+    body: &[u8],
+    stmts: &HashMap<u32, StmtState>,
+    redact_mode: &str,
+) -> String {
+    let max_len = current_query_log_max_len();
+    match cmd {
+        command::QUERY | command::STMT_PREPARE => {
+            let raw = String::from_utf8_lossy(body);
+            // Strip at most one trailing NUL (Go `string(data[:len-1])` when NUL-terminated).
+            let raw = raw.strip_suffix('\0').unwrap_or(&raw);
+            let normalized = tidb_parser::normalize(raw, redact_mode);
+            format_sql_for_conn_log(&normalized, max_len)
+        }
+        command::STMT_EXECUTE | command::STMT_FETCH if body.len() >= 4 => {
+            let id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+            if let Some(st) = stmts.get(&id) {
+                format_stmt_execute_sql_for_log(&st.sql, &st.last_params, redact_mode)
+            } else {
+                tidb_base::mysql::Command2Str
+                    .get(&cmd)
+                    .copied()
+                    .unwrap_or("Execute")
+                    .to_owned()
+            }
+        }
+        command::INIT_DB => format!("Use {}", String::from_utf8_lossy(body)),
+        command::FIELD_LIST => format!("ListFields {}", String::from_utf8_lossy(body)),
+        command::STMT_CLOSE | command::STMT_RESET if body.len() >= 4 => {
+            let id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+            let name = tidb_base::mysql::Command2Str
+                .get(&cmd)
+                .copied()
+                .unwrap_or("Stmt");
+            format!("{name} {id}")
+        }
+        _ => tidb_base::mysql::Command2Str
+            .get(&cmd)
+            .copied()
+            .map(str::to_owned)
+            .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned()),
+    }
+}
+
+/// Host part of an `ip:port` peer address, normalizing IPv4-mapped IPv6 (`::ffff:a.b.c.d`)
+/// to dotted IPv4 so dual-stack `::` listeners match IPv4 host grants like `'10.%'`.
+fn peer_host(peer: &str) -> std::borrow::Cow<'_, str> {
+    let raw = match peer.rsplit_once(':') {
         Some((host, _)) => host.trim_start_matches('[').trim_end_matches(']'),
         None => peer,
+    };
+    if let Ok(std::net::IpAddr::V6(v6)) = raw.parse::<std::net::IpAddr>()
+        && let Some(v4) = v6.to_ipv4_mapped()
+    {
+        return std::borrow::Cow::Owned(v4.to_string());
+    }
+    std::borrow::Cow::Borrowed(raw)
+}
+
+#[cfg(test)]
+mod log_format_tests {
+    use super::*;
+
+    #[test]
+    fn format_sql_folds_whitespace_and_truncates() {
+        assert_eq!(
+            format_sql_for_conn_log("SELECT\n  1,\r\n\tFROM t", 4096),
+            "SELECT   1,   FROM t"
+        );
+        assert_eq!(
+            format_sql_for_conn_log("SELECT 1234567890", 10),
+            "SELECT 123(len:17)"
+        );
+    }
+
+    #[test]
+    fn err_str_for_log_matches_go_matrix() {
+        // 1. Table not exists (1146): no stack even when source_err carries stack.
+        let tbl_src = tidb_base::terror::ClassSchema
+            .new_std(tidb_base::errno::ErrNoSuchTable)
+            .gen_with_stack_by_args(tidb_base::go_args!["test", "no_such_table"]);
+        assert!(tbl_src.has_stack());
+        let tbl_err = SqlError::new(1146, "Table 'test.no_such_table' doesn't exist")
+            .with_source_err(tbl_src.clone());
+        assert_eq!(
+            err_str_for_log(&tbl_err, tidb_base::errors::RedactLogDisable),
+            tbl_src.error()
+        );
+
+        // 2. Parse error (1064): redacted fixed message when redact != OFF; no stack when OFF.
+        let parse_src = tidb_base::terror::ClassParser
+            .new_std(tidb_base::errno::ErrParse)
+            .gen_with_stack_by_args(tidb_base::go_args!["syntax", 1]);
+        let parse_err = SqlError::new(1064, "syntax error").with_source_err(parse_src.clone());
+        assert_eq!(
+            err_str_for_log(&parse_err, tidb_base::errors::RedactLogDisable),
+            parse_src.error()
+        );
+        assert_eq!(
+            err_str_for_log(&parse_err, tidb_base::errors::RedactLogEnable),
+            b"fail to parse SQL, and must redact the whole error when enable log redaction"
+        );
+
+        // 3. Overflow error (1690): includes stack trace from error_stack().
+        let ovf_src = tidb_base::terror::ClassTypes
+            .new_std(tidb_base::errno::ErrDataOutOfRange)
+            .gen_with_stack_by_args(tidb_base::go_args!["BIGINT", "(9223372036854775807 + 1)"]);
+        let ovf_err =
+            SqlError::new(1690, "BIGINT value is out of range").with_source_err(ovf_src.clone());
+        let got = err_str_for_log(&ovf_err, tidb_base::errors::RedactLogDisable);
+        assert_eq!(got, ovf_src.error_stack());
+        assert!(
+            got.len() > ovf_src.error().len(),
+            "must include stack trace"
+        );
     }
 }
 
@@ -356,6 +684,9 @@ struct Conn<S, H> {
     io: PacketIo<S>,
     capability: u32,
     handler: H,
+    peer: String,
+    user: String,
+    last_sql: String,
     stmts: HashMap<u32, StmtState>,
     next_stmt_id: u32,
     /// When the server started (for COM_STATISTICS uptime).
@@ -368,14 +699,21 @@ struct Conn<S, H> {
     admission: Option<tidb_runtime::Admission>,
     /// The token of the command in progress (Go: taken in `dispatch`, put back in its defer).
     token: Option<crate::admission::HeldToken>,
+    /// Shared status for graceful drain (reading vs dispatching, in-txn vs autocommit).
+    status: Arc<ConnStatus>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
     async fn command_loop(&mut self, connection_id: u64) {
         loop {
             self.io.reset_sequence();
+            let in_txn = (self.handler.status_flags() & crate::constants::status::IN_TRANS) != 0;
+            self.status.set_reading(true, in_txn);
             let data = match self.io.read_packet().await {
-                Ok(d) => d,
+                Ok(d) => {
+                    self.status.set_reading(false, in_txn);
+                    d
+                }
                 Err(PacketError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
                     // Go: any read failure, a client closing without COM_QUIT included.
                     tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
@@ -391,7 +729,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                     return;
                 }
                 Err(e) => {
-                    warn!(connection_id, error = %e, "read packet failed, closing connection");
+                    let err_str = e.to_string();
+                    if !err_str.contains("use of closed network connection") {
+                        tidb_base::log_warn!(
+                            "read packet failed, close this connection",
+                            "conn" => connection_id,
+                            "session_alias" => self.handler.session_alias(),
+                            "error" => &err_str,
+                        );
+                    }
                     tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
                     return;
                 }
@@ -411,19 +757,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                     return;
                 }
                 Some((&cmd, body)) => {
+                    self.last_sql =
+                        format_cmd_sql_for_log(cmd, body, &self.stmts, self.handler.redact_mode());
                     // Go `clientConn.Run`'s deferred recover: a panic while running a command
                     // is logged, written to the client as an error, counted
                     // (`tidb_server_panic_total{type="session"}`), and the connection is
                     // closed. The session is dropped with the connection, so no state of the
                     // half-run command survives.
-                    match AssertUnwindSafe(self.dispatch(cmd, body))
-                        .catch_unwind()
+                    match tidb_base::panic_guard::catch_unwind_future(self.dispatch(cmd, body))
                         .await
                     {
                         Ok(r) => r,
-                        Err(payload) => {
-                            let msg = panic_message(payload.as_ref());
-                            tracing::error!(connection_id, err = %msg, "connection running loop panic");
+                        Err((payload, bt)) => {
+                            let msg =
+                                tidb_base::panic_guard::panic_payload_message(payload.as_ref());
+                            let stack = bt.unwrap_or_default();
+                            tidb_base::log_error!(
+                                "connection running loop panic",
+                                "conn" => connection_id,
+                                "session_alias" => self.handler.session_alias(),
+                                "lastSQL" => &self.last_sql,
+                                "err" => &msg,
+                                "stack" => &stack,
+                            );
                             let e = SqlError::unknown(msg);
                             let _ = write_err(&mut self.io, self.capability, &e).await;
                             tidb_metrics::panicked(tidb_metrics::PANIC_SESSION);
@@ -437,13 +793,82 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             let (error, keep_going) = match result {
                 Ok(()) => (None, true),
                 Err(ConnError::Sql(e)) => {
-                    debug!(connection_id, error = %e, "command failed");
+                    // Go conn.go:1194-1201: ErrResultUndetermined closes connection; ErrCritical
+                    // fatals the server.
+                    let mut fatal_close = false;
+                    if let Some(src) = &e.source_err {
+                        if tidb_base::terror::ErrCritical.equal(src) {
+                            tidb_base::log_fatal!("critical error, stop the server", "error" => src);
+                            let _ = tidb_base::structured_log::logger().sync();
+                            std::process::exit(1);
+                        }
+                        if tidb_base::terror::ErrResultUndetermined.equal(src) {
+                            tidb_base::log_warn!(
+                                "result undetermined, close this connection",
+                                "error" => src,
+                            );
+                            fatal_close = true;
+                        }
+                    }
+                    // Go conn.go:1212-1230: ErrLockAcquireFailAndNoWaitSet (3572) logs DEBUG
+                    // and skips `command dispatched failed`; all other errors log the exact
+                    // 9-field INFO `command dispatched failed`.
+                    if !fatal_close && e.code == 3572 {
+                        if let Some(src) = &e.source_err {
+                            tidb_base::log_debug!(
+                                "Expected error for FOR UPDATE NOWAIT",
+                                "error" => src,
+                            );
+                        } else {
+                            tidb_base::log_debug!(
+                                "Expected error for FOR UPDATE NOWAIT",
+                                "error" => &e.message,
+                            );
+                        }
+                    } else if !fatal_close {
+                        let status_flags = self.handler.status_flags();
+                        let in_txn =
+                            u8::from((status_flags & crate::constants::status::IN_TRANS) != 0);
+                        let autocommit =
+                            u8::from((status_flags & crate::constants::status::AUTOCOMMIT) != 0);
+                        let conn_info = format!(
+                            "id:{connection_id}, addr:{} status:{status_flags:b}, collation:{}, user:{}",
+                            self.peer,
+                            self.handler.collation_name(),
+                            self.user,
+                        );
+                        let cmd_byte = cmd.unwrap_or(command::SLEEP);
+                        let cmd_name = tidb_base::mysql::Command2Str
+                            .get(&cmd_byte)
+                            .copied()
+                            .unwrap_or("Unknown");
+                        let status_str = format!("inTxn:{in_txn}, autocommit:{autocommit}");
+                        let err_bytes = err_str_for_log(&e, self.handler.redact_mode());
+                        tidb_base::log_info!(
+                            "command dispatched failed",
+                            "conn" => connection_id,
+                            "session_alias" => self.handler.session_alias(),
+                            "connInfo" => &conn_info,
+                            "command" => cmd_name,
+                            "status" => &status_str,
+                            "sql" => &self.last_sql,
+                            "txn_mode" => self.handler.txn_mode(),
+                            "timestamp" => self.handler.txn_timestamp(),
+                            "err" => err_bytes.as_slice(),
+                        );
+                    }
                     let label = tidb_metrics::error_label(e.code);
-                    match write_err(&mut self.io, self.capability, &e).await {
-                        Ok(()) => (Some(label), true),
-                        Err(e) => {
-                            debug!(connection_id, error = %e, "write error packet failed");
-                            (Some(label), false)
+                    if fatal_close {
+                        // Go conn.go:1194-1197: on ErrResultUndetermined, close the connection
+                        // immediately without sending an error packet to the client.
+                        (Some(label), false)
+                    } else {
+                        match write_err(&mut self.io, self.capability, &e).await {
+                            Ok(()) => (Some(label), true),
+                            Err(e) => {
+                                debug!(connection_id, error = %e, "write error packet failed");
+                                (Some(label), false)
+                            }
                         }
                     }
                 }
@@ -515,6 +940,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                     .get_mut(&id)
                     .ok_or_else(|| SqlError::unknown_stmt(id, "stmt_reset"))?;
                 stmt.long_data.iter_mut().for_each(|d| *d = None);
+                stmt.last_params.clear();
                 self.write_ok(&OkInfo::default()).await
             }
             command::SET_OPTION => match Reader::new(body).u16()? {
@@ -550,9 +976,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
         self.stmts.insert(
             id,
             StmtState {
+                sql: sql.to_owned(),
                 param_count,
                 param_types: Vec::new(),
                 long_data: vec![None; usize::from(param_count)],
+                last_params: Vec::new(),
             },
         );
 
@@ -648,6 +1076,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
         } else {
             Vec::new()
         };
+        let stmt_sql = stmt.sql.clone();
+        stmt.last_params = params.clone();
+        self.last_sql =
+            format_stmt_execute_sql_for_log(&stmt_sql, &params, self.handler.redact_mode());
         self.handler.execute_flags(id, flags);
         self.handler.execute_raw_params(id, raw);
         let resp = self.handler.execute(id, params).await;
@@ -854,6 +1286,8 @@ mod tests {
     fn peer_host_strips_port() {
         assert_eq!(peer_host("127.0.0.1:5000"), "127.0.0.1");
         assert_eq!(peer_host("[::1]:5000"), "::1");
+        assert_eq!(peer_host("[::ffff:10.0.0.5]:5000"), "10.0.0.5");
+        assert_eq!(peer_host("[::FFFF:127.0.0.1]:5000"), "127.0.0.1");
         assert_eq!(peer_host("local"), "local");
     }
 

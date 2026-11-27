@@ -20,7 +20,7 @@ use crate::driver::error::{ClientGoError, TiKVError, client_go_error, to_tidb_er
 // go: genKeyExistsError L1
 pub fn gen_key_exists_error(name: &str, value: &[u8], err: Option<&Error>) -> Error {
     if let Some(err) = err {
-        log::info!("extractKeyExistsErr meets error: {err}");
+        tidb_base::log_info!("extractKeyExistsErr meets error", "error" => err);
     }
     ErrKeyExists.fast_gen_by_args(vec![
         Arg::go_string(value.to_vec()),
@@ -127,6 +127,12 @@ fn new_write_conflict_error(conflict: Option<&kvrpcpb::WriteConflict>) -> Error 
 
 // go: prettyWriteKey L1 [M-BYTES]
 fn pretty_write_key(buf_table_id: &mut Vec<u8>, buf_rest: &mut Vec<u8>, key: &[u8]) {
+    // log-skip: pkg/store/driver/txn/error.go:193 Vec::extend_from_slice is infallible (Go fmt.Fprintf on bytes.Buffer)
+    // log-skip: pkg/store/driver/txn/error.go:197 Vec::extend_from_slice is infallible
+    // log-skip: pkg/store/driver/txn/error.go:202 Vec::extend_from_slice is infallible
+    // log-skip: pkg/store/driver/txn/error.go:213 Vec::extend_from_slice is infallible
+    // log-skip: pkg/store/driver/txn/error.go:217 Vec::extend_from_slice is infallible
+    // log-skip: pkg/store/driver/txn/error.go:226,233 Vec::extend_from_slice is infallible
     if let Ok((table_id, index_id, index_values)) = tablecodec::decode_index_key(key) {
         buf_table_id.extend_from_slice(format!("{{tableID={table_id}").as_bytes());
         buf_rest.extend_from_slice(format!(", indexID={index_id}, indexValues={{").as_bytes());

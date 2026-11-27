@@ -189,13 +189,52 @@ pub(crate) fn eval_one_vec(
             if result.is_null(i) {
                 buf.append_null();
             } else if tp == mysql::TypeEnum {
-                // Go logs the parse error at debug level and appends the zero Enum it returns.
-                let e = parse_enum_name(elems, result.get_string(i), ft.get_collate())
-                    .unwrap_or_default();
+                let name = result.get_string(i);
+                let e = match parse_enum_name(elems, name, ft.get_collate()) {
+                    Ok(e) => e,
+                    Err(err) => {
+                        if tidb_base::structured_log::logger().enabled(
+                            tidb_base::structured_log::LogTarget::Main,
+                            tidb_base::structured_log::LogLevel::Debug,
+                        ) {
+                            let valid_owned: Vec<std::borrow::Cow<'_, str>> =
+                                elems.iter().map(|x| String::from_utf8_lossy(x)).collect();
+                            let valid: Vec<&str> =
+                                valid_owned.iter().map(std::borrow::Cow::as_ref).collect();
+                            tidb_base::log_debug!(
+                                "Wrong enum name parsed during evaluation",
+                                "The name to be parsed in the ENUM" => name,
+                                "The valid names in the ENUM" => valid.as_slice(),
+                                "error" => &err,
+                            );
+                        }
+                        Default::default()
+                    }
+                };
                 buf.append_enum(&e);
             } else {
-                let s = parse_set_name(elems, result.get_string(i), ft.get_collate())
-                    .unwrap_or_default();
+                let name = result.get_string(i);
+                let s = match parse_set_name(elems, name, ft.get_collate()) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        if tidb_base::structured_log::logger().enabled(
+                            tidb_base::structured_log::LogTarget::Main,
+                            tidb_base::structured_log::LogLevel::Debug,
+                        ) {
+                            let valid_owned: Vec<std::borrow::Cow<'_, str>> =
+                                elems.iter().map(|x| String::from_utf8_lossy(x)).collect();
+                            let valid: Vec<&str> =
+                                valid_owned.iter().map(std::borrow::Cow::as_ref).collect();
+                            tidb_base::log_debug!(
+                                "Wrong set name parsed during evaluation",
+                                "The name to be parsed in the SET" => name,
+                                "The valid names in the SET" => valid.as_slice(),
+                                "error" => &err,
+                            );
+                        }
+                        Default::default()
+                    }
+                };
                 buf.append_set(&s);
             }
         }

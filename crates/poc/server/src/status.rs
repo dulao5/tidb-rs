@@ -18,7 +18,9 @@ use std::task::Context;
 use std::task::Poll;
 
 use bytes::Bytes;
+use http_body_util::BodyExt as _;
 use hyper::HeaderMap;
+use hyper::Method;
 use hyper::Request;
 use hyper::Response;
 use hyper::StatusCode;
@@ -34,7 +36,6 @@ use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tracing::debug;
-use tracing::info;
 use tracing::warn;
 
 /// What `/status` reports.
@@ -43,14 +44,53 @@ pub struct StatusInfo {
     /// The MySQL server version string (Go: `mysql.ServerVersion`).
     pub version: String,
     pub git_hash: String,
+    /// Configured `status-host` (Go `http_status.go:97-102` logs `net.JoinHostPort(host, port)`
+    /// for `"listening on addr"` rather than the dual-stack listener address). Empty falls back
+    /// to `listener.local_addr()`.
+    pub listen_host: String,
+}
+
+/// Go's `net.JoinHostPort(host, port)`: wraps IPv6 literals (containing `:`) in `[...]`.
+fn format_go_host_port(host: &str, port: u16) -> String {
+    let trimmed = host.trim_matches(|c| c == '[' || c == ']');
+    if trimmed.contains(':') {
+        format!("[{trimmed}]:{port}")
+    } else {
+        format!("{trimmed}:{port}")
+    }
+}
+
+/// Formats a bound listener address the way Go's `net.OpError` (`accept tcp <addr>: ...`)
+/// reports it on shutdown: unspecified addresses (`0.0.0.0` / `::`) render as `[::]:<port>`
+/// because Go opens a dual-stack listener; specific IPs keep their standard formatting.
+fn format_go_accept_addr(addr: std::net::SocketAddr) -> String {
+    if addr.ip().is_unspecified() {
+        format!("[::]:{}", addr.port())
+    } else {
+        addr.to_string()
+    }
 }
 
 /// Serve the status API on `listener` until `shutdown` completes.
 pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Future<Output = ()>) {
-    match listener.local_addr() {
-        Ok(addr) => info!(%addr, "status server listening"),
-        Err(e) => warn!(error = %e, "status server address unknown"),
-    }
+    let accept_addr = match listener.local_addr() {
+        Ok(addr) => {
+            let listen_str = if info.listen_host.is_empty() {
+                addr.to_string()
+            } else {
+                format_go_host_port(&info.listen_host, addr.port())
+            };
+            tidb_base::log_info!(
+                "for status and metrics report",
+                "listening on addr" => &listen_str,
+            );
+            Some(format_go_accept_addr(addr))
+        }
+        Err(e) => {
+            warn!(error = %e, "status server address unknown");
+            None
+        }
+    };
     let info = Arc::new(info);
     let mut conns = JoinSet::new();
     tokio::pin!(shutdown);
@@ -75,7 +115,7 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
                     let resp = if crate::rpc::is_grpc(&req) {
                         crate::rpc::serve(req).await
                     } else {
-                        handle(&req, &info)
+                        handle(req, &info).await
                     };
                     Ok::<_, Infallible>(resp)
                 }
@@ -89,22 +129,163 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
         });
     }
     conns.shutdown().await;
+    // Emit the three Go status/RPC shutdown WARNs (pkg/server/http_status.go:535,540,545,
+    // spec §4.2) when the status/gRPC server stops. Match Go's `net.OpError` format:
+    // `accept tcp <addr>: use of closed network connection`.
+    let accept_err = match accept_addr {
+        Some(addr) => format!("accept tcp {addr}: use of closed network connection"),
+        None => "use of closed network connection".to_owned(),
+    };
+    tidb_base::log_warn!("grpc server error", "error" => "mux: server closed");
+    tidb_base::log_warn!("http server error", "error" => "http: Server closed");
+    tidb_base::log_warn!("start status/rpc server error", "error" => &accept_err);
 }
 
-fn handle(req: &Request<Incoming>, info: &StatusInfo) -> Response<Body> {
-    match req.uri().path() {
-        "/metrics" => response(
+async fn handle(req: Request<Incoming>, info: &StatusInfo) -> Response<Body> {
+    match (req.method(), req.uri().path()) {
+        (_, "/metrics") => response(
             StatusCode::OK,
             tidb_metrics::encode::CONTENT_TYPE,
             tidb_metrics::gather_text(),
         ),
-        "/status" => response(StatusCode::OK, "application/json", status_json(info)),
-        "/debug/route" => route_trace(req.uri().query()),
+        (_, "/status") => response(StatusCode::OK, "application/json", status_json(info)),
+        (_, "/debug/route") => route_trace(req.uri().query()),
+        (&Method::POST, "/settings") => handle_settings(req).await,
         _ => response(
             StatusCode::NOT_FOUND,
             "text/plain; charset=utf-8",
             "404 page not found\n".to_owned(),
         ),
+    }
+}
+
+/// `POST /settings` with form fields `log_level=<lv>` and/or `tidb_general_log=<0|1|off|on>`
+/// (Go `pkg/server/handler/tikvhandler/tikv_handler.go:418-437`).
+async fn handle_settings(req: Request<Incoming>) -> Response<Body> {
+    const MAX_SETTINGS_BODY: usize = 64 * 1024;
+    let mut raw = Vec::new();
+    let mut body = req.into_body();
+    while let Some(frame) = body.frame().await {
+        match frame {
+            Ok(f) => {
+                if let Some(chunk) = f.data_ref() {
+                    if raw.len().saturating_add(chunk.len()) > MAX_SETTINGS_BODY {
+                        return response(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "text/plain; charset=utf-8",
+                            "settings body too large\n".to_owned(),
+                        );
+                    }
+                    raw.extend_from_slice(chunk);
+                }
+            }
+            Err(e) => {
+                return response(
+                    StatusCode::BAD_REQUEST,
+                    "text/plain; charset=utf-8",
+                    format!("read body failed: {e}\n"),
+                );
+            }
+        }
+    }
+    let form = String::from_utf8_lossy(&raw);
+    let mut handled = false;
+    for pair in form.split('&') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = percent_decode_form(k);
+        let val = percent_decode_form(v);
+        match key.as_str() {
+            "log_level" => {
+                if val.is_empty() {
+                    return response(
+                        StatusCode::BAD_REQUEST,
+                        "text/plain; charset=utf-8",
+                        "empty log_level value\n".to_owned(),
+                    );
+                }
+                if let Err(e) = tidb_log::set_level(&val) {
+                    return response(
+                        StatusCode::BAD_REQUEST,
+                        "text/plain; charset=utf-8",
+                        format!("{e}\n"),
+                    );
+                }
+                // Keep global config in sync so later `SET GLOBAL tidb_log_file_max_days`
+                // (`replace_logger`) does not revert the dynamic log level.
+                tidb_base::config::update_global_config(|c| c.log.level = val.clone());
+                handled = true;
+            }
+            "tidb_general_log" => {
+                // Match Go tikv_handler.go:428-436: strictly "0" or "1", else "illegal argument".
+                let on = match val.as_str() {
+                    "1" => true,
+                    "0" => false,
+                    _ => {
+                        return response(
+                            StatusCode::BAD_REQUEST,
+                            "text/plain; charset=utf-8",
+                            "illegal argument\n".to_owned(),
+                        );
+                    }
+                };
+                tidb_sessionctx::variable::tidb_vars::ProcessGeneralLog
+                    .store(on, std::sync::atomic::Ordering::SeqCst);
+                handled = true;
+            }
+            _ => {}
+        }
+    }
+    if handled {
+        response(
+            StatusCode::OK,
+            "text/plain; charset=utf-8",
+            "success\n".to_owned(),
+        )
+    } else {
+        response(
+            StatusCode::BAD_REQUEST,
+            "text/plain; charset=utf-8",
+            "missing log_level or tidb_general_log parameter\n".to_owned(),
+        )
+    }
+}
+
+fn percent_decode_form(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                    out.push((h << 4) | l);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -253,6 +434,7 @@ mod tests {
         let info = StatusInfo {
             version: "8.0.11-TiDB-v8.5.8-tidb-rs".to_owned(),
             git_hash: "abc".to_owned(),
+            listen_host: "127.0.0.1".to_owned(),
         };
         tokio::spawn(serve(listener, info, async move {
             let _ = rx.await;
@@ -501,5 +683,89 @@ mod tests {
             }
         }
         let _ = stop.send(());
+    }
+
+    fn normalize_status_caller_line(line: &str) -> String {
+        if let Some(start) = line.find("[status.rs:")
+            && let Some(rel_end) = line[start..].find(']')
+        {
+            let digits = &line[start + "[status.rs:".len()..start + rel_end];
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return format!(
+                    "{}[status.rs:<line>]{}",
+                    &line[..start],
+                    &line[start + rel_end + 1..]
+                );
+            }
+        }
+        line.to_owned()
+    }
+
+    #[tokio::test]
+    async fn status_shutdown_warns_include_bound_addr() {
+        let sink = tidb_log::MemorySink::new();
+        let cfg = tidb_base::config::LogConfig {
+            level: "info".to_owned(),
+            format: "text".to_owned(),
+            disable_timestamp: true,
+            disable_error_verbose: true,
+            ..tidb_base::config::LogConfig::default()
+        };
+        tidb_log::init_logger_with_sinks(&cfg, "", sink.clone(), None).unwrap();
+
+        assert_eq!(format_go_host_port("0.0.0.0", 10080), "0.0.0.0:10080");
+        assert_eq!(format_go_host_port("::", 10080), "[::]:10080");
+        assert_eq!(format_go_host_port("::1", 10080), "[::1]:10080");
+        assert_eq!(format_go_host_port("[::1]", 10080), "[::1]:10080");
+
+        for (bind_host, expect_unspecified) in [("127.0.0.1", false), ("0.0.0.0", true)] {
+            let listener = TcpListener::bind((bind_host, 0)).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let port = addr.port();
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+            let info = StatusInfo {
+                version: "8.5.8-TiDB-v8.5.8".into(),
+                git_hash: "test".into(),
+                listen_host: bind_host.to_owned(),
+            };
+            let handle = tokio::spawn(async move {
+                serve(listener, info, async move {
+                    let _ = stop_rx.await;
+                })
+                .await;
+            });
+            let _ = stop_tx.send(());
+            handle.await.unwrap();
+
+            let captured = String::from_utf8(sink.take()).unwrap();
+            let lines: Vec<String> = captured.lines().map(normalize_status_caller_line).collect();
+            let (want_listen_field, want_accept_addr) = if expect_unspecified {
+                (
+                    format!(r#"["listening on addr"=0.0.0.0:{port}]"#),
+                    format!("[::]:{port}"),
+                )
+            } else {
+                (
+                    format!(r#"["listening on addr"=127.0.0.1:{port}]"#),
+                    format!("127.0.0.1:{port}"),
+                )
+            };
+            assert_eq!(
+                lines,
+                vec![
+                    format!(
+                        r#"[INFO] [status.rs:<line>] ["for status and metrics report"] {want_listen_field}"#
+                    ),
+                    r#"[WARN] [status.rs:<line>] ["grpc server error"] [error="mux: server closed"]"#
+                        .to_owned(),
+                    r#"[WARN] [status.rs:<line>] ["http server error"] [error="http: Server closed"]"#
+                        .to_owned(),
+                    format!(
+                        r#"[WARN] [status.rs:<line>] ["start status/rpc server error"] [error="accept tcp {want_accept_addr}: use of closed network connection"]"#
+                    ),
+                ],
+                "bind_host={bind_host}"
+            );
+        }
     }
 }

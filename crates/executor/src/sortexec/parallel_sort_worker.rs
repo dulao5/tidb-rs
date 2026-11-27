@@ -19,10 +19,8 @@
 #![allow(non_upper_case_globals)]
 
 use std::any::Any;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use futures::FutureExt;
 use tidb_base::Error;
 use tidb_base::gostd::sort::sort;
 use tidb_chunk::chunk::Chunk;
@@ -349,15 +347,13 @@ impl ParallelSortWorker {
     /// boundary) and sent with the kill error the sort returns.
     // go: parallelSortWorker.run L2 (the panic is a caught unwind or the returned kill error [M-PANIC])
     pub async fn run(&mut self) {
-        let ret = AssertUnwindSafe(self.fetch_chunks_and_sort())
-            .catch_unwind()
-            .await;
-        let r: Box<dyn Any + Send> = match ret {
+        let ret = tidb_base::panic_guard::catch_unwind_future(self.fetch_chunks_and_sort()).await;
+        let (r, bt): (Box<dyn Any + Send>, Option<String>) = match ret {
             Ok(Ok(())) => return,
-            Ok(Err(err)) => Box::new(err),
-            Err(payload) => payload,
+            Ok(Err(err)) => (Box::new(err), None),
+            Err((payload, bt)) => (payload, bt),
         };
-        process_panic_and_log(self.err_output_chan(), r).await;
+        process_panic_and_log(self.err_output_chan(), r, bt).await;
     }
 }
 

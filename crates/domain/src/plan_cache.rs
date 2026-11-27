@@ -93,7 +93,7 @@ async fn plan_cache_metrics_and_vars(domain: Weak<Domain>) {
     loop {
         ticker.tick().await;
         let Some(cache) = domain.upgrade().and_then(|d| d.get_instance_plan_cache()) else {
-            log::info!("planCacheMetricsAndVars exited.");
+            tidb_base::log_info!("planCacheMetricsAndVars exited.");
             return;
         };
         // update limits
@@ -113,7 +113,7 @@ async fn plan_cache_evict_trigger(domain: Weak<Domain>) {
     loop {
         ticker.tick().await;
         let Some(cache) = domain.upgrade().and_then(|d| d.get_instance_plan_cache()) else {
-            log::info!("planCacheEvictTrigger exited.");
+            tidb_base::log_info!("planCacheEvictTrigger exited.");
             return;
         };
         // trigger the eviction: on the blocking pool, it walks every shard (N3 §3.7)
@@ -125,9 +125,11 @@ async fn plan_cache_evict_trigger(domain: Weak<Domain>) {
         };
         tidb_metrics::plan_cache_instance_last_evict(num_evicted as i64);
         if num_evicted > 0 {
-            log::info!(
-                "instance plan eviction, detail: {detail_info}, num_evicted: {num_evicted}, time_spent: {:?}",
-                begin.elapsed()
+            tidb_base::log_info!(
+                "instance plan eviction",
+                "detail" => &detail_info,
+                "num_evicted" => num_evicted as i64,
+                "time_spent" => begin.elapsed(),
             );
         }
     }

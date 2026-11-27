@@ -10,6 +10,9 @@ pub const ALL_SCHEMA_VERSIONS: &str = "/tidb/ddl/all_schema_versions";
 /// `/tidb/ddl/all_schema_by_job_versions/<job_id>/<ddl_id>` → version, no lease (Go:
 /// `DDLAllSchemaVersionsByJob`; waited on by the owner when MDL is on).
 pub const ALL_SCHEMA_BY_JOB_VERSIONS: &str = "/tidb/ddl/all_schema_by_job_versions";
+/// Put by TiDB on `CREATE/ALTER/DROP USER`, `GRANT`, `REVOKE`, `FLUSH PRIVILEGES`
+/// (Go: `pkg/domain/domain.go` `privilegeKey`).
+pub const PRIVILEGE_NOTIFY: &str = "/tidb/privilege";
 
 pub fn self_schema_version(ddl_id: &str) -> String {
     format!("{ALL_SCHEMA_VERSIONS}/{ddl_id}")

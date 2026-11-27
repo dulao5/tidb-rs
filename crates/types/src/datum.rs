@@ -492,7 +492,7 @@ impl Datum {
         let coll = match gocharset::get_collation_by_name(self.collation()) {
             Ok(c) => c,
             Err(err) => {
-                log::warn!("unknown collation, error: {err}");
+                tidb_base::log_warn!("unknown collation", "error" => &err);
                 return self.get_string().to_vec();
             }
         };

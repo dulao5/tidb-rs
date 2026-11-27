@@ -737,10 +737,16 @@ pub fn get_visit_info(
         } else {
             ErrTableaccessDenied.fast_gen_by_args(vec![gs("SELECT"), gs(user), gs(host), gs(tbl)])
         };
+        // R32 (D5 option A): hidden `_tidb_rowid` requires full-table SELECT (`column = ""`).
+        let check_col = if name.orig_col_name.l == ExtraHandleName.l {
+            String::new()
+        } else {
+            name.orig_col_name.l.clone()
+        };
         res.push(VisitInfo {
             db: db.to_owned(),
             table: tbl.to_owned(),
-            column: name.orig_col_name.l.clone(),
+            column: check_col,
             privilege: SelectPriv.0,
             err: Some(auth_err),
             ..Default::default()
@@ -754,10 +760,16 @@ pub fn get_visit_info(
             gs(col),
             gs(tbl),
         ]);
+        // R32 (D5 option A): hidden `_tidb_rowid` in WHERE requires full-table SELECT (`column = ""`).
+        let check_col = if *col == ExtraHandleName.l {
+            String::new()
+        } else {
+            col.clone()
+        };
         res.push(VisitInfo {
             db: db.to_owned(),
             table: tbl.to_owned(),
-            column: col.clone(),
+            column: check_col,
             privilege: SelectPriv.0,
             err: Some(err),
             ..Default::default()
