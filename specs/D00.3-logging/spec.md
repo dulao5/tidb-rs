@@ -1,6 +1,6 @@
 # D00.3 运行时日志、错误堆栈与运维可观测格式（spec）
 
-状态：草案（仅设计规格，对应 `dulao5/tidb-rs#447`，待评审；实现另开 issue；配套已按 `#448` 将审计插件钩子注释规则写入 `CLAUDE.md` §2 第 10 条）。
+状态：已定稿（仅设计规格，对应 `dulao5/tidb-rs#447`，经 Lucky 评审通过、负责人已于 2026-11-27 03:17Z 拍板 D1–D4；实现另开 issue；配套已按 `#448` 将审计插件钩子注释规则写入 `CLAUDE.md` §2 第 10 条）。
 
 块与依赖模块：主归属 **D00.3**（通用工具 `pkg/util/*` 中与日志和版本输出相关的文件：`pkg/util/logutil`、`pkg/util/printer`、`pkg/util/versioninfo`，按需整文件移植）；落地为新建正式 crate **`tidb-log`**（在 `N0`（crate 分层与无环依赖方向基础设计）中置于 rank 1），配合 **`tidb-base`**（D00.2 常量、错误码与配置，rank 0：补充错误堆栈格式与轻量门面接口）以及 **`tidb-server`**（D03.1 协议与服务端启动入口）/ `poc-server` 启动接线与全仓调用点回改。
 
@@ -11,8 +11,8 @@
 - **已验证实测（真实服务端捕获）**：在本机通过 `tidb-server --store=unistore`（v8.5.8）实跑捕获启动横幅、配置 JSON、`SIGTERM` 优雅关闭序列、`command dispatched failed`、`tidb_redact_log` 三模式、`FOR UPDATE NOWAIT`、`KILL QUERY`、`expensive_query` 及 OOM `LOG`/`CANCEL` 动作日志（关键原始样本均已直接收录于下文 §4）。
 - **未在本机实测或未本地检视源码的部分（明确标出）**：
   1. 混合集群 `INFORMATION_SCHEMA.CLUSTER_LOG` 跨节点端到端 SQL 查询：本机仅直接审计了 `pingcap/sysutil/search_log.go` 解析源码，尚未在真实混合集群执行（需待 `tidb-rs` status 端口接入 Diagnostics gRPC 服务后实测）。
-  2. TiDB 仓内 `br/pkg/version`（`ExtractTiDBVersion` / `ParseServerInfo`）、`pkg/infoschema.FormatTiDBVersion` 及 `coreos/go-semver` / `Masterminds/semver` 版本解析已在 Go 上实测验证（见 §9.2 D1）；TiUP / TiDB Dashboard / PingCAP Clinic 外部仓库源码未在本机检视，相关兼容性需在集成环境实测确认。
-  3. Rust `Backtrace::force_capture()` 基准已在本地 `arm64` Linux 主机实测（见 §9.2 D4）；`amd64` 平台数据因本机为 `arm64` 尚未本地实测，待 Batch 0 在 `ubuntu-latest`（`amd64`）CI 补充实测。
+  2. TiDB 仓内 `br/pkg/version`（`ExtractTiDBVersion` / `ParseServerInfo`）、`pkg/infoschema.FormatTiDBVersion` 及 `coreos/go-semver` / `Masterminds/semver` 版本解析已在 Go 上实测验证（见 §9.1 D1）；TiUP / TiDB Dashboard / PingCAP Clinic 外部仓库源码未在本机检视，相关兼容性需在集成环境实测确认。
+  3. Rust `Backtrace::force_capture()` 基准已在本地 `arm64` Linux 主机实测（见 §9.1 D4）；`amd64` 平台数据因本机为 `arm64` 尚未本地实测，待 Batch 0 在 `ubuntu-latest`（`amd64`）CI 补充实测。
 
 相关文档：[移植宪章](../../CONSTITUTION.md)（第一条 2、第九条）、[全局映射规则](../../docs/porting/mappings.md)、[来源标注规范](../../docs/porting/provenance.md)、[N0 crate 分层](../exceptions/N0-crate-layering/spec.md)、[N2 会话上下文](../exceptions/N2-session-context/spec.md)、[N3+A1 并发与内存](../exceptions/N3-A1-concurrency-memory/spec.md)、[N8 系统变量](../exceptions/N8-sysvar/spec.md)、[N9 可观测性](../exceptions/N9-observability/spec.md)、[D00.2 base spec](../D00.2-base/spec.md)、[D03.1 server spec](../D03.1-server/spec.md)。
 
@@ -83,7 +83,7 @@
 1. **键顺序**：`"level"` 在前，`"time"` 在后（当 `disable-timestamp = true` 或时间为零值时省略 `"time"`）；随后依次为 `"name"`（非空时）、`"caller"`（启用时）、`"message"`、绑定字段、调用点字段、`"stack"`（非空时）。
 2. **空消息**：JSON 中 `"message":""` **始终输出**，不省略（`probe` `1_JSON_BASIC [05]`）。
 3. **HTML 字符不转义**：字符串内的 `<`、`>`、`&` 在 JSON 中直接保留原字符（例外仅见 `Reflect` 在 text 模式下调用 Go `json.Encoder`，下文详述）。
-4. **`DisableErrorVerbose` 行为**：Go v8.5.8 实测 `zapcore.NewJSONEncoder` **忽略** `DisableErrorVerbose`，始终输出 `"errorVerbose"`（`probe` `4_JSON_DISABLE_VERBOSE_true`；该差异见 §9.2 D2 决策）。
+4. **`DisableErrorVerbose` 行为**：Go v8.5.8 实测 `zapcore.NewJSONEncoder` **忽略** `DisableErrorVerbose`，始终输出 `"errorVerbose"`（`probe` `4_JSON_DISABLE_VERBOSE_true`；已按 §9.1 **D2 = B** / `R33` 修复，JSON 与 text 统一遵守配置）。
 
 ### 1.3 `needDoubleQuotes` 与逐字节转义规范
 
@@ -131,7 +131,7 @@
 | `Reflect` / `Any` | `Reflect`：text 用 Go `json.Encoder`（默认 HTML 转义 `\u003ca\u003e\u0026b`）输出后按 `ByteString` 的 `needDoubleQuotes` 决定是否加引号——因此 `nil` 为无引号 **`[rn=null]`**，对象为 `[rs="{\"k\":\"\\u003ca\\u003e\\u0026b\"}"]`；marshal 失败时不输出原键，仅输出 **`[<key>Error="..."]`**；`Any` 按实际底层类型分派 | 标准 JSON 值（不转义 `<>&`，`nil` → `"rn":null`，失败 → `"<key>Error":"..."`） | Rust 结构化 KV 按类型分派 |
 | `Error` / `NamedError` / `multierr` | 见 §2.1 | 见 §2.1 | 见 §2.2 |
 
-**实测发现的 5 项 `pingcap/log` 文本编码器怪癖（决策见 §9.2 D3）**：
+**实测发现的 5 项 `pingcap/log` 文本编码器怪癖（已按 §9.1 D3 = A / `R34` 拍板）**：
 1. `zap.Skip()` 与 `zap.Error(nil)`：`addFields` 先写 `[` 再调 `f.AddTo(enc)`（空操作）再写 `]`，导致 text 模式产生无意义的 **`[]`**（`probe` `3_TEXT_FIELDS`；JSON 模式下静默省略）。
 2. `zap.Namespace("ns")`：text 模式下 `OpenNamespace` 写 `[ns={`（缺少匹配 `]`），结尾 `closeOpenNamespaces` 在行末追加裸 `}`，实测产出 `[ns={] [in_ns=v] [in_ns_i=7]}`（JSON 模式正常输出 `"ns":{"in_ns":"v","in_ns_i":7}`）。
 3. `Complex64/128`：text 模式下负虚部直接拼 `+`，且 `Complex64` 扩宽至 64 位，产出 `1+-2i` / `1.100000023841858+-2.200000047683716i`（JSON 输出 `"1-2i"` / `"1.1-2.2i"`）。
@@ -160,7 +160,7 @@
 2. **`log.disable-error-stack` / `log.enable-error-stack` 解析（`pkg/config/config.go:577-585,1322-1326`）**：
    - `Config.Valid()`：若 `EnableErrorStack == DisableErrorStack && EnableErrorStack != nbUnset`，打警告并用 `EnableErrorStack` 覆盖（将 `DisableErrorStack` 重置为 `nbUnset`）；
    - `getDisableErrorStack()`：两者均未设置时**默认返回 `true`**（即默认关闭 `errorVerbose` 堆栈输出，仅保留 `[error=...]`）；设置 `enable-error-stack` 时优先取 `!EnableErrorStack.toBool()`，否则取 `DisableErrorStack.toBool()`。
-   - **JSON 格式例外**：Go v8.5.8 的 `pingcap/log` JSON 编码器未接收 `DisableErrorVerbose`，因此 JSON 输出始终包含 `"errorVerbose"`（`probe` `4_JSON_DISABLE_VERBOSE_true`；见 §9.2 D2）。
+   - **JSON 格式例外**：Go v8.5.8 的 `pingcap/log` JSON 编码器未接收 `DisableErrorVerbose`，因此 JSON 输出始终包含 `"errorVerbose"`（`probe` `4_JSON_DISABLE_VERBOSE_true`；`tidb-log` 按 §9.1 **D2 = B** / `R33` 统一遵守 `disable-error-stack`）。
 3. **`BgLogger()` / `Logger(ctx)` 与 `ErrVerboseLogger()`（`pkg/util/logutil/log.go:139-149,237-259`）**：
    - `BgLogger()` 与 `Logger(ctx)` 继承全局配置（默认 `DisableErrorVerbose = true`）；
    - `ErrVerboseLogger()` 在 `InitLogger` 时基于相同 `Syncer` 克隆 `DisableErrorVerbose = false` 的专用 logger，供明确需要深度调用栈的组件（如 DXF、stats、部分 planner 路径）无视全局配置输出 `[errorVerbose=...]`。
@@ -184,7 +184,7 @@
    - 现状：`Inner.stack`（`errors.rs:142,488-491`）当前仅调用 `Backtrace::capture()`，在未设置 `RUST_BACKTRACE=1` 时返回 `BacktraceStatus::Disabled`；即使 `enable-error-stack = true`、调用 `ErrVerboseLogger()` 或到达 `conn.go:1241-1257` 的 `errStrForLog`（`errors.ErrorStack(err)`），也无法产出任何多帧堆栈。
    - **架构设计**：
      - 在 `Inner` 维护 `has_stack: bool`：`gen_with_stack*` / `new` / `errorf` / `plain` / `trace` / `annotate` 置 `true`，`fast_gen*` / `synthesize` / `Error::share()` 置 `false`；对 `has_stack == false` 的错误调用 `trace` / `annotate` 时允许补采栈并将外层 `has_stack` 置为 `true`（对齐 Go `SuspendStack` + `HasStack` 语义，见 §2.1 第 4 项）；
-     - 性能权衡与采集策略（见 §9.2 **D4** 实测数据与决策）：实测在 `arm64` Linux 主机上 `Backtrace::force_capture()` 仅做栈展开（符号解析惰性延迟至实际格式化日志时），深度 10/30/60 帧耗时 **3.0–10.9 µs**（`Location::caller()` 为 **0.68 ns**），而 Go `errStrForLog`（`conn.go:1241-1257`）在默认配置下对除 `ErrKeyExists` / `ErrParse` / `ErrTableNotExists` 外的所有错误都输出完整多帧堆栈；因此**按 D4 决策**确定是否在非热点 `gen_with_stack*` 上始终调用 `force_capture()`（选项 B，完全符合 §0.2 第 4 项）还是仅在开启 `enable-error-stack = true` 时强制捕获（选项 A，与 §0.2 第 4 项存在明确冲突）。
+     - 性能权衡与采集策略（见 §9.1 **D4 = B** 实测数据与负责人已定决策）：实测在 `arm64` Linux 主机上 `Backtrace::force_capture()` 仅做栈展开（符号解析惰性延迟至实际格式化日志时），深度 10/30/60 帧耗时 **3.0–10.9 µs**（`Location::caller()` 为 **0.68 ns**），而 Go `errStrForLog`（`conn.go:1241-1257`）在默认配置下对除 `ErrKeyExists` / `ErrParse` / `ErrTableNotExists` 外的所有错误都输出完整多帧堆栈；已按 **D4 = B** 确定对所有 `gen_with_stack*` / `trace` / `annotate` 始终调用 `Backtrace::force_capture()`（与 Go 及 §0.2 第 4 项完全一致，`fast_gen*` 热路径与 `ErrKeyExists` / `ErrParse` / `ErrTableNotExists` 无栈）。
      - 在 `crates/base/src/errors.rs` 新增：
        - `pub fn has_stack(&self) -> bool`（空栈 / `FastGen*` 返回 `false`，经 `trace` / `annotate` 补栈后返回 `true`）
        - `pub fn error_verbose(&self) -> Vec<u8>`（按 §2.1 顺序输出 `<cause Error()>` → `\n<annotation>` → `\n<func>\n\t<file>:<line>`；无栈时返回 `self.error()`）
@@ -309,7 +309,7 @@
    - `PrintTiDBInfo()` 先输出 `"Welcome to TiDB."`，随后直接序列化全局配置结构体 `json.Marshal(config.GetGlobalConfig())`（`printer.go:53-57`）输出 `"loaded config"` `[config="<json>"]`——**严禁调用 `tidb_base::config::get_json_config()`**（`GetJSONConfig` 会先转入 map 按字母排序、删除隐藏项与已移除配置项、并把整数转为 `float64`，与 Go `printer.go:53-57` 的结构体声明顺序、保留隐藏项及整数表示相矛盾）。Rust 侧必须直接对全局 `Config` 结构体做声明序 JSON 序列化。
 2. **Rust `build.rs` 编译期注入方案与版本字段契约（按 2026-11-27 负责人决定）**：
    - 在 `crates/log/build.rs`（继承 `crates/poc/domain/build.rs` 思路并扩展）注入以下编译期环境变量，同时允许外部打包脚本通过同名环境变量覆盖（与 Go `Makefile.common` `-ldflags -X` 对等）：
-     - `TIDB_RS_RELEASE_VERSION`：未覆盖时取默认发布版本串（见 §9.2 **D1** 决定 `v8.5.8+tidb-rs.<7位>` 或 `v8.5.8`）；可被配置项 `tidb-release-version` 在运行时覆盖；
+     - `TIDB_RS_RELEASE_VERSION`：未覆盖时取默认发布版本串 **`v8.5.8+tidb-rs.<7位hash>`**（已按 §9.1 **D1 = A1** 拍板，遵循 SemVer 构建元数据且元数据内仅 1 个 `-`）；可被配置项 `tidb-release-version` 在运行时覆盖；
      - `TIDB_RS_GIT_HASH`：`git rev-parse HEAD`（失败回退 `"None"`），需监听 `.git/HEAD` 与 `.git/logs/HEAD`（兼容 git worktree）；
      - `TIDB_RS_GIT_BRANCH`：`git rev-parse --abbrev-ref HEAD`（失败回退 `"None"`）；
      - `TIDB_RS_BUILD_TS`：UTC 构建时间戳 `YYYY-MM-DD HH:MM:SS`（`date -u` 或 `chrono`/纯算法转换 `SOURCE_DATE_EPOCH`/当前 UTC，失败回退 `"None"`）；
@@ -324,10 +324,10 @@
      7. **`"Rust Version"` = `<rustc_version>`（紧跟 `GoVersion` 之后新增）**
      8. `"Race Enabled"` = `false`（bool）
      9. `"Check Table Before Drop"` = `false`（bool，读自 `config::CheckTableBeforeDrop`）
-     - 注：与 Go 一致，`Store` **不出现在** `Welcome to TiDB.` 日志行内，仅出现在 `GetTiDBInfo()`（供 `-V` 与 `SELECT tidb_version()` 使用，`pkg/util/printer/printer.go:61-87` 输出 9 行键值对，其余 8 项同上；是否同步保留空 `GoVersion:` 并加 `Rust Version:` 见 §9.2 **D1**）。
+     - 注：与 Go 一致，`Store` **不出现在** `Welcome to TiDB.` 日志行内，仅出现在 `GetTiDBInfo()`（供 `-V` 与 `SELECT tidb_version()` 使用，`pkg/util/printer/printer.go:61-87` 输出 9 行键值对，其余 8 项同上；已按 §9.1 **D1 = A1** / `R35` 同步留空 `GoVersion:` 并加 `Rust Version:`）。
    - **清理当前 `tidb-rs` 多处版本口径割裂**：
      - 目前存在：`crates/poc/domain/src/serverinfo.rs:16-50`（`8.0.11-TiDB-v8.5.8-tidb-rs-<7位>`）、`crates/mysql-protocol/src/constants.rs:161`（过期 `8.0.11-TiDB-v8.4.0-tidb-rs`）、`crates/base/src/mysql/const.rs:36-48`（未接线的 `v8.4.0-this-is-a-placeholder`）、`crates/poc/session/src/constant.rs:19-20` 与 `crates/sessionctx/src/variable/sysvar_data.rs:23,25` 不一致的 `version` / `version_comment`，以及 `crates/poc/server/src/main.rs:200-206`（`tidb_metrics::init`）与 `crates/metrics/src/lib.rs:520`（`tidb_server_info` 指标标签）。
-     - 实施 Batch 0 时统一由 `tidb-log` 提供的版本构建结果初始化 `tidb_base::mysql::{TiDBReleaseVersion, ServerVersion}`，同步更新 `crates/mysql-protocol/src/constants.rs:161`、`crates/poc/domain/src/serverinfo.rs`、`crates/sessionctx/src/variable/sysvar_data.rs:25`、`crates/poc/server/src/main.rs:200-206`（`tidb_metrics::init` -> `tidb_server_info`）与 `/status` JSON（`crates/poc/server/src/status.rs:219`）；具体版本格式（`+tidb-rs.<short>` 构建元数据 vs 裸 `v8.5.8`）见 §9.2 **D1**。
+     - 实施 Batch 0 时统一由 `tidb-log` 提供的版本构建结果初始化 `tidb_base::mysql::{TiDBReleaseVersion, ServerVersion}`（默认 **`v8.5.8+tidb-rs.<7位hash>`** / **`8.0.11-TiDB-v8.5.8+tidb-rs.<7位hash>`**，已按 §9.1 **D1 = A1** / `R35` 拍板），同步更新 `crates/mysql-protocol/src/constants.rs:161`、`crates/poc/domain/src/serverinfo.rs`、`crates/sessionctx/src/variable/sysvar_data.rs:25`、`crates/poc/server/src/main.rs:200-206`（`tidb_metrics::init` -> `tidb_server_info`）与 `/status` JSON（`crates/poc/server/src/status.rs:219`）。
 3. **Go v8.5.8 启动阶段实测黄金样本（`tidb-server --store=unistore`）**：
 
 ```text
@@ -602,30 +602,27 @@ Go v8.5.8 实测 `SIGTERM` 核心捕获片段（状态服务默认开启时，3 
 | 1 | `[file:line]` 显示 Rust 源文件 basename 与行号（如 `[consistency.rs:67]`），不映射为 `.go` | `pingcap/log/zap_text_encoder.go:64-94` | 必然工程差异（已由负责人 2026-11-27 决定） |
 | 2 | `Welcome to TiDB.` 中 `[GoVersion=]` 留空并紧跟新增 `["Rust Version"=...]` | `pkg/util/printer/printer.go:45` | 有意特性差异（已由负责人 2026-11-27 决定） |
 | 3 | 堆栈帧格式为 Rust 符号与路径而非 Go goroutine 帧 | `pingcap/errors` / `zap.Stack` | 必然运行时差异（格式转义与单行契约仍严格对齐） |
-| 4 | Go `pingcap/log` JSON 编码器忽略 `DisableErrorVerbose` | `pingcap/log/zap_text_encoder.go:166-167`、`pkg/util/logutil/log.go:138` | `upstream-pitfall`（复现见 `probe` `4_JSON_DISABLE_VERBOSE_true`），处理见 §9.2 **D2** |
-| 5 | Go `pingcap/log` 文本编码器对 `zap.Skip()` / `zap.Error(nil)` 输出多余 `[]` | `pingcap/log/zap_text_encoder.go:639-641` | `upstream-pitfall`（复现见 `probe` `3_TEXT_FIELDS`），处理见 §9.2 **D3** |
-| 6 | Go `pingcap/log` `OpenNamespace` 在 text 模式下括号错位 `[ns={] ...}` | `pingcap/log/zap_text_encoder.go:238-242,489-493` | `upstream-pitfall`（复现见 `probe` `3_TEXT_FIELDS [01]`），处理见 §9.2 **D3** |
+| 4 | Go `pingcap/log` JSON 编码器忽略 `DisableErrorVerbose` | `pingcap/log/zap_text_encoder.go:166-167`、`pkg/util/logutil/log.go:138` | `upstream-pitfall` `go-bug-fixed`（`#453`，复现见 `probe` `4_JSON_DISABLE_VERBOSE_true`），负责人已定 **D2 = B**，已登记 `rulings.toml` **`R33`** |
+| 5 | Go `pingcap/log` 文本编码器对 `zap.Skip()` / `zap.Error(nil)` 输出多余 `[]` | `pingcap/log/zap_text_encoder.go:639-641` | `upstream-pitfall` `go-bug-fixed`（`#454`，复现见 `probe` `3_TEXT_FIELDS`），负责人已定 **D3 = A**，已登记 `rulings.toml` **`R34`** |
+| 6 | Go `pingcap/log` `OpenNamespace` 在 text 模式下括号错位 `[ns={] ...}` | `pingcap/log/zap_text_encoder.go:238-242,489-493` | `upstream-pitfall` `go-bug-fixed`（`#454`，复现见 `probe` `3_TEXT_FIELDS [01]`），负责人已定 **D3 = A**，已登记 `rulings.toml` **`R34`** |
 | 7 | Go `pingcap/log` `Complex` 负虚部输出 `1+-2i` 与 `ReplaceLogger` 未更新 `errVerboseLogger` | `zap_text_encoder.go:303-306`、`pkg/util/logutil/log.go:191-217` | `upstream-pitfall`：`ErrVerboseLogger` 在 §3.3 共享全局原子句柄，随 `replace_logger` 自动同步（无对外格式偏差，`go-bug-fixed` 内部同步修复）；`Complex` 日志在 Rust 几乎不用，按需登记 |
 
 ### 9.1 已由负责人决定（2026-11-27）
 
-汇总 §0.2 负责人已拍板全部 5 项决定：
+汇总 §0.2 负责人已拍板的基础 5 项决定，以及 2026-11-27 03:17Z 拍板的 D1–D4 全部 4 项决定（总计 9 项，零待决）：
 1. 立即执行（先定稿 spec 再分批实现）；
 2. `[file:line]` 使用过滤后的 Rust 文件名与行号；
 3. 强制执行单行不变量并完整对齐 error/stack/panic 全部行为；
 4. 运维高频检索日志按 §4 清单逐字节对齐并配黄金测试；
-5. 启动横幅编译期通过 `build.rs` 注入，`GoVersion` 留空、`Rust Version` 新增（键名带空格 `"Rust Version"`）、`Edition` 保持 `Community`、企业版扩展暂不管。
+5. 启动横幅编译期通过 `build.rs` 注入，`GoVersion` 留空、`Rust Version` 新增（键名带空格 `"Rust Version"`）、`Edition` 保持 `Community`、企业版扩展暂不管；
+6. **D1 = 选项 A1（构建元数据 `v8.5.8+tidb-rs.<7位hash>`，已登记 `R35`）**：`Release Version` 统一为 `v8.5.8+tidb-rs.<7位hash>`（元数据内保持 `<= 1` 个连字符，已实测 `br/pkg/version.{ExtractTiDBVersion, ParseServerInfo}`、`infoschema.FormatTiDBVersion`、`coreos/go-semver`、`Masterminds/semver` 均满足 `LessThan(8.5.8) == false` 且 `Compare == 0`，避免预发布后缀 `-tidb-rs-` 导致 `< 8.5.8` 与截断为 `8.5.8-tidb`），同步统一 `SELECT VERSION()` / MySQL 握手 / `/status` / `tidb_server_info` 为 `8.0.11-TiDB-v8.5.8+tidb-rs.<7位>`，并在 `SELECT tidb_version()` 与 `-V` 同步留空 `GoVersion:` 并新增 `Rust Version:`（外部 TiUP/Dashboard 仍需集成实测复核，如遇不接受 `+` 再按 `R35` 触发重开）；
+7. **D2 = 选项 B（JSON 与 text 统一遵守 `log.disable-error-stack` / `log.enable-error-stack`，`go-bug-fixed`，`#453` / `R33`）**：修复 Go `pingcap/log` JSON 编码器忽略 `DisableErrorVerbose` 的缺陷（`ErrVerboseLogger` 仍强制输出 `errorVerbose`）；
+8. **D3 = 选项 A（不复制 Go 文本编码器 `[]` 与错位括号 bug，`go-bug-fixed`，`#454` / `R34`）**：`Skip` / 无类型 `nil` error 在 text 模式下静默省略，不输出多余 `[]`，亦不复制 `OpenNamespace` 的 `[ns={] ...}` 错位语法；
+9. **D4 = 选项 B（与 Go 及 §0.2 第 4 项一致，总是采集堆栈）**：对所有 `gen_with_stack*` / `trace` / `annotate` 始终调用 `Backtrace::force_capture()`（`fast_gen*` 热路径与 `ErrKeyExists` / `ErrParse` / `ErrTableNotExists` 无栈），确保默认配置下 `command dispatched failed` 的 `[err=...]` 与 `ErrVerboseLogger()` 始终具备完整多帧调用栈。实测 `arm64` Linux（`rustc 1.99.1`，深度 10/30/60）：`Location::caller()` = `0.68 ns`；`Backtrace::force_capture()` 仅展开 = **`3.0–3.3` / `5.6–6.0` / `9.6–10.9 µs`**（~`150 ns/帧`）；惰性 `.to_string()`（仅写日志时支付）= **`28.9` / `42.6` / `69.1 µs`**（`-O -g`；`strip` 下 `6.8 / 11.9 / 19.5 µs`）。*（`amd64` 平台数据待 Batch 0 在 `ubuntu-latest` CI 补测补录。）*
 
 ### 9.2 需要负责人决定的剩余项（宪章第九条 1）
 
-仅列涉及长期用户可见行为或资源/性能语义的 4 项问题：
-
-| 编号 | 问题描述与背景 | 可选方案与影响 | 维护者建议 |
-|---|---|---|---|
-| **D1** | **`Release Version` 精确字符串及 `VERSION()` / `/status` / `tidb_version()` / `-V` / 指标版本口径联动**<br>负责人已定启动横幅中 `GoVersion` 留空并新增 `"Rust Version"`。目前仓内多处版本串割裂（`poc-domain` 用 `v8.5.8-tidb-rs-<7位>`，`mysql-protocol` 残存 `v8.4.0-tidb-rs`，`tidb-base` 含未接线 placeholder，`sysvar_data.rs` 与 `tidb_metrics::init` 口径也不统一）。<br>**Go 版本解析实测结果（`br/pkg/version.{ExtractTiDBVersion, ParseServerInfo}`、`infoschema.FormatTiDBVersion`、`coreos/go-semver`、`Masterminds/semver`，复现见 `tools/log-probe/`）**：<br>- `8.0.11-TiDB-v8.5.8-tidb-rs-abc1234`（连字符预发布标签）：SemVer 判定为预发布版本（**`LessThan(8.5.8) == true`**），且 `ExtractTiDBVersion` 因 6 段连字符触发 `end -= 2` 截断为 `8.5.8-tidb`；BR / Dumpling / TiCDC / TiUP 风格 `>= 8.5.8` 版本门禁会把 `tidb-rs` 节点误判为低于 `v8.5.8`。<br>- `8.0.11-TiDB-v8.5.8+tidb-rs.abc1234`（`+` 构建元数据，元数据内保持 `<= 1` 个连字符，总段数 4）：`ExtractTiDBVersion` 解析为 `8.5.8+tidb-rs.abc1234`、`ParseServerInfo` 解析为 `8.5.8`、`FormatTiDBVersion` 输出 `8.5.8+tidb-rs.abc1234`，所有 SemVer 比较均满足 **`LessThan(8.5.8) == false` 且 `Compare == 0`**。<br>- `8.0.11-TiDB-v8.5.8`（裸版本）：全解析器 `Compare == 0`，但无法从 `VERSION()` / `/status` / 指标标签区分 Go 与 Rust 节点。 | **选项 A1（构建元数据）**：`Release Version` 用 **`v8.5.8+tidb-rs.<7位hash>`**（遵循 SemVer 构建元数据规则且元数据内仅 1 个 `-`），统一 `SELECT VERSION()` / MySQL 握手 / `/status` / `tidb_server_info` 为 `8.0.11-TiDB-v8.5.8+tidb-rs.<7位>`（清理过期 `8.4.0`）；`tidb_version()` 与 `-V` 同步留空 `GoVersion:` 并新增 `Rust Version:`。后果：既通过 BR/SemVer `>= 8.5.8` 版本门禁，又可在日志/监控中一眼区分 Rust 节点（外部 TiUP/Dashboard 若有不接受 `+` 的自定义正则，仍需集成实测复核）。<br>**选项 A2（预发布后缀，不推荐）**：`Release Version` 沿用 `v8.5.8-tidb-rs-<7位hash>`。后果：**已实测破坏 BR 与所有 SemVer `>= 8.5.8` 比较**（被判定为 `< 8.5.8` 且被 `ExtractTiDBVersion` 截断为 `8.5.8-tidb`）。<br>**选项 B（裸版本）**：`Release Version` 严格写裸 `v8.5.8`（不带后缀），仅在启动横幅 / `tidb_version()` / `-V` 中通过空 `GoVersion` + `"Rust Version"` 区分 Rust 节点。后果：零版本解析器风险，但 `SELECT VERSION()` / `/status` / `tidb_server_info` 无法区分 Go 与 Rust 节点。 | **选 A1（`v8.5.8+tidb-rs.<7位hash>`）**：兼顾 SemVer `>= 8.5.8` 比较语义（已实测通过 Go `br/pkg/version` 与两大 SemVer 库）与混合集群可观测区分度；若外部工具实测不接受 `+`，则平滑退回选项 B（裸 `v8.5.8`），**明确放弃 A2** |
-| **D2** | **JSON 日志格式是否响应 `log.disable-error-stack` / `log.enable-error-stack`**<br>Go v8.5.8 的 `pingcap/log` JSON 编码器忽略该配置（始终输出 `errorVerbose`），文本模式则默认隐藏。 | **选项 A**：照 Go 现状，JSON 模式忽略 `disable-error-stack` 始终输出 `errorVerbose`（开 `upstream-pitfall` `go-bug-kept`）。<br>**选项 B**：修复该 Go 缺口，JSON 与 text 统一遵守 `log.disable-error-stack`（开 `upstream-pitfall` `go-bug-fixed` 并登记 `rulings.toml`）。 | **选 B**：配置项 `enable-error-stack` 在文档上并未区分格式，统一遵守配置对用户更符合直觉且默认避免 JSON 日志体积膨胀 |
-| **D3** | **`pingcap/log` 文本编码器 `zap.Skip()` / `zap.Error(nil)` 产出 `[]` 与 `OpenNamespace` 括号错位** | **选项 A**：不复制这两个明显输出 bug，nil error / Skip 静默省略（登记 `upstream-pitfall` `go-bug-fixed`）。<br>**选项 B**：严格照 Go 输出多余的 `[]` 与 `[ns={] ...}`。 | **选 A**：`[]` 与错位括号毫无业务语义，仅是 Go 编码器拼接疏漏，不复制技术债 |
-| **D4** | **`tidb_base::Error` 在无 `RUST_BACKTRACE=1` 时的堆栈采集策略（含与 §0.2 第 4 项冲突说明及实测基准）**<br>**与负责人已定事项的冲突**：Go `errStrForLog`（`conn.go:1241-1257`）对除 `ErrKeyExists` / `ErrParse` / `ErrTableNotExists` 外的所有错误**无视 `disable-error-stack` 始终输出 `errors.ErrorStack(err)` 完整多帧堆栈**。若采用选项 A（默认不捕获完整栈），则在默认配置下 `command dispatched failed` 的 `[err=...]` 仅能输出单行 `file:line`，**直接与负责人 §0.2 第 4 项“4 条核心运维日志（含 `command dispatched failed`）与 Go 逐字节一致”冲突**。<br>**实测开销（`arm64` Linux VM，`rustc 1.99.1`，`#[inline(never)]` 递归深度 10/30/60，含 harness 帧；符号解析惰性延迟至实际格式化日志时才支付）**：<br>- `Location::caller()`：`0.68 ns`（O(1)，与深度无关）<br>- `Backtrace::force_capture()` 仅栈展开（不格式化）：深度 10 = **`3.0–3.3 µs`**、深度 30 = **`5.6–6.0 µs`**、深度 60 = **`9.6–10.9 µs`**（`-O -g` / `-O` / `strip` 均约 `150 ns/帧`）<br>- `Backtrace::force_capture().to_string()`（展开 + 惰性符号化，仅写日志时发生）：`-O -g` 下深度 10 = **`28.9 µs`**、深度 30 = **`42.6 µs`**、深度 60 = **`69.1 µs`**；`strip` 下为 `6.8 / 11.9 / 19.5 µs`（无符号名）。<br>*(注：`amd64` 数据因本机为 `arm64` 尚未本地实测，Batch 0 将在 `ubuntu-latest` CI 补测并补录。)* | **选项 A（按配置开关，与 §0.2 第 4 项冲突）**：仅在 `enable-error-stack = true` 或 `RUST_BACKTRACE=1` 时调用 `Backtrace::force_capture()`；默认关闭时 `ErrVerboseLogger()` 与 `command dispatched failed` `[err=...]` 仅输出 `#[track_caller]` 单点 `<error>\n<file>:<line>`（明确豁免 §0.2 第 4 项对 `command dispatched failed` 堆栈部分的一致性要求）。<br>**选项 B（与 Go 及 §0.2 第 4 项完全一致）**：对所有 `gen_with_stack*` / `trace` / `annotate` 始终调用 `Backtrace::force_capture()`（已走 `fast_gen*` 的热路径与 `ErrKeyExists` / `ErrParse` / `ErrTableNotExists` 无栈；正常无错 SQL 路径零开销，单次报错增加约 3–11 µs 展开成本，仅在真正写日志格式化时付 29–69 µs 符号化成本）。<br>**选项 C**：仅依赖 `RUST_BACKTRACE=1`，`enable-error-stack = true` 不触发 `force_capture()`（同样与 §0.2 第 4 项冲突）。 | **选 B**：实测 `force_capture()` 仅栈展开约 3–11 µs 且只发生在报错路径（`fast_gen*` 热路径不受影响，惰性符号化仅在打日志时触发），与 Go 行为及负责人 §0.2 第 4 项对 `command dispatched failed` 的逐字节一致要求完全吻合，无语义妥协 |
+无（原 D1–D4 已全部于 2026-11-27 03:17Z 拍板并移入 §9.1；用户可见分歧已登记 `docs/testing/rulings.toml` `R33`–`R35` 与 `docs/compatibility.md`，上游缺陷已建 `#453`、`#454`）。
 
 ### 9.3 维护者已定（宪章第九条 2）
 
@@ -666,4 +663,5 @@ Go v8.5.8 实测 `SIGTERM` 核心捕获片段（状态服务默认开启时，3 
 | `M-DEFER` | Go `defer` 清理映射到 Rust `Drop` / scope guard 的规则 |
 | `M-PANIC` | Go `panic`/`recover` 映射到 `Result` 与 task 边界 `catch_unwind` 的规则 |
 | `X` | 本项目明确不移植的 Go 模块或写路径功能（如 DDL、写路径 DML、`ANALYZE`、BR 等） |
-| `D1` / `D2` / `D3` / `D4` | §9.2 需由负责人最终确认的用户可见或性能/资源语义决策项编号 |
+| `D1` / `D2` / `D3` / `D4` | §9.1 已由负责人于 2026-11-27 03:17Z 拍板的用户可见或性能/资源语义决策项编号 |
+| `R33` / `R34` / `R35` | `docs/testing/rulings.toml` 登记的 D00.3 日志与版本可观测分歧裁定（`#453`、`#454`、`#447`） |
