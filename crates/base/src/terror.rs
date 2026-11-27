@@ -330,17 +330,17 @@ fn get_mysql_error_code(e: &Error) -> u16 {
     {
         let (ec, has) = rfcCode2errClass.get(&rfc_code[..index]);
         if !has {
-            log::warn!("Unknown error class; class={}", &rfc_code[..index]);
+            crate::log_warn!("Unknown error class", "class" => &rfc_code[..index]);
             return defaultMySQLErrorCode;
         }
         class = ec;
     }
     let Some(code_map) = ErrClassToMySQLCodes.get(&class) else {
-        log::warn!("Unknown error class; class={}", class.0);
+        crate::log_warn!("Unknown error class", "class" => class.0);
         return defaultMySQLErrorCode;
     };
     if code_map.binary_search(&e.code()).is_err() {
-        log::debug!("Unknown error code; class={} code={}", class.0, e.code());
+        crate::log_debug!("Unknown error code", "class" => class.0, "code" => e.code());
         return defaultMySQLErrorCode;
     }
     e.code() as u16
@@ -390,10 +390,9 @@ pub fn must_nil(err: Option<&Error>, close_funs: &mut [&mut dyn FnMut()]) {
         for f in close_funs.iter_mut() {
             f();
         }
-        log::error!(
-            "unexpected error; error={err}; stack={}",
-            std::backtrace::Backtrace::force_capture()
-        );
+        let bt = errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture());
+        crate::log_fatal!("unexpected error", "error" => err, "stack" => &bt);
+        let _ = crate::structured_log::logger().sync();
         // log.Fatal exits the process.
         std::process::exit(1);
     }
@@ -403,10 +402,8 @@ pub fn must_nil(err: Option<&Error>, close_funs: &mut [&mut dyn FnMut()]) {
 // go: Call L1
 pub fn call(f: impl FnOnce() -> Result<(), Error>) {
     if let Err(err) = f() {
-        log::error!(
-            "function call errored; error={err}; stack={}",
-            std::backtrace::Backtrace::capture()
-        );
+        let bt = errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture());
+        crate::log_error!("function call errored", "error" => &err, "stack" => &bt);
     }
 }
 
@@ -414,10 +411,8 @@ pub fn call(f: impl FnOnce() -> Result<(), Error>) {
 // go: Log L1
 pub fn log(err: Option<&Error>) {
     if let Some(err) = err {
-        log::error!(
-            "encountered error; error={err}; stack={}",
-            std::backtrace::Backtrace::capture()
-        );
+        let bt = errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture());
+        crate::log_error!("encountered error", "error" => err, "stack" => &bt);
     }
 }
 

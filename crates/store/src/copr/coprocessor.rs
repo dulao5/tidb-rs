@@ -9,12 +9,10 @@
 #![allow(non_upper_case_globals)]
 
 use std::collections::{BTreeMap, HashMap};
-use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::FutureExt;
 use tidb_base::gofmt::Arg;
 use tidb_memory::tracker::Tracker;
 
@@ -1466,13 +1464,20 @@ impl<S: TiKVStore> CopIterator<S> {
             let cur_task = self.tasks.remove(0);
             let lite = self.lite_worker.as_mut().unwrap();
             let bo = choose_backoffer(&mut backoffermap, &cur_task, &lite.worker);
-            let result = AssertUnwindSafe(lite.worker.handle_task_once(bo, cur_task))
-                .catch_unwind()
-                .await;
+            let result = tidb_base::panic_guard::catch_unwind_future(
+                lite.worker.handle_task_once(bo, cur_task),
+            )
+            .await;
             let result = match result {
                 Ok(r) => r,
-                Err(p) => {
-                    log::error!("copIteratorWork meet panic");
+                Err((p, bt)) => {
+                    let msg = tidb_base::panic_guard::panic_payload_message(p.as_ref());
+                    let stack = bt.unwrap_or_default();
+                    tidb_base::log_error!(
+                        "copIteratorWork meet panic",
+                        "r" => &msg,
+                        "stack trace" => &stack,
+                    );
                     return Some(Box::new(CopResponse {
                         err: Some(get_recover_error(p)),
                         ..Default::default()
@@ -1734,11 +1739,16 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
     /// on error.
     // go: copIteratorWorker.handleTask L1 [M-PANIC]
     async fn handle_task(&self, task: CopTask, resp_ch: &RespSink) {
-        let r = AssertUnwindSafe(self.handle_task_inner(task, resp_ch))
-            .catch_unwind()
+        let r = tidb_base::panic_guard::catch_unwind_future(self.handle_task_inner(task, resp_ch))
             .await;
-        if let Err(p) = r {
-            log::warn!("copIteratorWork meet panic");
+        if let Err((p, bt)) = r {
+            let msg = tidb_base::panic_guard::panic_payload_message(p.as_ref());
+            let stack = bt.unwrap_or_default();
+            tidb_base::log_warn!(
+                "copIteratorWork meet panic",
+                "r" => &msg,
+                "stack trace" => &stack,
+            );
             let resp = Box::new(CopResponse {
                 err: Some(get_recover_error(p)),
                 ..Default::default()

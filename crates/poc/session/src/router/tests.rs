@@ -690,6 +690,7 @@ fn go_ported_error_is_not_a_fallback() {
             code: 1054,
             state: "42S22",
             message: "Unknown column 'x' in 'field list'".into(),
+            source_err: None,
         }
     );
     assert!(!p.log.iter().any(|l| l.starts_with("run")));
@@ -710,6 +711,7 @@ fn new_stack_errors_get_go_code_sqlstate_and_message() {
                 code: 1690,
                 state: "22003",
                 message: OVERFLOW.into(),
+                source_err: None,
             },
         ),
         (
@@ -718,6 +720,7 @@ fn new_stack_errors_get_go_code_sqlstate_and_message() {
                 code: 1365,
                 state: "22012",
                 message: "Division by 0".into(),
+                source_err: None,
             },
         ),
         (
@@ -726,6 +729,7 @@ fn new_stack_errors_get_go_code_sqlstate_and_message() {
                 code: 1105,
                 state: "HY000",
                 message: "Data Too Long, field len 3".into(),
+                source_err: None,
             },
         ),
         (
@@ -734,6 +738,7 @@ fn new_stack_errors_get_go_code_sqlstate_and_message() {
                 code: 1105,
                 state: "HY000",
                 message: "other error: region unavailable".into(),
+                source_err: None,
             },
         ),
     ];
@@ -1636,6 +1641,7 @@ fn blocked_after_open_is_an_error_not_a_fallback() {
                 message: "This version of TiDB doesn't yet support 'something after the \
                           executors opened (blocked-by:D12.2)'"
                     .into(),
+                source_err: None,
             },
             "{mode:?}"
         );
@@ -1843,4 +1849,33 @@ fn admin_flush_plan_cache_scopes_as_go() {
         assert_eq!(r.last_stmt().engine, Engine::New, "{sql}");
         assert!(script.lock().unwrap().log.is_empty(), "{sql}");
     }
+}
+
+#[test]
+fn parse_error_wrapping_has_no_double_trailing_space() {
+    let msg = "You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use line 3 column 7 near \"FROM nonexistent\" ";
+    let err = log_and_wrap_parse_error(
+        7,
+        "",
+        "OFF",
+        "SELECT\n  1,\n  FROM nonexistent",
+        SqlError::new(1064, msg),
+    );
+    let src = err.source_err.expect("source_err attached");
+    let rendered = src.to_string();
+    assert_eq!(rendered, format!("[parser:1064]{msg}"));
+    assert!(
+        !rendered.ends_with("  "),
+        "must not append a second trailing space: {rendered:?}"
+    );
+}
+
+#[test]
+fn set_connection_id_propagates_to_new_stack_session_vars() {
+    let p = poc();
+    let (mut r, _) = scripted(NewStackMode::Fallback, &p);
+    assert_eq!(r.new.session().vars().connection_id, 0);
+    r.set_connection_id(2097158);
+    assert_eq!(r.conn_id, 2097158);
+    assert_eq!(r.new.session().vars().connection_id, 2097158);
 }

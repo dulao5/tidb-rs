@@ -20,13 +20,9 @@
 
 use std::any::Any;
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::task::Context;
-use std::task::Poll;
 
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
@@ -364,40 +360,28 @@ impl ExecPool {
         let guard = ExitGuard(Some(on_exit));
         let task = async move {
             let guard = guard;
-            match CatchUnwind(Box::pin(fut)).await {
+            match tidb_base::panic_guard::catch_unwind_future(fut).await {
                 Ok(v) => {
                     guard.fire(TaskExit::Completed);
                     Some(v)
                 }
-                Err(payload) => {
+                Err((payload, bt)) => {
                     let e = PanicError::from_payload(payload.as_ref());
                     metrics::panic();
                     // Go: logutil.BgLogger().Error("panic in the recoverable goroutine", ...),
                     // after recoverFn.
                     let msg = e.to_string();
+                    let stack = bt.unwrap_or_default();
                     guard.fire(TaskExit::Panicked(e));
-                    tracing::error!(task = name, r = %msg, "panic in the recoverable goroutine");
+                    tidb_base::log_error!(
+                        "panic in the recoverable goroutine",
+                        "r" => &msg,
+                        "stack trace" => &stack,
+                    );
                     None
                 }
             }
         };
         self.spawn(name, task)
-    }
-}
-
-/// `catch_unwind` around each poll of a future.
-struct CatchUnwind<F>(Pin<Box<F>>);
-
-impl<F: Future> Future for CatchUnwind<F> {
-    type Output = Result<F::Output, Box<dyn Any + Send>>;
-
-    // glue: task-boundary catch_unwind (M-PANIC)
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let inner = self.0.as_mut();
-        match std::panic::catch_unwind(AssertUnwindSafe(|| inner.poll(cx))) {
-            Ok(Poll::Pending) => Poll::Pending,
-            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
-            Err(p) => Poll::Ready(Err(p)),
-        }
     }
 }

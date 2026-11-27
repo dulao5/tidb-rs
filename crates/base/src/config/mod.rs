@@ -667,6 +667,29 @@ pub enum InitializeExit {
 /// and ignore the port number in the config file.
 ///
 /// Go calls `os.Exit` (and `terror.MustNil` panics); the port returns
+/// Serialize `conf` to JSON in Go struct-declaration field order (`json.Marshal(conf)`), used by
+/// `printer.PrintTiDBInfo` for the `"loaded config"` startup log line. Never call
+/// [`get_json_config`] for `"loaded config"` (it sorts keys alphabetically and converts ints to
+/// floats).
+// glue: json.Marshal(config.GetGlobalConfig()) for printer.PrintTiDBInfo
+pub fn marshal_json(conf: &Config) -> Result<String, Error> {
+    reflect::marshal_json_struct_order(conf)
+}
+
+/// Pre-logger stderr write matching Go `fmt.Fprintln(os.Stderr, ...)` in `InitializeConfig`.
+// glue: pre-logger stderr parity with Go pkg/config/config.go:1200,1222,1234-1235
+fn pre_logger_eprintln(msg: &str) {
+    // log-skip: pre-logger stderr/stdout parity with Go
+    eprintln!("{msg}");
+}
+
+/// Pre-logger stdout write matching Go `fmt.Println(...)` in `InitializeConfig`.
+// glue: pre-logger stdout parity with Go pkg/config/config.go:1239
+fn pre_logger_println(msg: &str) {
+    // log-skip: pre-logger stderr/stdout parity with Go
+    println!("{msg}");
+}
+
 /// [`InitializeExit::Exit`] so that the binary exits, and panics where Go panics.
 // go: InitializeConfig L2 (os.Exit is returned to the caller; the flag set is the caller's closure)
 pub fn initialize_config(
@@ -689,12 +712,15 @@ pub fn initialize_config(
                     if (!config_check && !config_strict)
                         || is_all_removed_config_items(&tmp.undecoded_items)
                     {
-                        eprintln!("{}", tmp.error());
+                        pre_logger_eprintln(&tmp.error());
                     } else {
                         err = Some(e.error());
                     }
                 }
-                LoadError::InstanceSection(tmp) => log::warn!("{}", tmp.error()),
+                LoadError::InstanceSection(tmp) => {
+                    let msg = tmp.error();
+                    crate::log_warn!(&msg);
+                }
                 LoadError::Other(_) => err = Some(e.error()),
             }
         }
@@ -702,7 +728,8 @@ pub fn initialize_config(
         // removed. This helps users upgrade better.
         if config_check {
             if let Err(e) = cfg.removed_variable_check(conf_path) {
-                log::warn!("{}", String::from_utf8_lossy(&e.error()));
+                let msg = String::from_utf8_lossy(&e.error()).into_owned();
+                crate::log_warn!(&msg);
             }
             err = None; // treat as warning
         }
@@ -713,7 +740,7 @@ pub fn initialize_config(
     } else {
         // configCheck should have the config file specified.
         if config_check {
-            eprintln!("config check failed no config file specified for config-check");
+            pre_logger_eprintln("config check failed no config file specified for config-check");
             return Err(InitializeExit::Exit(1));
         }
     }
@@ -726,12 +753,15 @@ pub fn initialize_config(
         {
             conf_path = crate::gostd::path::join(&[&cwd.to_string_lossy(), &conf_path]);
         }
-        eprintln!("load config file: {conf_path}");
-        eprintln!("invalid config {}", String::from_utf8_lossy(&e.error()));
+        pre_logger_eprintln(&format!("load config file: {conf_path}"));
+        pre_logger_eprintln(&format!(
+            "invalid config {}",
+            String::from_utf8_lossy(&e.error())
+        ));
         return Err(InitializeExit::Exit(1));
     }
     if config_check {
-        println!("config check successful");
+        pre_logger_println("config check successful");
         return Err(InitializeExit::Exit(0));
     }
     store_global_config(Arc::new(cfg));
@@ -860,22 +890,24 @@ impl Config {
         if self.log.enable_error_stack == self.log.disable_error_stack
             && self.log.enable_error_stack != nbUnset
         {
-            log::warn!(
+            let msg = format!(
                 "\"enable-error-stack\" ({}) conflicts \"disable-error-stack\" ({}). \"disable-error-stack\" is deprecated, please use \"enable-error-stack\" instead. disable-error-stack is ignored.",
                 fmt_nb(self.log.enable_error_stack),
                 fmt_nb(self.log.disable_error_stack)
             );
+            crate::log_warn!(&msg);
             // if two options conflict, we will use the value of EnableErrorStack
             self.log.disable_error_stack = nbUnset;
         }
         if self.log.enable_timestamp == self.log.disable_timestamp
             && self.log.enable_timestamp != nbUnset
         {
-            log::warn!(
+            let msg = format!(
                 "\"enable-timestamp\" ({}) conflicts \"disable-timestamp\" ({}). \"disable-timestamp\" is deprecated, please use \"enable-timestamp\" instead",
                 fmt_nb(self.log.enable_timestamp),
                 fmt_nb(self.log.disable_timestamp)
             );
+            crate::log_warn!(&msg);
             // if two options conflict, we will use the value of EnableTimestamp
             self.log.disable_timestamp = nbUnset;
         }
