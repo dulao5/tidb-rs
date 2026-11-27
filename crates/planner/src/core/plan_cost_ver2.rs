@@ -40,15 +40,17 @@ use tidb_sessionctx::variable::tidb_vars::EnableTmpStorageOnOOM;
 
 use crate::base::{PhysicalKind, PhysicalPlan};
 use crate::core::physical_plans::{
-    PhysicalIndexReader, PhysicalIndexScan, PhysicalProjection, PhysicalSelection, PhysicalSort,
-    PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
+    PhysicalIndexLookUpReader, PhysicalIndexReader, PhysicalIndexScan, PhysicalProjection,
+    PhysicalSelection, PhysicalSort, PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
 };
-use crate::core::plan_cost_ver1::{get_cardinality, has_cost_flag, modelVer2};
+use crate::core::plan_cost_ver1::{get_cardinality, get_tbl_stats, has_cost_flag, modelVer2};
 use crate::core::point_get_plan::PointGetPlan;
 use crate::core::task::get_avg_row_size;
 use crate::physicalop::BasePhysicalPlan;
 use crate::planctx::PlanCtx;
-use crate::property::{CopSingleReadTaskType, MppTaskType, RootTaskType, StatsInfo, TaskType};
+use crate::property::{
+    CopMultiReadTaskType, CopSingleReadTaskType, MppTaskType, RootTaskType, StatsInfo, TaskType,
+};
 use crate::util::ByItems;
 use crate::util::costusage::{
     CostFlagRecalculate, CostVer2, CostVer2Factor, ZeroCostVer2, div_cost_ver2, mul_cost_ver2,
@@ -271,6 +273,130 @@ impl PhysicalIndexReader {
         let mut plan_cost = div_cost_ver2(&sum_cost_ver2(&[child_cost, net_cost]), concurrency);
         // Multiply by cost factor - defaults to 1, but can be increased/decreased to influence the cost model
         plan_cost = mul_cost_ver2(&plan_cost, ctx.vars.index_reader_cost_factor);
+        set_cost(base, plan_cost)
+    }
+}
+
+impl PhysicalIndexLookUpReader {
+    /// GetPlanCostVer2 returns the plan-cost of this sub-plan.
+    ///
+    /// Matches Go `plan_cost_ver2.go:288-351`. `paging` is updated through `AtomicBool` only on
+    /// unsealed nodes (A3 §3.6; sticky across plan cache hits per Go, see #452).
+    // go: PhysicalIndexLookUpReader.GetPlanCostVer2 L1 [M-CTX, M-LOCK]
+    pub fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        let base = &self.sp.base;
+        if let Some(c) = cached_cost(base, option) {
+            return Ok(c);
+        }
+
+        let index_plan = self
+            .index_plan
+            .as_deref()
+            .expect("runtime error: invalid memory address or nil pointer dereference");
+        let table_plan = self
+            .table_plan
+            .as_deref()
+            .expect("runtime error: invalid memory address or nil pointer dereference");
+        let mut index_rows = get_cardinality(ctx, index_plan, option.cost_flag);
+        let mut table_rows = get_cardinality(ctx, table_plan, option.cost_flag);
+
+        if let Some(lim) = &self.pushed_limit {
+            // consider pushed down limit clause
+            index_rows = math::min(index_rows, lim.count as f64); // rows returned from the index side
+            table_rows = math::min(table_rows, lim.count as f64); // rows to scan on the table side
+        }
+
+        let default_coll = tidb_statistics::HistColl::default();
+        let idx_stats = get_tbl_stats(index_plan);
+        let tbl_stats = get_tbl_stats(table_plan);
+        let index_row_size = crate::cardinality::row_size::get_avg_row_size(
+            ctx,
+            idx_stats.map_or(&default_coll, |v| &**v),
+            &index_plan.schema().columns,
+            true,
+            false,
+        );
+        let table_row_size = crate::cardinality::row_size::get_avg_row_size(
+            ctx,
+            tbl_stats.map_or(&default_coll, |v| &**v),
+            &table_plan.schema().columns,
+            false,
+            false,
+        );
+        let cpu_factor = get_task_cpu_factor_ver2(self, task_type);
+        let net_factor = get_task_net_factor_ver2(self, task_type);
+        let request_factor = get_task_request_factor_ver2(self, task_type);
+        let dist_concurrency = ctx.vars.dist_sql_scan_concurrency() as f64;
+        let double_read_concurrency = ctx.vars.index_lookup_concurrency() as f64;
+
+        // index-side
+        let index_net_cost = net_cost_ver2(option, index_rows, index_row_size, net_factor);
+        let index_child_cost = index_plan.get_plan_cost_ver2(ctx, CopMultiReadTaskType, option)?;
+        let index_side_cost = div_cost_ver2(
+            &sum_cost_ver2(&[index_net_cost, index_child_cost]),
+            dist_concurrency,
+        );
+
+        // table-side
+        let table_net_cost = net_cost_ver2(option, table_rows, table_row_size, net_factor);
+        let table_child_cost = table_plan.get_plan_cost_ver2(ctx, CopMultiReadTaskType, option)?;
+        let table_side_cost = div_cost_ver2(
+            &sum_cost_ver2(&[table_net_cost, table_child_cost]),
+            dist_concurrency,
+        );
+
+        let double_read_rows = index_rows;
+        let double_read_cpu_cost = new_cost_ver2(
+            Some(option),
+            cpu_factor,
+            index_rows * cpu_factor.value,
+            || {
+                sprintf_s(
+                    "double-read-cpu(%v*%v)",
+                    &[f64_arg(double_read_rows), factor_arg(cpu_factor)],
+                )
+            },
+        );
+        let batch_size = ctx.vars.index_lookup_size as f64;
+        let task_per_batch = 32.0; // TODO: remove this magic number
+        let double_read_tasks = double_read_rows / batch_size * task_per_batch;
+        let double_read_request_cost =
+            double_read_cost_ver2(option, double_read_tasks, request_factor);
+        let double_read_cost = sum_cost_ver2(&[double_read_cpu_cost, double_read_request_cost]);
+
+        let mut plan_cost = sum_cost_ver2(&[
+            index_side_cost,
+            div_cost_ver2(
+                &sum_cost_ver2(&[table_side_cost, double_read_cost]),
+                double_read_concurrency,
+            ),
+        ]);
+
+        if ctx.vars.enable_paging
+            && self.expected_cnt > 0
+            && self.expected_cnt <= tidb_store::util::paging::Threshold
+        {
+            // if the expectCnt is below the paging threshold, using paging API
+            if !base.is_sealed() {
+                self.paging
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            plan_cost = mul_cost_ver2(&plan_cost, 0.6);
+        }
+
+        if let Some(lim) = &self.pushed_limit
+            && table_rows <= lim.count as f64
+        {
+            // Multiply by limit cost factor - defaults to 1, but can be increased/decreased to influence the cost model
+            plan_cost = mul_cost_ver2(&plan_cost, ctx.vars.limit_cost_factor);
+        }
+        // Multiply by cost factor - defaults to 1, but can be increased/decreased to influence the cost model
+        plan_cost = mul_cost_ver2(&plan_cost, ctx.vars.index_lookup_cost_factor);
         set_cost(base, plan_cost)
     }
 }
@@ -592,6 +718,21 @@ pub fn get_number_of_ranges(pp: &dyn PhysicalPlan) -> isize {
                 .expect("type assertion");
             return get_number_of_ranges(
                 p.index_plan
+                    .as_deref()
+                    .expect("runtime error: invalid memory address or nil pointer dereference"),
+            );
+        }
+        PhysicalKind::IndexLookUpReader => {
+            let p = pp
+                .as_any()
+                .downcast_ref::<PhysicalIndexLookUpReader>()
+                .expect("type assertion");
+            return get_number_of_ranges(
+                p.index_plan
+                    .as_deref()
+                    .expect("runtime error: invalid memory address or nil pointer dereference"),
+            ) + get_number_of_ranges(
+                p.table_plan
                     .as_deref()
                     .expect("runtime error: invalid memory address or nil pointer dereference"),
             );
@@ -1031,6 +1172,17 @@ pub fn get_table_info(p: &dyn PhysicalPlan) -> Option<&TableInfo> {
                 .expect("type assertion");
             get_table_info(
                 x.index_plan
+                    .as_deref()
+                    .expect("runtime error: invalid memory address or nil pointer dereference"),
+            )
+        }
+        PhysicalKind::IndexLookUpReader => {
+            let x = p
+                .as_any()
+                .downcast_ref::<PhysicalIndexLookUpReader>()
+                .expect("type assertion");
+            get_table_info(
+                x.table_plan
                     .as_deref()
                     .expect("runtime error: invalid memory address or nil pointer dereference"),
             )

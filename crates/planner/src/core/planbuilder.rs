@@ -622,20 +622,68 @@ fn is_primary_index(index_name: &str) -> bool {
     index_name == "primary"
 }
 
-/// `checkAutoForceIndexLookUpPushDown`: under the default policy (`hint-only`) the index
-/// lookup is not pushed down automatically. The other policies check the session and the
-/// table (`checkIndexLookUpPushDownSupported`, the access path handling of D10.2).
-// go: checkAutoForceIndexLookUpPushDown L2 (the force policies are blocked-by:D10.2)
-fn check_auto_force_index_look_up_push_down(vars: &SessionVars) -> Result<bool, Error> {
-    match vars.index_look_up_push_down_policy.as_str() {
-        "force" | "affinity-force" => {
-            // glue: blocked-by:D10.2 (checkIndexLookUpPushDownSupported, the forced index lookup push down)
-            Err(blocked(
-                "D10.2",
-                "tidb_index_lookup_pushdown_policy other than hint-only (checkIndexLookUpPushDownSupported)",
-            ))
+/// `ast.RepeatableRead`.
+const REPEATABLE_READ: &str = "REPEATABLE-READ";
+
+/// `checkIndexLookUpPushDownSupported` checks whether pushing down an index lookup to TiKV is
+/// supported for this session, table, and index.
+// go: checkIndexLookUpPushDownSupported L1 [M-CTX]
+pub(crate) fn check_index_look_up_push_down_supported(
+    vars: &mut SessionVars,
+    tbl_info: &TableInfo,
+    index: &tidb_model::IndexInfo,
+    suppress_warning: bool,
+) -> bool {
+    let un_supported_reason: Option<&str> =
+        if tbl_info.is_common_handle && tbl_info.common_handle_version < 1 {
+            Some("common handle table with old encoding version is not supported")
+        } else if index.global {
+            Some("the global index in partition table is not supported")
+        } else if tbl_info.temp_table_type != tidb_model::TempTableNone {
+            Some("temporary table is not supported")
+        } else if tbl_info.table_cache_status_type != tidb_model::TableCacheStatusDisable {
+            Some("cached table is not supported")
+        } else if index.mv_index {
+            Some("multi-valued index is not supported")
+        } else if !vars.is_isolation(REPEATABLE_READ) {
+            Some("transaction isolation level is not REPEATABLE-READ")
+        } else if vars.get_replica_read() != tidb_kv::option::ReplicaReadLeader {
+            Some("only leader read is supported")
+        } else if vars.state.txn_ctx.is_staleness {
+            Some("stale read is not supported")
+        } else if vars.snapshot_ts != 0 {
+            Some("historical read is not supported")
+        } else {
+            None
+        };
+
+    if let Some(reason) = un_supported_reason {
+        if !suppress_warning {
+            vars.stmt_ctx().set_hint_warning(&format!(
+                "hint INDEX_LOOKUP_PUSHDOWN is inapplicable, {reason}"
+            ));
         }
-        _ => Ok(false),
+        return false;
+    }
+    true
+}
+
+/// `checkAutoForceIndexLookUpPushDown`.
+// go: checkAutoForceIndexLookUpPushDown L1 [M-CTX]
+fn check_auto_force_index_look_up_push_down(
+    vars: &mut SessionVars,
+    tbl_info: &TableInfo,
+    index: &tidb_model::IndexInfo,
+) -> bool {
+    match vars.index_look_up_push_down_policy.as_str() {
+        "force" => check_index_look_up_push_down_supported(vars, tbl_info, index, true),
+        "affinity-force" => {
+            if tbl_info.affinity.is_none() {
+                return false;
+            }
+            check_index_look_up_push_down_supported(vars, tbl_info, index, true)
+        }
+        _ => false,
     }
 }
 
@@ -735,7 +783,8 @@ pub fn get_possible_access_paths(
                 index: Some(Arc::clone(index)),
                 ..AccessPath::default()
             };
-            if !force_no_index_look_up_push_down && check_auto_force_index_look_up_push_down(vars)?
+            if !force_no_index_look_up_push_down
+                && check_auto_force_index_look_up_push_down(vars, tbl_info, index)
             {
                 path.index_look_up_push_down_by = INDEX_LOOK_UP_PUSH_DOWN_BY_SYS_VAR;
             }

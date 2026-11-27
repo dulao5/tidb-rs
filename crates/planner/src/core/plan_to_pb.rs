@@ -352,6 +352,35 @@ impl PhysicalIndexScan {
     }
 }
 
+impl crate::core::physical_plans::PhysicalLocalIndexLookUp {
+    /// ToPB implements PhysicalPlan ToPB interface (`physical_plans.go:3204`).
+    ///
+    /// Does NOT call `new_executor`: Go returns `&tipb.Executor{Tp: ..., IndexLookup: ...}` with
+    /// `ExecutorId == nil` and `KeepOrder == nil`, while gogoproto still encodes the non-nullable
+    /// 0-valued `FineGrainedShuffleStreamCount` and `FineGrainedShuffleBatchSize` fields.
+    // go: pkg/planner/core/physical_plans.go PhysicalLocalIndexLookUp.ToPB L1 [M-CTX]
+    pub fn to_pb(
+        &self,
+        _ctx: &BuildPBContext,
+        store_type: StoreType,
+    ) -> Result<tipb::Executor, Error> {
+        if store_type != tidb_base::kv::TiKV {
+            return Err(errors::errorf(
+                "unsupported store type %v for LocalIndexLookUp",
+                &[Arg::from(store_type.name())],
+            ));
+        }
+        let mut il = tipb::IndexLookUp::default();
+        il.set_index_handle_offsets(self.index_handle_offsets.clone());
+        let mut e = tipb::Executor::default();
+        e.set_tp(ExecType::TypeIndexLookUp);
+        e.set_index_lookup(il);
+        e.set_fine_grained_shuffle_stream_count(0);
+        e.set_fine_grained_shuffle_batch_size(0);
+        Ok(e)
+    }
+}
+
 /// FindColumnInfoByID finds ColumnInfo in cols by ID.
 // go: FindColumnInfoByID L1
 pub fn find_column_info_by_id(col_infos: &[Arc<ColumnInfo>], id: i64) -> Option<&Arc<ColumnInfo>> {

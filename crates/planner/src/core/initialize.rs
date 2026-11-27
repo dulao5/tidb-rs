@@ -24,15 +24,18 @@ use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::kv;
 
-use crate::base::PhysicalKind;
+use crate::base::{PhysicalKind, PhysicalPlan};
 use crate::core::physical_plans::{
-    BatchCop, Cop, MPP, NominalSort, PhysicalIndexReader, PhysicalIndexScan, PhysicalLimit,
-    PhysicalProjection, PhysicalSelection, PhysicalSort, PhysicalTableDual, PhysicalTableReader,
-    PhysicalTableScan, PhysicalTopN, set_mpp_or_batch_cop_for_table_scan,
+    BatchCop, Cop, MPP, NominalSort, PhysicalIndexLookUpReader, PhysicalIndexReader,
+    PhysicalIndexScan, PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalSort,
+    PhysicalTableDual, PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
+    set_mpp_or_batch_cop_for_table_scan,
 };
+use crate::core::task::set_table_scan_to_table_row_id_scan;
 use crate::physicalop::{PhysicalPlanRef, new_base_physical_plan};
 use crate::planctx::PlanCtx;
 use crate::property::{PhysicalProperty, StatsInfo};
+use crate::util::path::IndexLookUpPushDownByType;
 
 /// `plancodec.TypeSel`.
 const TypeSel: &str = "Selection";
@@ -54,6 +57,10 @@ const TypeTableReader: &str = "TableReader";
 const TypeIdxScan: &str = "IndexScan";
 /// `plancodec.TypeIndexReader`.
 const TypeIndexReader: &str = "IndexReader";
+/// `plancodec.TypeIndexLookUp`.
+const TypeIndexLookUp: &str = "IndexLookUp";
+/// `plancodec.TypeLocalIndexLookUp`.
+pub(crate) const TypeLocalIndexLookUp: &str = "LocalIndexLookUp";
 
 impl PhysicalSelection {
     /// Init initializes PhysicalSelection.
@@ -196,6 +203,51 @@ impl PhysicalIndexReader {
     pub fn init(mut self, ctx: &PlanCtx<'_>, offset: isize) -> PhysicalIndexReader {
         self.sp.base = new_base_physical_plan(ctx, TypeIndexReader, offset);
         crate::base::PhysicalPlan::set_schema(&mut self, tidb_expression::Schema::default());
+        self
+    }
+}
+
+impl PhysicalIndexLookUpReader {
+    /// Init initializes PhysicalIndexLookUpReader.
+    ///
+    /// Runs `set_table_scan_to_table_row_id_scan` BEFORE `flatten_list_push_down_plan` so the
+    /// flattened `table_plans` shares the mutated `PhysicalTableScan` `Arc` without copy-on-write
+    /// divergence (N1 §3.4).
+    // go: PhysicalIndexLookUpReader.Init L1 [M-SELF, M-CTX, M-PLAN]
+    pub fn init(
+        mut self,
+        ctx: &PlanCtx<'_>,
+        offset: isize,
+        index_look_up_push_down_by: IndexLookUpPushDownByType,
+    ) -> PhysicalIndexLookUpReader {
+        self.sp.base = new_base_physical_plan(ctx, TypeIndexLookUp, offset);
+        let (schema, stats) = {
+            let tp = self
+                .table_plan
+                .as_ref()
+                .expect("runtime error: invalid memory address or nil pointer dereference");
+            (tp.schema().clone_schema(), tp.stats_info().map(Arc::clone))
+        };
+        self.sp.set_schema(Some(schema));
+        self.set_stats(stats);
+        self.try_push_down_look_up(ctx, index_look_up_push_down_by);
+        set_table_scan_to_table_row_id_scan(
+            self.table_plan
+                .as_mut()
+                .expect("runtime error: invalid memory address or nil pointer dereference"),
+        );
+        self.table_plans = flatten_list_push_down_plan(
+            self.table_plan
+                .as_ref()
+                .expect("runtime error: invalid memory address or nil pointer dereference"),
+        );
+        let (index_plans, uno) = flatten_tree_push_down_plan(
+            self.index_plan
+                .as_ref()
+                .expect("runtime error: invalid memory address or nil pointer dereference"),
+        );
+        self.index_plans = index_plans;
+        self.index_plans_un_nature_orders = uno.unwrap_or_default();
         self
     }
 }

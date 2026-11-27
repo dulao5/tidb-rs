@@ -849,3 +849,272 @@ fn index_reader_seal_hash_heap_size_rebuild_and_cacheable() {
     assert_eq!(ts_grp.grouped_ranges[0][0].low_val[0].get_int64(), 20);
     assert_eq!(ts_grp.grouped_ranges[1][0].low_val[0].get_int64(), 30);
 }
+
+#[test]
+fn index_lookup_reader_seal_paging_hash_heap_size_and_rebuild() {
+    use crate::base::PhysicalPlan;
+    use crate::core::physical_plans::{
+        PhysicalIndexLookUpReader, PhysicalIndexScan, PhysicalLocalIndexLookUp, PhysicalTableScan,
+    };
+    use crate::core::plan_cache_heap_size::{
+        plan_cache_value_heap_size, plan_structure_hash, seal_plan,
+    };
+    use crate::core::plan_cache_rebuild::rebuild_range;
+    use crate::core::plan_cacheable_checker::is_physical_plan_cacheable;
+    use crate::property::StatsInfo;
+    use crate::util::optimizetrace::new_default_plan_cost_option;
+    use crate::util::path::{INDEX_LOOK_UP_PUSH_DOWN_BY_SYS_VAR, INDEX_LOOK_UP_PUSH_DOWN_NONE};
+    use std::sync::atomic::Ordering;
+    use tidb_base::mysql::{PriKeyFlag, TypeLonglong};
+    use tidb_expression::constant::{Constant, ParamMarker};
+    use tidb_expression::scalar_function::{ast_func, new_function};
+    use tidb_expression::{Column, Expr, ExprRef, new_schema};
+    use tidb_model::{ColumnInfo, IndexColumn, IndexInfo, TableInfo};
+    use tidb_parser::model::CIStr;
+    use tidb_parser::types::UnspecifiedLength;
+    use tidb_sessionctx::exprstatic as es;
+    use tidb_sessionctx::ranger::Range;
+    use tidb_types::datum::{Datum, new_int_datum};
+    use tidb_types::field_type::new_field_type;
+
+    fn make_ctx<'a>(
+        vars: &'a mut tidb_sessionctx::variable::session::SessionVars,
+        params: &[Datum],
+    ) -> crate::planctx::PlanCtx<'a> {
+        let ev = es::new_eval_context(vec![es::with_param_list(params)]);
+        let ectx = es::new_expr_context(vec![es::with_eval_ctx(ev)]);
+        crate::planctx::PlanCtx::new(vars, ectx)
+    }
+
+    let mut vars = tidb_sessionctx::variable::session::SessionVars::new(Box::new(NoGlobals));
+    vars.current_db = "test".to_owned();
+    vars.enable_paging = true;
+    let ctx = make_ctx(&mut vars, &[new_int_datum(1), new_int_datum(10)]);
+
+    let mut id_ft = new_field_type(TypeLonglong);
+    id_ft.add_flag(PriKeyFlag);
+    let id_col = Arc::new(Column {
+        unique_id: 1,
+        id: 1,
+        index: 0,
+        ret_type: Arc::new(id_ft.clone()),
+        ..Default::default()
+    });
+    let k_col = Arc::new(Column {
+        unique_id: 2,
+        id: 2,
+        index: 0,
+        ret_type: Arc::new(new_field_type(TypeLonglong)),
+        ..Default::default()
+    });
+    let c_col = Arc::new(Column {
+        unique_id: 3,
+        id: 3,
+        index: 1,
+        ret_type: Arc::new(new_field_type(TypeLonglong)),
+        ..Default::default()
+    });
+    let tbl = Arc::new(TableInfo {
+        id: 10,
+        name: CIStr::new("t_lookup"),
+        pk_is_handle: true,
+        columns: Some(vec![
+            Arc::new(ColumnInfo {
+                id: 1,
+                name: CIStr::new("id"),
+                offset: 0,
+                field_type: id_ft,
+                ..Default::default()
+            }),
+            Arc::new(ColumnInfo {
+                id: 2,
+                name: CIStr::new("k"),
+                offset: 1,
+                field_type: new_field_type(TypeLonglong),
+                ..Default::default()
+            }),
+            Arc::new(ColumnInfo {
+                id: 3,
+                name: CIStr::new("c"),
+                offset: 2,
+                field_type: new_field_type(TypeLonglong),
+                ..Default::default()
+            }),
+        ]),
+        ..Default::default()
+    });
+    let idx = Arc::new(IndexInfo {
+        id: 1,
+        name: CIStr::new("idx_k"),
+        columns: Some(vec![IndexColumn {
+            name: CIStr::new("k"),
+            offset: 1,
+            length: UnspecifiedLength,
+            ..Default::default()
+        }]),
+        ..Default::default()
+    });
+
+    let param_expr = |pos: i64, val: i64| -> ExprRef {
+        let mut c = Constant::new(new_int_datum(val), new_field_type(TypeLonglong));
+        c.param_marker = Some(ParamMarker { order: pos });
+        Arc::new(Expr::Constant(c))
+    };
+
+    let ge = new_function(
+        &*ctx.expr_ctx,
+        ast_func::GE,
+        new_field_type(TypeLonglong),
+        vec![Arc::new(Expr::Column((*k_col).clone())), param_expr(0, 1)],
+    )
+    .unwrap();
+    let le = new_function(
+        &*ctx.expr_ctx,
+        ast_func::LE,
+        new_field_type(TypeLonglong),
+        vec![Arc::new(Expr::Column((*k_col).clone())), param_expr(1, 10)],
+    )
+    .unwrap();
+
+    let r1 = Range {
+        low_val: vec![new_int_datum(1)],
+        high_val: vec![new_int_datum(10)],
+        collators: vec![tidb_types::collate::get_binary_collator()],
+        ..Default::default()
+    };
+
+    let build_lookup = |push_by| -> PhysicalPlanRef {
+        let mut is = PhysicalIndexScan {
+            table: Arc::clone(&tbl),
+            index: Arc::clone(&idx),
+            idx_cols: vec![Arc::clone(&k_col)],
+            idx_col_lens: vec![UnspecifiedLength],
+            access_condition: vec![Arc::clone(&ge), Arc::clone(&le)],
+            columns: tbl.columns.clone().unwrap(),
+            ranges: vec![r1.clone()],
+            data_source_schema: Some(new_schema(vec![Arc::clone(&k_col), Arc::clone(&id_col)])),
+            ..Default::default()
+        }
+        .init(&ctx, 0);
+        is.set_schema(new_schema(vec![Arc::clone(&k_col), Arc::clone(&id_col)]));
+        is.set_stats(Some(Arc::new(StatsInfo {
+            row_count: 10.0,
+            ..Default::default()
+        })));
+        let mut ts = PhysicalTableScan {
+            table: Arc::clone(&tbl),
+            columns: tbl.columns.clone().unwrap(),
+            tbl_cols: vec![Arc::clone(&id_col), Arc::clone(&k_col), Arc::clone(&c_col)],
+            ..Default::default()
+        }
+        .init(&ctx, 0);
+        ts.set_schema(new_schema(vec![Arc::clone(&c_col)]));
+        ts.set_stats(Some(Arc::new(StatsInfo {
+            row_count: 10.0,
+            ..Default::default()
+        })));
+        let reader = PhysicalIndexLookUpReader {
+            index_plan: Some(Arc::new(is)),
+            table_plan: Some(Arc::new(ts)),
+            expected_cnt: 100, // <= paging::Threshold (960)
+            ..Default::default()
+        }
+        .init(&ctx, 0, push_by);
+        Arc::new(reader)
+    };
+
+    for (label, push_by) in [
+        ("normal", INDEX_LOOK_UP_PUSH_DOWN_NONE),
+        ("pushdown", INDEX_LOOK_UP_PUSH_DOWN_BY_SYS_VAR),
+    ] {
+        let plan = build_lookup(push_by);
+        assert!(plan.instance_cacheable(), "{label}");
+        let (ok, reason) = is_physical_plan_cacheable(ctx.vars, &plan, 2, 0, false).unwrap();
+        assert!(ok, "{label}: {reason}");
+
+        // Seal both subtrees; costing a sealed IndexLookUpReader must NOT mutate `paging` (A3 §3.6).
+        seal_plan(&*plan);
+        let ilr = plan
+            .as_any()
+            .downcast_ref::<PhysicalIndexLookUpReader>()
+            .unwrap();
+        assert!(ilr.index_plan.as_ref().unwrap().base_physical().is_sealed());
+        assert!(ilr.table_plan.as_ref().unwrap().base_physical().is_sealed());
+        let hash_before = plan_structure_hash(&*plan);
+        let opt = new_default_plan_cost_option();
+        let _ = ilr
+            .get_plan_cost_ver2(&ctx, crate::property::RootTaskType, &opt)
+            .unwrap();
+        assert!(
+            !ilr.paging.load(Ordering::Relaxed),
+            "{label}: sealed plan must not mutate paging"
+        );
+        assert_eq!(plan_structure_hash(&*plan), hash_before, "{label}");
+
+        // HeapSizer accounts for IndexLookUpReader and both subtrees.
+        let val = PlanCacheValue::for_test(Arc::clone(&plan), 0, Vec::new());
+        assert!(plan_cache_value_heap_size(&val) > 512, "{label}");
+
+        // Same params -> zero copy (Arc::ptr_eq and 0 clone_node calls).
+        let mut vars_same =
+            tidb_sessionctx::variable::session::SessionVars::new(Box::new(NoGlobals));
+        vars_same.current_db = "test".to_owned();
+        let mut ctx_same = make_ctx(&mut vars_same, &[new_int_datum(1), new_int_datum(10)]);
+        let mut rebuilt_same = Arc::clone(&plan);
+        let copies_before = crate::physicalop::clone_node_calls();
+        rebuild_range(&mut ctx_same, &mut rebuilt_same).unwrap();
+        assert_eq!(
+            crate::physicalop::clone_node_calls(),
+            copies_before,
+            "{label}"
+        );
+        assert!(Arc::ptr_eq(&rebuilt_same, &plan), "{label}");
+
+        // Different params -> path-copies IndexLookUpReader + IndexScan; in pushdown mode,
+        // preserves LocalIndexLookUp's children[1] TableRowIDScan Arc and index_plans_un_nature_orders!
+        let mut vars_diff =
+            tidb_sessionctx::variable::session::SessionVars::new(Box::new(NoGlobals));
+        vars_diff.current_db = "test".to_owned();
+        let mut ctx_diff = make_ctx(&mut vars_diff, &[new_int_datum(20), new_int_datum(30)]);
+        let mut rebuilt_diff = Arc::clone(&plan);
+        rebuild_range(&mut ctx_diff, &mut rebuilt_diff).unwrap();
+        assert!(!Arc::ptr_eq(&rebuilt_diff, &plan), "{label}");
+        assert_eq!(plan_structure_hash(&*plan), hash_before, "{label}");
+
+        let new_ilr = rebuilt_diff
+            .as_any()
+            .downcast_ref::<PhysicalIndexLookUpReader>()
+            .unwrap();
+        let new_is = new_ilr.index_plans[0]
+            .as_any()
+            .downcast_ref::<PhysicalIndexScan>()
+            .unwrap();
+        assert_eq!(new_is.ranges.len(), 1, "{label}");
+        assert_eq!(new_is.ranges[0].low_val[0].get_int64(), 20, "{label}");
+        assert_eq!(new_is.ranges[0].high_val[0].get_int64(), 30, "{label}");
+
+        if push_by == INDEX_LOOK_UP_PUSH_DOWN_BY_SYS_VAR {
+            assert_eq!(new_ilr.index_plans.len(), 3);
+            assert_eq!(new_ilr.index_plans_un_nature_orders.get(&0), Some(&2));
+            let old_local = ilr
+                .index_plan
+                .as_ref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<PhysicalLocalIndexLookUp>()
+                .unwrap();
+            let new_local = new_ilr
+                .index_plan
+                .as_ref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<PhysicalLocalIndexLookUp>()
+                .unwrap();
+            // Right child (TableRowIDScan) was untouched and shares the cached Arc.
+            assert!(Arc::ptr_eq(
+                &old_local.children()[1],
+                &new_local.children()[1]
+            ));
+        }
+    }
+}

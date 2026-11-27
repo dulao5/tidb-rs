@@ -191,6 +191,59 @@ impl PhysicalIndexReader {
     }
 }
 
+impl crate::core::physical_plans::PhysicalIndexLookUpReader {
+    /// ResolveIndices implements Plan interface.
+    ///
+    /// Clears `TablePlans` / `IndexPlans` before resolving in place (N1 §3.4) and rebuilds
+    /// `IndexPlans` with `flatten_tree_push_down_plan` so local index lookup push-down trees keep
+    /// their postorder list and `IndexPlansUnNatureOrders` map intact.
+    // go: PhysicalIndexLookUpReader.ResolveIndices L1 [M-PLAN, M-CTX, M-EXPR]
+    pub fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        let schema = self.sp.schema().clone();
+        resolve_indices_for_virtual_column(&mut self.sp.schema_mut().columns, &schema)?;
+        self.table_plans.clear();
+        let table_plan = self.table_plan.as_mut().expect("tablePlan");
+        let res = make_mut_plan(table_plan).resolve_indices(ctx);
+        self.table_plans = flatten_list_push_down_plan(table_plan);
+        let table_schema = table_plan.schema().clone();
+        copy_resolved_indices(&mut self.sp.schema_mut().columns, &table_schema);
+        res?;
+        self.index_plans.clear();
+        self.index_plans_un_nature_orders.clear();
+        let index_plan = self.index_plan.as_mut().expect("indexPlan");
+        let res = make_mut_plan(index_plan).resolve_indices(ctx);
+        let (flat, uno) = crate::core::initialize::flatten_tree_push_down_plan(index_plan);
+        self.index_plans = flat;
+        self.index_plans_un_nature_orders = uno.unwrap_or_default();
+        res?;
+        if let Some(extra_handle_col) = &mut self.extra_handle_col {
+            let new_col = extra_handle_col.resolve_indices(&table_schema)?;
+            *extra_handle_col = Arc::new(new_col);
+        }
+        let table_leaf_schema = self.table_plans[0].schema().clone();
+        for common_handle_col in &mut self.common_handle_cols {
+            let new_col = common_handle_col.resolve_indices(&table_leaf_schema)?;
+            *common_handle_col = Arc::new(new_col);
+        }
+        Ok(())
+    }
+}
+
+impl crate::core::physical_plans::PhysicalLocalIndexLookUp {
+    /// `ResolveIndices` (inherits `BasePhysicalPlan.ResolveIndices`), plus N1 §3.3
+    /// `copy_resolved_indices` from `children[1]` (`TableRowIDScan`) because Go's
+    /// `PhysicalLocalIndexLookUp.Init` aliases `tableScan.Schema()`.
+    // glue: N1 §3.3 (Go PhysicalLocalIndexLookUp shares TableRowIDScan's *Schema)
+    pub fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        let res = self.sp.resolve_indices(ctx);
+        if let Some(table_scan) = self.sp.base.children.get(1) {
+            let table_schema = table_scan.schema().clone();
+            copy_resolved_indices(&mut self.sp.schema_mut().columns, &table_schema);
+        }
+        res
+    }
+}
+
 /// Copies the `Index` of each column of `resolved` (the table plan's schema) into the column
 /// of `reader` (the table reader's own copy of that schema) at the same position. Go's two
 /// schemas are one object, so a write to one is a write to the other; a column is copied only
