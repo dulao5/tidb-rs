@@ -17,6 +17,9 @@ use std::panic::{AssertUnwindSafe, UnwindSafe};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use crate::errors::Error;
+use crate::structured_log::LogValue;
+
 /// Behavior of the process-wide panic hook on the current thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanicMode {
@@ -142,6 +145,48 @@ pub fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
         s.clone()
     } else {
         "panic".to_owned()
+    }
+}
+
+/// Convert a caught panic payload to a [`LogValue`] following Go's `zap.Any(key, r)` semantics:
+/// `Error` -> `LogValue::Error` (preserving `errorVerbose` when enabled), `&str`/`String` ->
+/// `LogValue::Str`, primitives -> typed `LogValue`, unknown -> `LogValue::Str("panic")`.
+// glue: Go zap.Any("recover", r) field conversion for caught panic payloads
+pub fn panic_payload_log_value(payload: &(dyn Any + Send)) -> LogValue<'_> {
+    if let Some(err) = payload.downcast_ref::<Error>() {
+        LogValue::Error(err)
+    } else if let Some(s) = payload.downcast_ref::<&'static str>() {
+        LogValue::Str(s)
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        LogValue::Str(s.as_str())
+    } else if let Some(&b) = payload.downcast_ref::<bool>() {
+        LogValue::Bool(b)
+    } else if let Some(&n) = payload.downcast_ref::<i64>() {
+        LogValue::I64(n)
+    } else if let Some(&n) = payload.downcast_ref::<i32>() {
+        LogValue::I64(i64::from(n))
+    } else if let Some(&n) = payload.downcast_ref::<i16>() {
+        LogValue::I64(i64::from(n))
+    } else if let Some(&n) = payload.downcast_ref::<i8>() {
+        LogValue::I64(i64::from(n))
+    } else if let Some(&n) = payload.downcast_ref::<isize>() {
+        LogValue::I64(n as i64)
+    } else if let Some(&n) = payload.downcast_ref::<u64>() {
+        LogValue::U64(n)
+    } else if let Some(&n) = payload.downcast_ref::<u32>() {
+        LogValue::U64(u64::from(n))
+    } else if let Some(&n) = payload.downcast_ref::<u16>() {
+        LogValue::U64(u64::from(n))
+    } else if let Some(&n) = payload.downcast_ref::<u8>() {
+        LogValue::U64(u64::from(n))
+    } else if let Some(&n) = payload.downcast_ref::<usize>() {
+        LogValue::U64(n as u64)
+    } else if let Some(&f) = payload.downcast_ref::<f64>() {
+        LogValue::F64(f)
+    } else if let Some(&f) = payload.downcast_ref::<f32>() {
+        LogValue::F32(f)
+    } else {
+        LogValue::Str("panic")
     }
 }
 

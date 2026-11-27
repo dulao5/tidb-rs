@@ -3803,6 +3803,7 @@ dependencies = [
  "tidb-expression",
  "tidb-infoschema",
  "tidb-kv",
+ "tidb-log",
  "tidb-memory",
  "tidb-metrics",
  "tidb-model",

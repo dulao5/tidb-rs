@@ -1891,12 +1891,12 @@ impl IndexLookUpExecutor {
             if let Err((payload, bt)) =
                 tidb_base::panic_guard::catch_unwind_future(worker_fut).await
             {
-                let err = get_recover_error(payload);
                 tidb_base::log_warn!(
                     "indexWorker in IndexLookupExecutor panicked",
-                    "error" => &err,
+                    "recover" => tidb_base::panic_guard::panic_payload_log_value(payload.as_ref()),
                     "stack" => bt.as_deref().unwrap_or(""),
                 );
+                let err = get_recover_error(payload);
                 let (done_tx, done_rx) = oneshot::channel();
                 let _ = done_tx.send(Err(err));
                 if !*panic_finished_rx.borrow() {
@@ -2348,13 +2348,12 @@ impl IndexWorker {
         match res {
             Ok(inner) => inner,
             Err((payload, bt)) => {
-                let err = get_recover_error(payload);
                 tidb_base::log_warn!(
                     "indexWorker in IndexLookupExecutor panicked",
-                    "error" => &err,
+                    "recover" => tidb_base::panic_guard::panic_payload_log_value(payload.as_ref()),
                     "stack" => bt.as_deref().unwrap_or(""),
                 );
-                Err(err)
+                Err(get_recover_error(payload))
             }
         }
     }
@@ -2423,13 +2422,12 @@ impl IndexWorker {
         match res {
             Ok(inner) => inner,
             Err((payload, bt)) => {
-                let err = get_recover_error(payload);
                 tidb_base::log_warn!(
                     "indexWorker in IndexLookupExecutor panicked",
-                    "error" => &err,
+                    "recover" => tidb_base::panic_guard::panic_payload_log_value(payload.as_ref()),
                     "stack" => bt.as_deref().unwrap_or(""),
                 );
-                Err(err)
+                Err(get_recover_error(payload))
             }
         }
     }
@@ -2994,12 +2992,12 @@ impl TableWorker {
                     let _ = done_tx.send(res);
                 }
                 Err((payload, bt)) => {
-                    let err = get_recover_error(payload);
                     tidb_base::log_error!(
                         "tableWorker in IndexLookUpExecutor panicked",
-                        "error" => &err,
+                        "recover" => tidb_base::panic_guard::panic_payload_log_value(payload.as_ref()),
                         "stack" => bt.as_deref().unwrap_or(""),
                     );
+                    let err = get_recover_error(payload);
                     let _ = done_tx.send(Err(err));
                     return;
                 }
@@ -4468,8 +4466,61 @@ mod tests {
 
     #[tokio::test]
     async fn index_lookup_lifecycle_panic_oom_cancel_and_detach() {
-        // 1. Index worker panic -> converted to Err, tracker zeroed, mock closed.
+        let sink = tidb_log::sink::MemorySink::new();
+        let cfg = tidb_base::config::LogConfig {
+            level: "info".to_owned(),
+            format: "text".to_owned(),
+            disable_timestamp: false,
+            disable_error_verbose: true,
+            ..tidb_base::config::LogConfig::default()
+        };
+        let log_sink = Arc::clone(&sink);
+        tidb_log::init_logger_with_sinks(&cfg, "", log_sink, None).unwrap();
+        tidb_log::set_panic_hook();
+
+        // Normalizes the dynamic timestamp, caller line number, and captured backtrace in a
+        // panic recovery log line while asserting single-line structure and non-empty Go-style
+        // `\n\t` stack frames, so the entire line can be compared verbatim via `assert_eq!`.
+        let normalize_panic_line = |raw: &str| -> String {
+            assert!(
+                !raw.contains('\n') && !raw.contains('\r'),
+                "log line must be single-line: {raw:?}"
+            );
+            let after_ts = raw
+                .strip_prefix('[')
+                .and_then(|s| s.split_once("] "))
+                .map(|(ts, rest)| {
+                    assert_eq!(ts.len(), 30, "expected pingcap/log timestamp, got: {ts:?}");
+                    rest
+                })
+                .expect("missing leading [timestamp] ");
+            let (before_stack, stack_quoted) = after_ts
+                .split_once(" [stack=\"")
+                .expect("missing [stack=\"...\"] field");
+            let stack_body = stack_quoted
+                .strip_suffix("\"]")
+                .expect("stack field must be the last field");
+            assert!(
+                !stack_body.is_empty() && stack_body.contains("\\n\\t"),
+                "stack must contain Go-style \\n\\t frame locations: {stack_body:?}"
+            );
+            // Replace `[distsql.rs:<digits>]` with `[distsql.rs:<LINE>]`.
+            let normalized_prefix = if let Some((head, tail)) =
+                before_stack.split_once("[distsql.rs:")
+                && let Some((line_no, rest)) = tail.split_once(']')
+                && !line_no.is_empty()
+                && line_no.bytes().all(|b| b.is_ascii_digit())
+            {
+                format!("{head}[distsql.rs:<LINE>]{rest}")
+            } else {
+                before_stack.to_owned()
+            };
+            format!("[<TS>] {normalized_prefix} [stack=\"<STACK>\"]")
+        };
+
+        // 1. Index worker panic -> converted to Err, tracker zeroed, mock closed, whole-line golden log.
         {
+            let _ = sink.take();
             let (tbl, plan) = make_lookup_table_and_plan(true, false, false);
             let is = make_info_schema(tbl).await;
             let mut s = MockSession::new(100);
@@ -4491,10 +4542,24 @@ mod tests {
             exec::close(&mut ilu).await.unwrap();
             assert!(closed.load(Ordering::SeqCst));
             assert_eq!(ilu.mem_tracker.as_ref().unwrap().bytes_consumed(), 0);
+
+            let logged = String::from_utf8(sink.take()).unwrap();
+            let panic_lines: Vec<&str> =
+                logged.lines().filter(|l| l.contains("panicked")).collect();
+            assert_eq!(
+                panic_lines.len(),
+                1,
+                "expected 1 indexWorker panic log:\n{logged}"
+            );
+            assert_eq!(
+                normalize_panic_line(panic_lines[0]),
+                "[<TS>] [WARN] [distsql.rs:<LINE>] [\"indexWorker in IndexLookupExecutor panicked\"] [recover=\"injected worker panic\"] [stack=\"<STACK>\"]"
+            );
         }
 
-        // 2. Table worker panic -> converted to Err, tracker zeroed, both mocks closed.
+        // 2. Table worker panic -> converted to Err, tracker zeroed, both mocks closed, whole-line golden log.
         {
+            let _ = sink.take();
             let (tbl, plan) = make_lookup_table_and_plan(true, false, false);
             let is = make_info_schema(tbl).await;
             let mut s = MockSession::new(100);
@@ -4533,6 +4598,19 @@ mod tests {
             assert!(idx_closed.load(Ordering::SeqCst));
             assert!(tbl_closed.load(Ordering::SeqCst));
             assert_eq!(ilu.mem_tracker.as_ref().unwrap().bytes_consumed(), 0);
+
+            let logged = String::from_utf8(sink.take()).unwrap();
+            let panic_lines: Vec<&str> =
+                logged.lines().filter(|l| l.contains("panicked")).collect();
+            assert_eq!(
+                panic_lines.len(),
+                1,
+                "expected 1 tableWorker panic log:\n{logged}"
+            );
+            assert_eq!(
+                normalize_panic_line(panic_lines[0]),
+                "[<TS>] [ERROR] [distsql.rs:<LINE>] [\"tableWorker in IndexLookUpExecutor panicked\"] [recover=\"injected worker panic\"] [stack=\"<STACK>\"]"
+            );
         }
 
         // 3. Memory quota exceeded in tableWorker -> A1 checkpoint returns Err, tracker zeroed after Close.

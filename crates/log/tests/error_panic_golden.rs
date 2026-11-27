@@ -423,3 +423,77 @@ fn workspace_release_profile_preserves_line_tables() {
         "[profile.release] in workspace Cargo.toml must set debug = \"line-tables-only\""
     );
 }
+
+#[test]
+fn panic_payload_log_value_matches_go_zap_any() {
+    let encode_recover = |payload: &(dyn std::any::Any + Send), disable_error_verbose: bool| {
+        let mut out = Vec::new();
+        let cfg = EncoderConfig {
+            disable_timestamp: true,
+            disable_caller: true,
+            disable_error_verbose,
+            force_error_verbose: false,
+        };
+        let entry = Entry {
+            time: sample_time(),
+            level: LogLevel::Warn,
+            logger_name: "",
+            file: "",
+            line: 0,
+            msg: "panicked",
+            bound_fields: &[],
+            fields: &[LogField::new(
+                "recover",
+                panic_guard::panic_payload_log_value(payload),
+            )],
+            stack: "",
+        };
+        encoder::text::encode_entry(cfg, &entry, &mut out);
+        assert_single_line(&out);
+        String::from_utf8(out).unwrap()
+    };
+
+    let str_payload: Box<dyn std::any::Any + Send> = Box::new("injected worker panic");
+    assert_eq!(
+        encode_recover(str_payload.as_ref(), false),
+        "[WARN] [panicked] [recover=\"injected worker panic\"]\n"
+    );
+
+    let string_payload: Box<dyn std::any::Any + Send> = Box::new(String::from("boom"));
+    assert_eq!(
+        encode_recover(string_payload.as_ref(), false),
+        "[WARN] [panicked] [recover=boom]\n"
+    );
+
+    let int_payload: Box<dyn std::any::Any + Send> = Box::new(42_i64);
+    assert_eq!(
+        encode_recover(int_payload.as_ref(), false),
+        "[WARN] [panicked] [recover=42]\n"
+    );
+
+    let bool_payload: Box<dyn std::any::Any + Send> = Box::new(true);
+    assert_eq!(
+        encode_recover(bool_payload.as_ref(), false),
+        "[WARN] [panicked] [recover=true]\n"
+    );
+
+    struct UnknownPayload;
+    let unknown_payload: Box<dyn std::any::Any + Send> = Box::new(UnknownPayload);
+    assert_eq!(
+        encode_recover(unknown_payload.as_ref(), false),
+        "[WARN] [panicked] [recover=panic]\n"
+    );
+
+    let err_payload: Box<dyn std::any::Any + Send> = Box::new(errors::new("err panic"));
+    assert_eq!(
+        encode_recover(err_payload.as_ref(), true),
+        "[WARN] [panicked] [recover=\"err panic\"]\n"
+    );
+    let verbose_line = encode_recover(err_payload.as_ref(), false);
+    assert!(
+        verbose_line.starts_with(
+            "[WARN] [panicked] [recover=\"err panic\"] [recoverVerbose=\"err panic\\n"
+        ),
+        "Error panic payload must emit recoverVerbose when enabled: {verbose_line}"
+    );
+}
