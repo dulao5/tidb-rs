@@ -3,7 +3,8 @@
 # 每条 [[tolerance]] 一个编号；比较器（tools/ab/src/compare.rs 的 TOLERANCES）与本文件逐条一致，
 # 单元测试 tolerances_match_the_ledger 校验两者。新增或放宽任何比较规则，先在这里加条目并经负责人
 # 同意；没有条目的放宽一律视为缺陷。格式与偏差台账（#262）共用：id / name / scope / rule /
-# reason / since。
+# reason / since；条目后来经负责人批准修改时，按偏差台账的写法加 approver（批准人）和 approved
+# （批准日期 YYYY-MM-DD）。
 #
 # 浮点数没有容差：数值按线上协议的文本逐字节比较（见规格 §5）。
 
@@ -14,6 +15,11 @@ scope = "所有层"
 rule = "B 返回 1235 且是\"尚未实现\"的约定回答时判为 unsupported（既不算一致也不算不一致，不计入新栈覆盖）。只认两种：消息带 blocked-by:<块名> 的边界桩回答（tidb_base::blocked），以及原型自己的固定文案（逐条列在 tools/ab/prototype-not-supported.txt，由 scripts/prototype_not_supported.py 从原型源码生成，CI 校验不过期）。A 也返回 1235 时：文案相同按错误完整比较（两边同错），文案不同也判为 unsupported（两边都不执行，#510）；其他 1235 是普通错误，A 成功或 A 的 1235 文案不同都是不一致"
 reason = "1235 是 tidb-rs 尚未实现的约定回答，单独计数；但移植来的 Go 代码本身也有 ErrNotSupportedYet 分支，新栈走错分支返回的 1235 不能被当成\"还不支持\"而漏掉"
 since = "2026-11-21"
+# 2026-11-28 负责人批准放宽（#510、#516）：两边都返回 1235 而文案不同时，B 的回答只有是带标记的
+# "尚未实现"回答（blocked-by: 边界桩，或 prototype-not-supported.txt 中的原型固定文案）才判为
+# unsupported；其他 1235 仍与 Go 完整比较。
+approver = "zhigang-du"
+approved = "2026-11-28"
 
 [[tolerance]]
 id = "T2"
