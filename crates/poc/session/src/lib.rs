@@ -1028,26 +1028,24 @@ impl Session {
     }
 }
 
-/// The schema version the router compares with the new stack's: the synced schema's while
-/// synced mode is admissible, otherwise the newest entry of the ADR 0003 cache (`candidate`).
+/// The schema version the router compares with the new stack's
+/// ([`router::PocEngine::admissible_schema_version`]): the synced schema's, only while the
+/// schema sync admits statements on the new stack ([`poc_domain::Registry::new_stack_schema_version`]);
+/// `None` without schema sync. Never the ADR 0003 cache's newest entry: that one is not
+/// covered by the schema lease or the node's registration.
 // glue: VS1 plan §4.1 (the PoC's side of the router's InfoSchema version check)
 pub(crate) fn router_schema_version(
     registry: Option<&poc_domain::Registry>,
     now: Instant,
-    candidate: impl FnOnce() -> Option<i64>,
 ) -> Option<i64> {
-    if let Some(is) = registry.and_then(|r| r.schema_if_admissible(now)) {
-        return Some(is.version());
-    }
-    candidate()
+    registry?.new_stack_schema_version(now).ok()
 }
 
 impl router::PocEngine for Session {
-    fn schema_version(&self) -> Option<i64> {
+    fn admissible_schema_version(&self) -> Option<i64> {
         router_schema_version(
             self.shared.sync.as_ref().map(|s| &**s.registry()),
             Instant::now(),
-            || self.shared.schema.candidate().map(|is| is.version()),
         )
     }
 

@@ -47,7 +47,7 @@ struct FakePoc {
     prepared: HashMap<u32, Lowered>,
     log: Vec<String>,
     /// The schema sync's registry: when set, the schema version is the real PoC's
-    /// computation over it, with `schema_version` as the ADR 0003 cache's newest entry.
+    /// computation over it, and `schema_version` is ignored.
     registry: Option<Arc<poc_domain::Registry>>,
 }
 
@@ -81,11 +81,9 @@ impl FakePoc {
 }
 
 impl PocEngine for FakePoc {
-    fn schema_version(&self) -> Option<i64> {
+    fn admissible_schema_version(&self) -> Option<i64> {
         match &self.registry {
-            Some(r) => crate::router_schema_version(Some(r), std::time::Instant::now(), || {
-                self.schema_version
-            }),
+            Some(r) => crate::router_schema_version(Some(r), std::time::Instant::now()),
             None => self.schema_version,
         }
     }
@@ -612,12 +610,13 @@ fn step0_schema_versions_must_be_equal() {
         script.lock().unwrap().version = v;
         assert_eq!(r.route(&parse(POINT), &p, false), want, "{v:?}");
     }
+    // No admissible schema lease: the PoC, with its own reason.
     let mut p = poc();
     p.schema_version = None;
     script.lock().unwrap().version = Some(1);
     assert_eq!(
         r.route(&parse(POINT), &p, false),
-        Route::Poc(Reason::SchemaVersion)
+        Route::Poc(Reason::SchemaLease)
     );
 }
 
@@ -626,14 +625,18 @@ fn step0_schema_versions_must_be_equal() {
 /// DDL owner does not wait for it, so the new stack's InfoSchema may be two versions behind
 /// the data. The ADR 0003 cache still holds the new stack's version, and the versions
 /// compare equal; the statement must still run on the PoC, whose path checks the schema at
-/// the statement's own timestamp.
+/// the statement's own timestamp. (The lease and the ported domain's reload are covered by
+/// the registry's `new_stack_schema_version_needs_an_admissible_lease`.)
 #[test]
 fn step0_unadmissible_schema_lease_goes_to_the_poc() {
     let mut p = poc();
     p.registry = Some(poc_domain::Registry::new(poc_domain::Limits::default()));
     let (mut r, script) = scripted(NewStackMode::Strict, &p);
     script.lock().unwrap().version = Some(1);
-    assert_ne!(r.route(&parse(POINT), &p, false), Route::New);
+    assert_eq!(
+        r.route(&parse(POINT), &p, false),
+        Route::Poc(Reason::SchemaLease)
+    );
     // Even in strict mode the statement runs on the PoC.
     let res = block_on(r.query(&mut p, POINT));
     assert_eq!(rows(&res).map(|r| r.0), Some(3));
@@ -1450,6 +1453,43 @@ fn prepare_with_unequal_schema_versions_is_poc_owned() {
     block_on(r.prepare(&mut p, 1, POINT)).unwrap();
     assert_eq!(r.owner(1), Some(&Owner::Poc(Reason::SchemaVersion)));
     assert!(script.lock().unwrap().log.is_empty());
+}
+
+/// Prepared statements: without an admissible schema lease, PREPARE stays on the PoC, an
+/// EXECUTE of a statement prepared on both sides runs on the PoC, and one only the new stack
+/// prepared gets the 1235 that names the lease.
+#[test]
+fn prepared_without_admissible_schema_lease() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().version = Some(1);
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    assert!(matches!(r.owner(1), Some(Owner::Both { .. })));
+    p.schema_version = None;
+    block_on(r.prepare(&mut p, 2, POINT)).unwrap();
+    assert_eq!(r.owner(2), Some(&Owner::Poc(Reason::SchemaLease)));
+    script.lock().unwrap().log.clear();
+    p.log.clear();
+    let res = block_on(r.execute(&mut p, 1, vec![]));
+    assert_eq!(rows(&res).map(|r| r.0), Some(3));
+    assert!(p.log.contains(&"execute 1".to_owned()));
+    assert!(script.lock().unwrap().log.is_empty());
+    // New-only.
+    let mut p = poc();
+    p.prepare_fails = true;
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().version = Some(1);
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    assert_eq!(r.owner(1), Some(&Owner::New { new_id: 101 }));
+    p.schema_version = None;
+    let e = block_on(r.execute(&mut p, 1, vec![])).unwrap_err();
+    assert!(
+        e.code == 1235 && e.message.contains("schema lease"),
+        "{}",
+        e.message
+    );
 }
 
 /// Lucky (#235): the router checks that the new session is idle before it tries a statement

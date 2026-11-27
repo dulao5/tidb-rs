@@ -386,12 +386,15 @@ impl Inner {
             .reloaded(ts, requested_at, old_version, full_load);
         // The ported domain loads the same version at the same timestamp (VS1 plan §4.1): a
         // diff load from its cached version, or a full load. A failure leaves the new stack
-        // on its older version, so the router sends statements to the PoC (unequal
-        // versions) until a later reload succeeds.
-        if let Some(ported) = &self.ported
-            && let Err(e) = ported.reload_at(ts).await
-        {
-            warn!(error = %e, "reloading the ported domain's InfoSchema failed");
+        // on its older version; the router sends statements to the PoC until a later reload
+        // of the ported domain succeeds (`Registry::new_stack_schema_version`), even when the
+        // versions compare equal.
+        if let Some(ported) = &self.ported {
+            let r = ported.reload_at(ts).await;
+            if let Err(e) = &r {
+                warn!(error = %e, "reloading the ported domain's InfoSchema failed");
+            }
+            self.registry.ported_reloaded(r.is_ok());
         }
         Ok(())
     }
