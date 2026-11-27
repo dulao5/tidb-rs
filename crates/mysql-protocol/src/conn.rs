@@ -110,7 +110,7 @@ pub(crate) async fn run<S, F>(
     let accepted = Instant::now();
     let io = PacketIo::new(MaybeTls::Plain(stream), config.max_allowed_packet);
     let mut conn = match handshake(io, &peer, connection_id, config, factory).await {
-        Ok((mut io, Some((handler, capability, user)))) => {
+        Ok((mut io, (handler, capability, user))) => {
             io.flush_counts();
             Conn {
                 io,
@@ -128,7 +128,6 @@ pub(crate) async fn run<S, F>(
                 status,
             }
         }
-        Ok((_, None)) => return,
         Err(HandshakeError::Eof) => {
             tidb_base::log_debug!(
                 "EOF",
@@ -254,8 +253,25 @@ async fn write_err<S: AsyncRead + AsyncWrite + Unpin>(
     io.flush().await
 }
 
+/// Sends a handshake ERR packet and logs write failures like Go `conn.go:324-327`.
+async fn write_handshake_err<S: AsyncRead + AsyncWrite + Unpin>(
+    io: &mut PacketIo<S>,
+    capability: u32,
+    connection_id: u64,
+    e: &SqlError,
+) {
+    if let Err(err1) = write_err(io, capability, e).await {
+        let err_str = err1.to_string();
+        tidb_base::log_debug!(
+            "writeError failed",
+            "conn" => connection_id,
+            "error" => err_str.as_str(),
+        );
+    }
+}
+
 /// The session, effective capability flags, and authenticated username.
-type Accepted<F> = Option<(<F as SessionFactory>::Session, u32, String)>;
+type Accepted<F> = (<F as SessionFactory>::Session, u32, String);
 
 /// Handshake failure classification matching Go `Server.onConn` (`server.go:702-712`).
 enum HandshakeError {
@@ -287,8 +303,8 @@ fn is_packet_eof(e: &PacketError) -> bool {
 }
 
 /// Performs the connection phase, including the TLS upgrade after an SSLRequest. Returns the
-/// (possibly upgraded) packet stream, and `None` after an orderly rejection (an ERR packet was
-/// sent); `Err` on I/O or TLS failure.
+/// (possibly upgraded) packet stream and accepted session; `Err` on rejection, I/O, or TLS failure
+/// (so `run` logs Go's `Server.onConn handshake` WARN or `EOF` DEBUG, matching `server.go:698-714`).
 async fn handshake<S, F>(
     mut io: PacketIo<MaybeTls<S>>,
     peer: &str,
@@ -326,11 +342,13 @@ where
             );
             io.set_sequence(seq);
             let data = io.read_packet().await.map_err(|e| {
-                if is_packet_eof(&e) {
-                    tidb_base::log_debug!(
-                        "wait handshake response fail due to connection has be closed by client-side",
-                    );
-                }
+                // Go pkg/server/conn.go:613-616: WARN for any read error after TLS upgrade.
+                let err_str = e.to_string();
+                tidb_base::log_warn!(
+                    "read handshake response failure after upgrade to TLS",
+                    "conn" => connection_id,
+                    "error" => err_str.as_str(),
+                );
                 HandshakeError::from(e)
             })?;
             let accepted =
@@ -371,13 +389,42 @@ where
         status: crate::constants::status::AUTOCOMMIT,
         auth_plugin: &config.default_auth_plugin,
     };
-    io.write_packet(&hs.encode()).await?;
-    io.flush().await?;
+    let init_res = async {
+        io.write_packet(&hs.encode()).await?;
+        io.flush().await
+    }
+    .await;
+    if let Err(e) = init_res {
+        // Go pkg/server/conn.go:315-321.
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            tidb_base::log_debug!(
+                "Could not send handshake due to connection has be closed by client-side",
+                "conn" => connection_id,
+            );
+        } else {
+            let err_str = e.to_string();
+            tidb_base::log_debug!(
+                "Write init handshake to client fail",
+                "conn" => connection_id,
+                "error" => err_str.as_str(),
+            );
+        }
+        return Err(HandshakeError::from(e));
+    }
 
     let data = io.read_packet().await.map_err(|e| {
+        // Go pkg/server/conn.go:563-567.
         if is_packet_eof(&e) {
             tidb_base::log_debug!(
                 "wait handshake response fail due to connection has be closed by client-side",
+                "conn" => connection_id,
+            );
+        } else {
+            let err_str = e.to_string();
+            tidb_base::log_debug!(
+                "wait handshake response fail",
+                "conn" => connection_id,
+                "error" => err_str.as_str(),
             );
         }
         HandshakeError::from(e)
@@ -393,8 +440,8 @@ where
         }
         // TLS is not advertised, so a conforming client never asks for it.
         let e = SqlError::not_supported("SSL");
-        write_err(io, CLIENT_PROTOCOL_41, &e).await?;
-        return Ok(Outcome::Done(None));
+        write_handshake_err(io, CLIENT_PROTOCOL_41, connection_id, &e).await;
+        return Err(HandshakeError::Other(e.error_for_log()));
     }
     authenticate(io, &data, &salt, peer, connection_id, config, factory)
         .await
@@ -418,8 +465,8 @@ where
     let resp = match HandshakeResponse::parse(data) {
         Ok(r) => r,
         Err(e) => {
-            write_err(io, CLIENT_PROTOCOL_41, &e).await?;
-            return Ok(None);
+            write_handshake_err(io, CLIENT_PROTOCOL_41, connection_id, &e).await;
+            return Err(HandshakeError::Other(e.error_for_log()));
         }
     };
     let capability = resp.capability & config.advertised_capability();
@@ -434,13 +481,47 @@ where
         && (resp.auth_plugin.as_deref() != Some(auth_plugin::MYSQL_NATIVE_PASSWORD)
             || config.default_auth_plugin != auth_plugin::MYSQL_NATIVE_PASSWORD)
     {
-        io.write_packet(&auth_switch_request(
-            auth_plugin::MYSQL_NATIVE_PASSWORD,
-            salt,
-        ))
-        .await?;
-        io.flush().await?;
-        auth = io.read_packet().await?;
+        // Go pkg/server/conn.go:287-306.
+        if let Err(e) = io
+            .write_packet(&auth_switch_request(
+                auth_plugin::MYSQL_NATIVE_PASSWORD,
+                salt,
+            ))
+            .await
+        {
+            let err_str = e.to_string();
+            tidb_base::log_debug!(
+                "write response to client failed",
+                "conn" => connection_id,
+                "error" => err_str.as_str(),
+            );
+            return Err(HandshakeError::from(e));
+        }
+        if let Err(e) = io.flush().await {
+            let err_str = e.to_string();
+            tidb_base::log_debug!(
+                "flush response to client failed",
+                "conn" => connection_id,
+                "error" => err_str.as_str(),
+            );
+            return Err(HandshakeError::from(e));
+        }
+        auth = io.read_packet().await.map_err(|e| {
+            if is_packet_eof(&e) {
+                tidb_base::log_warn!(
+                    "authSwitchRequest response fail due to connection has be closed by client-side",
+                    "conn" => connection_id,
+                );
+            } else {
+                let err_str = e.to_string();
+                tidb_base::log_warn!(
+                    "authSwitchRequest response fail",
+                    "conn" => connection_id,
+                    "error" => err_str.as_str(),
+                );
+            }
+            HandshakeError::from(e)
+        })?;
     }
 
     let host = peer_host(peer);
@@ -450,13 +531,14 @@ where
     };
     if !verified {
         let e = SqlError::access_denied(&resp.user, host, !auth.is_empty());
+        let err_str = e.error_for_log();
         tidb_base::log_warn!(
             "open new session or authentication failure",
             "conn" => connection_id,
-            "error" => e.message.as_str(),
+            "error" => err_str.as_str(),
         );
-        write_err(io, capability, &e).await?;
-        return Ok(None);
+        write_handshake_err(io, capability, connection_id, &e).await;
+        return Err(HandshakeError::Other(err_str));
     }
 
     let info = ConnectionInfo {
@@ -471,25 +553,27 @@ where
     let mut handler = match factory.open_session(&info) {
         Ok(h) => h,
         Err(e) => {
+            let err_str = e.error_for_log();
             tidb_base::log_warn!(
                 "open new session or authentication failure",
                 "conn" => connection_id,
-                "error" => e.message.as_str(),
+                "error" => err_str.as_str(),
             );
-            write_err(io, capability, &e).await?;
-            return Ok(None);
+            write_handshake_err(io, capability, connection_id, &e).await;
+            return Err(HandshakeError::Other(err_str));
         }
     };
     if let Some(db) = &resp.database
         && let Err(e) = handler.use_db(db).await
     {
+        let err_str = e.error_for_log();
         tidb_base::log_warn!(
             "open new session or authentication failure",
             "conn" => connection_id,
-            "error" => e.message.as_str(),
+            "error" => err_str.as_str(),
         );
-        write_err(io, capability, &e).await?;
-        return Ok(None);
+        write_handshake_err(io, capability, connection_id, &e).await;
+        return Err(HandshakeError::Other(err_str));
     }
 
     let mut ok = vec![header::OK, 0, 0];
@@ -497,7 +581,7 @@ where
     ok.extend_from_slice(&[0, 0]);
     io.write_packet(&ok).await?;
     io.flush().await?;
-    Ok(Some((handler, capability, resp.user)))
+    Ok((handler, capability, resp.user))
 }
 
 /// Go `pkg/types/datum.go:2445` `isPrintable`: valid UTF-8 with no Unicode control characters.
@@ -968,7 +1052,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             }
             command::QUERY => {
                 let sql = sql_text(body)?;
-                tidb_base::log_debug!("COM_QUERY", "sql" => sql);
                 let start = Instant::now();
                 let resp = self.handler.query(sql).await;
                 self.write_timed(start, resp, false).await
@@ -1029,7 +1112,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
 
     async fn stmt_prepare(&mut self, body: &[u8]) -> Result<(), ConnError> {
         let sql = sql_text(body)?;
-        tidb_base::log_debug!("COM_STMT_PREPARE", "sql" => sql);
         let id = self.next_stmt_id;
         self.next_stmt_id = self.next_stmt_id.checked_add(1).unwrap_or(1);
         let info = self.handler.prepare(id, sql).await?;

@@ -46,6 +46,14 @@ fn format_redacted(bytes: &[u8], mode: RedactMode, f: &mut fmt::Formatter<'_>) -
     }
 }
 
+struct RedactedLogValue<'a>(&'a [u8]);
+
+impl fmt::Display for RedactedLogValue<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_redacted(self.0, current_redact_mode(), f)
+    }
+}
+
 impl slog::Value for Value<'_> {
     fn serialize(
         &self,
@@ -53,12 +61,15 @@ impl slog::Value for Value<'_> {
         key: slog::Key,
         s: &mut dyn slog::Serializer,
     ) -> slog::Result {
-        s.emit_arguments(key, &format_args!("{self}"))
+        // Apply the redaction provider only to structured log serialization (`slog::Value`),
+        // keeping `Display`/`Debug` unredacted so vendored `tidb_query_*` error texts sent to
+        // SQL clients are not altered by `tidb_redact_log`.
+        s.emit_arguments(key, &format_args!("{}", RedactedLogValue(self.0)))
     }
 }
 impl fmt::Display for Value<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        format_redacted(self.0, current_redact_mode(), f)
+        f.write_str(&hex_encode_upper(self.0))
     }
 }
 impl fmt::Debug for Value<'_> {
@@ -70,6 +81,8 @@ impl fmt::Debug for Value<'_> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU8, Ordering};
+
+    use slog::Value as SlogValue;
 
     use super::*;
 
@@ -83,24 +96,57 @@ mod tests {
         }
     }
 
+    struct CaptureSerializer(String);
+
+    impl slog::Serializer for CaptureSerializer {
+        fn emit_arguments(&mut self, _key: slog::Key, val: &fmt::Arguments<'_>) -> slog::Result {
+            self.0 = val.to_string();
+            Ok(())
+        }
+    }
+
+    fn serialize_slog(v: Value<'_>) -> String {
+        let mut ser = CaptureSerializer(String::new());
+        let loc = slog::RecordLocation {
+            file: file!(),
+            line: line!(),
+            column: column!(),
+            function: "",
+            module: module_path!(),
+        };
+        let rs = slog::RecordStatic {
+            location: &loc,
+            level: slog::Level::Info,
+            tag: "",
+        };
+        let kv = slog::b!();
+        let args = format_args!("");
+        let rec = slog::Record::new(&rs, &args, kv);
+        v.serialize(&rec, "k", &mut ser).unwrap();
+        ser.0
+    }
+
     #[test]
-    fn value_respects_redact_provider_and_hex_encode_upper_stays_raw() {
+    fn slog_value_respects_redact_provider_while_display_and_hex_stay_raw() {
         set_redact_provider(test_provider);
         let raw = [0xde, 0xad, 0xbe, 0xef];
 
         MODE.store(0, Ordering::SeqCst);
+        assert_eq!(serialize_slog(Value::key(&raw)), "DEADBEEF");
         assert_eq!(Value::key(&raw).to_string(), "DEADBEEF");
         assert_eq!(format!("{:?}", Value::value(&raw)), "DEADBEEF");
         assert_eq!(hex_encode_upper(raw), "DEADBEEF");
 
         MODE.store(1, Ordering::SeqCst);
-        assert_eq!(Value::key(&raw).to_string(), "?");
-        assert_eq!(format!("{:?}", Value::value(&raw)), "?");
+        assert_eq!(serialize_slog(Value::key(&raw)), "?");
+        assert_eq!(Value::key(&raw).to_string(), "DEADBEEF");
+        assert_eq!(format!("{:?}", Value::value(&raw)), "DEADBEEF");
         assert_eq!(hex_encode_upper(raw), "DEADBEEF");
 
         MODE.store(2, Ordering::SeqCst);
-        assert_eq!(Value::key(&raw).to_string(), "‹DEADBEEF›");
-        assert_eq!(format!("{:?}", Value::value(&raw)), "‹DEADBEEF›");
+        assert_eq!(serialize_slog(Value::key(&raw)), "‹DEADBEEF›");
+        assert_eq!(Value::key(&raw).to_string(), "DEADBEEF");
+        assert_eq!(format!("{:?}", Value::value(&raw)), "DEADBEEF");
         assert_eq!(hex_encode_upper(raw), "DEADBEEF");
     }
 }

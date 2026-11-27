@@ -104,9 +104,7 @@ impl SchemaValidator {
 
     // go: schemaValidator.Stop L1
     pub(crate) fn stop(&mut self) {
-        if self.is_started {
-            tidb_base::log_info!("the schema validator stops");
-        }
+        tidb_base::log_info!("the schema validator stops");
         self.is_started = false;
         self.latest_schema_ver = 0;
     }
@@ -187,6 +185,7 @@ impl SchemaValidator {
     // go-part: schemaValidator.Check
     fn check_with(&self, schema_ver: i64, expired: impl FnOnce(&Expire) -> bool) -> CheckResult {
         if !self.is_started {
+            tidb_base::log_info!("the schema validator stopped before checking");
             return CheckResult::Unknown;
         }
         if schema_ver < self.restart_schema_ver {

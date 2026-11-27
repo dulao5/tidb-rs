@@ -262,4 +262,7 @@ impl Notifier for EtcdNotifier {
     fn warn(&self, msg: &str, e: &Error) {
         tidb_base::log_warn!(msg, "error" => e);
     }
+    fn error(&self, msg: &str, e: &Error) {
+        tidb_base::log_error!(msg, "error" => e);
+    }
 }

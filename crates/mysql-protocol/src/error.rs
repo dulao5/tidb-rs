@@ -97,6 +97,22 @@ impl SqlError {
             format!("Unknown prepared statement handler ({stmt_id}) given to {command}"),
         )
     }
+
+    /// Format this error the way Go `zap.Error(err)` formats a `terror` (with `[class:code]`
+    /// RFC prefix when known, matching `pkg/server/conn.go:677` and `server.go:712`).
+    pub fn error_for_log(&self) -> String {
+        if let Some(src) = &self.source_err {
+            return String::from_utf8_lossy(&src.error()).into_owned();
+        }
+        match self.code {
+            code::ER_ACCESS_DENIED => format!("[privilege:{}]{}", self.code, self.message),
+            code::ER_BAD_DB => format!("[schema:{}]{}", self.code, self.message),
+            code::ER_NOT_SUPPORTED_YET | code::ER_NOT_SUPPORTED_AUTH_MODE => {
+                format!("[server:{}]{}", self.code, self.message)
+            }
+            _ => self.message.clone(),
+        }
+    }
 }
 
 impl fmt::Display for SqlError {

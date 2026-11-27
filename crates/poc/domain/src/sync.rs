@@ -504,13 +504,13 @@ impl Inner {
                 continue;
             }
             let key = keys::job_schema_version(job.job_id, &self.cfg.info.ddl_id);
+            tidb_base::log_info!(
+                "mdl gets lock, update self version to owner",
+                "jobID" => job.job_id,
+                "version" => job.version,
+            );
             match self.put_mono(&key, &job.version.to_string()).await {
                 Ok(()) => {
-                    tidb_base::log_info!(
-                        "mdl gets lock, update self version to owner",
-                        "jobID" => job.job_id,
-                        "version" => job.version,
-                    );
                     reported.insert(job.job_id, job.version);
                     self.registry.count(|s| s.mdl_reports += 1);
                 }
