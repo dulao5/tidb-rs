@@ -662,6 +662,134 @@ fn step0_comes_first() {
     );
 }
 
+/// The three statements of #509 (Go's integration test `types/const`, lines 13, 141 and 142):
+/// Go parses each differently under the mode, and the Rust parser, which reads no
+/// `sql_mode`, built the default-mode statement, which the new stack answered with the wrong
+/// rows (`0` for `helloworld`; 2 rows for none; `0` for `1`).
+const PARSE_MODE_CASES: [(&str, &str, &str); 3] = [
+    (
+        "PIPES_AS_CONCAT",
+        "PIPES_AS_CONCAT",
+        "SELECT 'hello' || 'world'",
+    ),
+    (
+        "high_not_precedence",
+        "HIGH_NOT_PRECEDENCE",
+        "SELECT * FROM t1 WHERE NOT a BETWEEN 2 AND 3",
+    ),
+    (
+        "high_not_precedence",
+        "HIGH_NOT_PRECEDENCE",
+        "SELECT NOT 1 BETWEEN -5 AND 5",
+    ),
+];
+
+/// Step 0 (#509): under a `sql_mode` that changes how Go parses, a candidate stays on the PoC
+/// (`sql_mode`), even in strict mode, and the new stack is not called. The PoC parses without
+/// `sql_mode` too, but lowers none of the three statements (`OR`, unary `NOT`): it answers
+/// 1235, not wrong rows. Without the mode (Go parses them as the Rust parser does) they are
+/// candidates again.
+#[test]
+fn step0_sql_mode_that_changes_parsing_goes_to_the_poc() {
+    super::trace::enable();
+    for (i, (set, bit, sql)) in PARSE_MODE_CASES.into_iter().enumerate() {
+        let conn = 7_000_100 + i as u64;
+        let mut p = poc();
+        let (mut r, script) = scripted(NewStackMode::Strict, &p);
+        r.set_connection_id(conn);
+        script.lock().unwrap().answer = Some(Answer::Rows);
+        assert_eq!(r.route(&parse(sql), &p, false), Route::New, "{sql}");
+        block_on(r.query(&mut p, &format!("SET sql_mode = '{set}'"))).unwrap();
+        assert_eq!(
+            r.route(&parse(sql), &p, false),
+            Route::Poc(Reason::SqlMode(bit)),
+            "{sql}"
+        );
+        let e = block_on(r.query(&mut p, sql)).unwrap_err();
+        assert_eq!(e.code, 1235, "{sql}: {}", e.message);
+        assert!(script.lock().unwrap().log.is_empty(), "{sql}");
+        assert_eq!(
+            super::trace::get(conn),
+            super::trace::Last {
+                seq: 2,
+                engine: "poc",
+                reason: "sql_mode".into()
+            },
+            "{sql}"
+        );
+        block_on(r.query(&mut p, "SET @@sql_mode = DEFAULT")).unwrap();
+        assert_eq!(r.route(&parse(sql), &p, false), Route::New, "{sql}");
+    }
+}
+
+/// Step 0 (#509): every `sql_mode` bit Go's parser reads keeps a candidate on the PoC, alone
+/// or inside a combination mode (`ANSI`); the other bits, the default mode and the empty mode
+/// do not.
+#[test]
+fn step0_sql_mode_bits_go_parser_reads() {
+    let mut p = poc();
+    let (mut r, _) = scripted(NewStackMode::Fallback, &p);
+    for (mode, want) in [
+        ("ANSI_QUOTES", Some("ANSI_QUOTES")),
+        ("PIPES_AS_CONCAT", Some("PIPES_AS_CONCAT")),
+        ("HIGH_NOT_PRECEDENCE", Some("HIGH_NOT_PRECEDENCE")),
+        ("NO_BACKSLASH_ESCAPES", Some("NO_BACKSLASH_ESCAPES")),
+        ("IGNORE_SPACE", Some("IGNORE_SPACE")),
+        ("REAL_AS_FLOAT", Some("REAL_AS_FLOAT")),
+        ("STRICT_TRANS_TABLES,IGNORE_SPACE", Some("IGNORE_SPACE")),
+        // REAL_AS_FLOAT, PIPES_AS_CONCAT, ANSI_QUOTES, IGNORE_SPACE, ONLY_FULL_GROUP_BY.
+        ("ANSI", Some("ANSI_QUOTES")),
+        ("", None),
+        ("TRADITIONAL", None),
+        (
+            "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,\
+             ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
+            None,
+        ),
+        ("NO_UNSIGNED_SUBTRACTION,ALLOW_INVALID_DATES", None),
+    ] {
+        block_on(r.query(&mut p, &format!("SET sql_mode = '{mode}'"))).unwrap();
+        assert_eq!(r.session_condition(&p), None, "{mode}");
+        let route = r.route(&parse(POINT), &p, false);
+        match want {
+            Some(bit) => assert_eq!(route, Route::Poc(Reason::SqlMode(bit)), "{mode}"),
+            None => assert_eq!(route, Route::New, "{mode}"),
+        }
+    }
+}
+
+/// Step 0 (#509) for prepared statements: Go parses the text once, at PREPARE, with the
+/// `sql_mode` of that moment. Prepared under such a mode, the PoC owns the statement; prepared
+/// without it, both sides have the AST Go has, and an EXECUTE after the mode changed still
+/// runs on the new stack.
+#[test]
+fn prepared_under_parse_sql_mode_is_poc_owned() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Strict, &p);
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.query(&mut p, "SET sql_mode = 'ANSI_QUOTES'")).unwrap();
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    assert_eq!(
+        r.owner(1),
+        Some(&Owner::Poc(Reason::SqlMode("ANSI_QUOTES")))
+    );
+    assert!(script.lock().unwrap().log.is_empty());
+    // Strict mode: not a boundary stub, so the PoC runs it.
+    assert_eq!(
+        rows(&block_on(r.execute(&mut p, 1, vec![]))).map(|r| r.0),
+        Some(3)
+    );
+    block_on(r.query(&mut p, "SET sql_mode = DEFAULT")).unwrap();
+    block_on(r.prepare(&mut p, 2, POINT)).unwrap();
+    assert!(matches!(r.owner(2), Some(Owner::Both { .. })));
+    block_on(r.query(&mut p, "SET sql_mode = 'PIPES_AS_CONCAT'")).unwrap();
+    script.lock().unwrap().answer = Some(Answer::Rows);
+    assert_eq!(
+        rows(&block_on(r.execute(&mut p, 2, vec![]))).map(|r| r.0),
+        Some(1)
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Step 3: answers, Go-ported errors, fallback (§4.6), strict.
 
