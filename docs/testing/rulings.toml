@@ -473,3 +473,44 @@ rationale = "Owner decision (2026-11-26, D5 option A): _tidb_rowid is an interna
 approver = "zhigang-du"
 approved = "2026-11-26"
 reopen = "Baseline upgraded to a Go TiDB version that requires full-table SELECT for _tidb_rowid, or owner changes the decision; wire test (and layer/unit/stmt if hit by ab) once D04.1 is implemented."
+
+# ---- D00.3 runtime logging & version banner (owner decisions 2026-11-27, #447 / #450 / #453 / #454; docs/compatibility.md "Observability", decided, not yet implemented) ----
+
+[[ruling]]
+id = "R33"
+name = "log-json-respects-disable-error-stack"
+class = "divergence"
+plane = "observability"
+layer = "none"
+source = "Constitution Article 9.1 (owner decision 2026-11-27, D2 option B); specs/D00.3-logging/spec.md §1.2, §2.1, §9.1 item 7; docs/compatibility.md Observability; #453"
+evidence = "In Go TiDB v8.5.8 (pingcap/log@v1.1.1-0.20250917021125-19901e015dc9, zap_text_encoder.go:166-167), NewTextEncoder returns raw zapcore.NewJSONEncoder(cc) when Format == \"json\" without applying cfg.DisableErrorVerbose, so JSON logs emit \"errorVerbose\" even when log.disable-error-stack = true (the default; reproduced by tools/log-probe section 4_JSON_DISABLE_VERBOSE_true). tidb-log applies log.disable-error-stack / log.enable-error-stack uniformly to both text and json encoders (while ErrVerboseLogger still emits errorVerbose)."
+rationale = "Owner decision (2026-11-27, D2 option B, go-bug-fixed): log.disable-error-stack is documented as format-agnostic; honoring it in JSON avoids unexpected log bloat and matches user intent."
+approver = "zhigang-du"
+approved = "2026-11-27"
+reopen = "Baseline upgraded to a pingcap/log version whose JSON encoder honors DisableErrorVerbose, or owner changes the decision; wire test once tidb-log Batch 0 is implemented."
+
+[[ruling]]
+id = "R34"
+name = "log-text-omits-skip-and-broken-namespace-brackets"
+class = "divergence"
+plane = "observability"
+layer = "none"
+source = "Constitution Article 9.1 (owner decision 2026-11-27, D3 option A); specs/D00.3-logging/spec.md §1.4, §9.1 item 8; docs/compatibility.md Observability; #454"
+evidence = "In Go TiDB v8.5.8 (pingcap/log@v1.1.1-0.20250917021125-19901e015dc9), textEncoder.addFields (zap_text_encoder.go:639-641) wraps every field in [...] before calling AddTo, emitting empty [] tokens for zap.Skip() and zap.Error(nil), and OpenNamespace/closeOpenNamespaces (:238-242, :489-493) emit mismatched brackets [ns={] [in_ns=v]} (reproduced by tools/log-probe section 3_TEXT_FIELDS). tidb-log text encoder silently omits Skip / untyped nil errors and does not replicate mismatched namespace brackets."
+rationale = "Owner decision (2026-11-27, D3 option A, go-bug-fixed): empty [] and mismatched namespace brackets carry no operational meaning and are pure encoder bugs."
+approver = "zhigang-du"
+approved = "2026-11-27"
+reopen = "Baseline upgraded to a pingcap/log version that omits Skip/nil-Error and fixes OpenNamespace text brackets, or owner changes the decision; wire test once tidb-log Batch 0 is implemented."
+
+[[ruling]]
+id = "R35"
+name = "version-build-metadata-and-rust-version-banner"
+class = "divergence"
+plane = "observability"
+layer = "none"
+source = "Constitution Article 9.1 (owner decisions 2026-11-27, §0.2 item 5 and D1 option A1); specs/D00.3-logging/spec.md §4.1, §9.1 items 5-6; docs/compatibility.md Observability; #447, #450"
+evidence = "tidb-rs identifies itself in mixed clusters via SemVer build metadata Release Version = v8.5.8+tidb-rs.<7-char-hash> (ServerVersion = 8.0.11-TiDB-v8.5.8+tidb-rs.<7-char-hash> across Welcome to TiDB., SELECT VERSION(), MySQL handshake, /status, and tidb_server_info) and leaves GoVersion empty while adding \"Rust Version\" (in Welcome to TiDB., SELECT tidb_version(), and -V). Verified on Go br/pkg/version.{ExtractTiDBVersion, ParseServerInfo}, infoschema.FormatTiDBVersion, coreos/go-semver, and Masterminds/semver (tools/log-probe section 7_SEMVER_D1) that +tidb-rs.<hash> compares equal to 8.5.8 (LessThan(8.5.8) == false), whereas a hyphen pre-release suffix (-tidb-rs-) sorts below 8.5.8."
+rationale = "Owner decisions (2026-11-27, §0.2 item 5 and D1 option A1): distinguishes Rust nodes from Go nodes in mixed-cluster logs, SQL version queries, and metrics while preserving SemVer >= 8.5.8 compatibility."
+approver = "zhigang-du"
+approved = "2026-11-27"
+reopen = "If an external TiUP / TiDB Dashboard / Clinic parser rejects '+' build metadata in mixed-cluster testing (fall back to bare v8.5.8), or owner changes the decision; wire test once tidb-log Batch 0 is implemented."
