@@ -2537,7 +2537,6 @@ dependencies = [
  "tidb-types",
  "tikv-client",
  "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -2578,6 +2577,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "log_wrappers",
  "poc-domain",
  "poc-kv",
  "poc-session",
@@ -2595,7 +2595,6 @@ dependencies = [
  "tikv-jemallocator",
  "tipb",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2603,7 +2602,6 @@ name = "poc-session"
 version = "0.0.0"
 dependencies = [
  "futures",
- "log",
  "parking_lot 0.12.5",
  "poc-domain",
  "poc-executor",
@@ -4009,7 +4007,6 @@ dependencies = [
  "time 0.3.55",
  "tokio",
  "tokio-rustls",
- "tracing",
 ]
 
 [[package]]

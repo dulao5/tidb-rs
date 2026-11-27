@@ -35,8 +35,6 @@ use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
-use tracing::debug;
-use tracing::warn;
 
 /// What `/status` reports.
 #[derive(Clone, Debug)]
@@ -87,7 +85,8 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
             Some(format_go_accept_addr(addr))
         }
         Err(e) => {
-            warn!(error = %e, "status server address unknown");
+            let err_str = e.to_string();
+            tidb_base::log_warn!("status server address unknown", "error" => err_str.as_str());
             None
         }
     };
@@ -101,7 +100,8 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
             accepted = listener.accept() => match accepted {
                 Ok(a) => a,
                 Err(e) => {
-                    warn!(error = %e, "status server accept failed");
+                    let err_str = e.to_string();
+                    tidb_base::log_warn!("status server accept failed", "error" => err_str.as_str());
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     continue;
                 }
@@ -124,7 +124,13 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
                 .serve_connection(TokioIo::new(stream), service)
                 .await
             {
-                debug!(%peer, error = %e, "status connection ended with an error");
+                let peer_str = peer.to_string();
+                let err_str = e.to_string();
+                tidb_base::log_debug!(
+                    "status connection ended with an error",
+                    "peer" => peer_str.as_str(),
+                    "error" => err_str.as_str(),
+                );
             }
         });
     }

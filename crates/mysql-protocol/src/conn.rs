@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, trace};
 
 use crate::auth::{Credential, generate_salt};
 use crate::codec::{Reader, put_lenenc_int, put_lenenc_str};
@@ -130,18 +129,35 @@ pub(crate) async fn run<S, F>(
             }
         }
         Ok((_, None)) => return,
-        Err(e) => {
-            debug!(connection_id, %peer, error = %e, "handshake failed");
+        Err(HandshakeError::Eof) => {
+            tidb_base::log_debug!(
+                "EOF",
+                "conn" => connection_id,
+                "remote addr" => peer.as_str(),
+            );
+            return;
+        }
+        Err(HandshakeError::Other(e)) => {
+            tidb_base::log_warn!(
+                "Server.onConn handshake",
+                "conn" => connection_id,
+                "error" => e.as_str(),
+                "remote addr" => peer.as_str(),
+            );
             return;
         }
     };
-    debug!(connection_id, %peer, "connection established");
+    tidb_base::log_debug!(
+        "new connection",
+        "conn" => connection_id,
+        "remoteAddr" => peer.as_str(),
+    );
     conn.command_loop(connection_id).await;
     for id in std::mem::take(&mut conn.stmts).into_keys() {
         conn.handler.close(id);
     }
     let _ = conn.io.shutdown().await;
-    debug!(connection_id, "connection closed");
+    tidb_base::log_debug!("connection closed", "conn" => connection_id);
 }
 
 /// Default `QueryLogMaxLen` matching Go `executor.FormatSQL` (4096 bytes).
@@ -241,6 +257,35 @@ async fn write_err<S: AsyncRead + AsyncWrite + Unpin>(
 /// The session, effective capability flags, and authenticated username.
 type Accepted<F> = Option<(<F as SessionFactory>::Session, u32, String)>;
 
+/// Handshake failure classification matching Go `Server.onConn` (`server.go:702-712`).
+enum HandshakeError {
+    Eof,
+    Other(String),
+}
+
+impl From<io::Error> for HandshakeError {
+    fn from(e: io::Error) -> Self {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            Self::Eof
+        } else {
+            Self::Other(e.to_string())
+        }
+    }
+}
+
+impl From<PacketError> for HandshakeError {
+    fn from(e: PacketError) -> Self {
+        match e {
+            PacketError::Io(io_err) => Self::from(io_err),
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
+fn is_packet_eof(e: &PacketError) -> bool {
+    matches!(e, PacketError::Io(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof)
+}
+
 /// Performs the connection phase, including the TLS upgrade after an SSLRequest. Returns the
 /// (possibly upgraded) packet stream, and `None` after an orderly rejection (an ERR packet was
 /// sent); `Err` on I/O or TLS failure.
@@ -250,7 +295,7 @@ async fn handshake<S, F>(
     connection_id: u64,
     config: &ServerConfig,
     factory: &F,
-) -> Result<(PacketIo<MaybeTls<S>>, Accepted<F>), String>
+) -> Result<(PacketIo<MaybeTls<S>>, Accepted<F>), HandshakeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     F: SessionFactory,
@@ -262,23 +307,32 @@ where
             // Switch to TLS. Bytes the client sent right behind the SSLRequest (its
             // ClientHello) may already sit in the read buffer: replay them to rustls.
             let Some(tls) = &config.tls else {
-                return Err("TLS upgrade without TLS config".into());
+                return Err(HandshakeError::Other(
+                    "TLS upgrade without TLS config".into(),
+                ));
             };
             let (stream, buffered) = io.into_parts();
             let MaybeTls::Plain(stream) = stream else {
-                return Err("TLS requested twice".into());
+                return Err(HandshakeError::Other("TLS requested twice".into()));
             };
             let acceptor = tokio_rustls::TlsAcceptor::from(tls.clone());
             let tls_stream = acceptor
                 .accept(Rewind::new(buffered, stream))
                 .await
-                .map_err(|e| format!("TLS handshake failed: {e}"))?;
+                .map_err(|e| HandshakeError::Other(format!("TLS handshake failed: {e}")))?;
             let mut io = PacketIo::new(
                 MaybeTls::Tls(Box::new(tls_stream)),
                 config.max_allowed_packet,
             );
             io.set_sequence(seq);
-            let data = io.read_packet().await.map_err(|e| e.to_string())?;
+            let data = io.read_packet().await.map_err(|e| {
+                if is_packet_eof(&e) {
+                    tidb_base::log_debug!(
+                        "wait handshake response fail due to connection has be closed by client-side",
+                    );
+                }
+                HandshakeError::from(e)
+            })?;
             let accepted =
                 authenticate(&mut io, &data, &salt, peer, connection_id, config, factory).await?;
             Ok((io, accepted))
@@ -302,7 +356,7 @@ async fn handshake_inner<S, F>(
     connection_id: u64,
     config: &ServerConfig,
     factory: &F,
-) -> Result<Outcome<F>, String>
+) -> Result<Outcome<F>, HandshakeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     F: SessionFactory,
@@ -317,11 +371,17 @@ where
         status: crate::constants::status::AUTOCOMMIT,
         auth_plugin: &config.default_auth_plugin,
     };
-    let io_err = |e: io::Error| e.to_string();
-    io.write_packet(&hs.encode()).await.map_err(io_err)?;
-    io.flush().await.map_err(io_err)?;
+    io.write_packet(&hs.encode()).await?;
+    io.flush().await?;
 
-    let data = io.read_packet().await.map_err(|e| e.to_string())?;
+    let data = io.read_packet().await.map_err(|e| {
+        if is_packet_eof(&e) {
+            tidb_base::log_debug!(
+                "wait handshake response fail due to connection has be closed by client-side",
+            );
+        }
+        HandshakeError::from(e)
+    })?;
     if data.len() >= 4 && u32::from_le_bytes([data[0], data[1], data[2], data[3]]) & CLIENT_SSL != 0
     {
         if config.tls.is_some() {
@@ -333,9 +393,7 @@ where
         }
         // TLS is not advertised, so a conforming client never asks for it.
         let e = SqlError::not_supported("SSL");
-        write_err(io, CLIENT_PROTOCOL_41, &e)
-            .await
-            .map_err(io_err)?;
+        write_err(io, CLIENT_PROTOCOL_41, &e).await?;
         return Ok(Outcome::Done(None));
     }
     authenticate(io, &data, &salt, peer, connection_id, config, factory)
@@ -352,18 +410,15 @@ async fn authenticate<S, F>(
     connection_id: u64,
     config: &ServerConfig,
     factory: &F,
-) -> Result<Accepted<F>, String>
+) -> Result<Accepted<F>, HandshakeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     F: SessionFactory,
 {
-    let io_err = |e: io::Error| e.to_string();
     let resp = match HandshakeResponse::parse(data) {
         Ok(r) => r,
         Err(e) => {
-            write_err(io, CLIENT_PROTOCOL_41, &e)
-                .await
-                .map_err(io_err)?;
+            write_err(io, CLIENT_PROTOCOL_41, &e).await?;
             return Ok(None);
         }
     };
@@ -383,10 +438,9 @@ where
             auth_plugin::MYSQL_NATIVE_PASSWORD,
             salt,
         ))
-        .await
-        .map_err(io_err)?;
-        io.flush().await.map_err(io_err)?;
-        auth = io.read_packet().await.map_err(|e| e.to_string())?;
+        .await?;
+        io.flush().await?;
+        auth = io.read_packet().await?;
     }
 
     let host = peer_host(peer);
@@ -396,7 +450,12 @@ where
     };
     if !verified {
         let e = SqlError::access_denied(&resp.user, host, !auth.is_empty());
-        write_err(io, capability, &e).await.map_err(io_err)?;
+        tidb_base::log_warn!(
+            "open new session or authentication failure",
+            "conn" => connection_id,
+            "error" => e.message.as_str(),
+        );
+        write_err(io, capability, &e).await?;
         return Ok(None);
     }
 
@@ -412,22 +471,32 @@ where
     let mut handler = match factory.open_session(&info) {
         Ok(h) => h,
         Err(e) => {
-            write_err(io, capability, &e).await.map_err(io_err)?;
+            tidb_base::log_warn!(
+                "open new session or authentication failure",
+                "conn" => connection_id,
+                "error" => e.message.as_str(),
+            );
+            write_err(io, capability, &e).await?;
             return Ok(None);
         }
     };
     if let Some(db) = &resp.database
         && let Err(e) = handler.use_db(db).await
     {
-        write_err(io, capability, &e).await.map_err(io_err)?;
+        tidb_base::log_warn!(
+            "open new session or authentication failure",
+            "conn" => connection_id,
+            "error" => e.message.as_str(),
+        );
+        write_err(io, capability, &e).await?;
         return Ok(None);
     }
 
     let mut ok = vec![header::OK, 0, 0];
     ok.extend_from_slice(&handler.status_flags().to_le_bytes());
     ok.extend_from_slice(&[0, 0]);
-    io.write_packet(&ok).await.map_err(io_err)?;
-    io.flush().await.map_err(io_err)?;
+    io.write_packet(&ok).await?;
+    io.flush().await?;
     Ok(Some((handler, capability, resp.user)))
 }
 
@@ -848,14 +917,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                         match write_err(&mut self.io, self.capability, &e).await {
                             Ok(()) => (Some(label), true),
                             Err(e) => {
-                                debug!(connection_id, error = %e, "write error packet failed");
+                                let err_str = e.to_string();
+                                tidb_base::log_debug!(
+                                    "write error packet failed",
+                                    "conn" => connection_id,
+                                    "error" => err_str.as_str(),
+                                );
                                 (Some(label), false)
                             }
                         }
                     }
                 }
                 Err(ConnError::Fatal(e)) => {
-                    debug!(connection_id, error = %e, "connection error");
+                    let err_str = e.to_string();
+                    tidb_base::log_debug!(
+                        "connection error",
+                        "conn" => connection_id,
+                        "error" => err_str.as_str(),
+                    );
                     (Some("unknown"), false)
                 }
             };
@@ -889,7 +968,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             }
             command::QUERY => {
                 let sql = sql_text(body)?;
-                trace!(sql, "COM_QUERY");
+                tidb_base::log_debug!("COM_QUERY", "sql" => sql);
                 let start = Instant::now();
                 let resp = self.handler.query(sql).await;
                 self.write_timed(start, resp, false).await
@@ -950,7 +1029,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
 
     async fn stmt_prepare(&mut self, body: &[u8]) -> Result<(), ConnError> {
         let sql = sql_text(body)?;
-        trace!(sql, "COM_STMT_PREPARE");
+        tidb_base::log_debug!("COM_STMT_PREPARE", "sql" => sql);
         let id = self.next_stmt_id;
         self.next_stmt_id = self.next_stmt_id.checked_add(1).unwrap_or(1);
         let info = self.handler.prepare(id, sql).await?;

@@ -244,7 +244,7 @@ impl NewSession {
         )
         .await;
         if let Err(e) = trs.close(&mut self.session).await {
-            log::warn!("close result set: {e}");
+            tidb_base::log_warn!("close result set", "error" => &e);
         }
         r?;
         Ok(Response::Encoded(EncodedResultSet {
