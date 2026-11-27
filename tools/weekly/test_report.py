@@ -459,6 +459,25 @@ class VerdictTest(unittest.TestCase):
             self.assertIn("use rejected: 1049", text)  # a rejected USE is a tidb-rs error
             self.assertIn("1 reads sent to tidb-rs", text)  # skipped reads are not sent
 
+    def test_integrationtest_session_binding_is_not_a_rejected_statement(self):
+        # A session binding ran on A only (a write): the plan-source reads skipped after it are
+        # counted on their own line, not as reads hidden by a rejected statement (#516 review).
+        binding = "create binding for select 1 using select 1"
+        with tempfile.TemporaryDirectory() as d:
+            skipped = diverged(3, 2, binding)
+            skipped["cause"]["var"] = "session binding"
+            it_records(d, [{"verdict": "b_set_rejected", "query": "set x = 1", "line": 1},
+                           diverged(2, 1, "set x = 1"), skipped])
+            rc, first = report(d, parts="integrationtest")
+            self.assertEqual(rc, 0, first)
+            with open(f"{d}/report.md") as f:
+                text = f.read()
+            self.assertIn("(`session diverged`): **1**.", text)
+            self.assertIn("after a session binding that ran on A only (not rejected: tidb-rs never "
+                          "runs writes): **1**, after 1 distinct statements.", text)
+            self.assertIn("| `set x = 1` | 1 | 1 |", text)
+            self.assertNotIn("| `create binding", text)
+
     def test_integrationtest_rejected_statement_seen_before_is_not_new(self):
         with tempfile.TemporaryDirectory() as d:
             rej = {"verdict": "b_set_rejected", "query": "set names gbk", "line": 1, "kind": "session",

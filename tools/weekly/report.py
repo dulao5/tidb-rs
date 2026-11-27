@@ -156,7 +156,8 @@ def integration(base, expected=None):
     (in `expected`), "fixed": [(key, verdict)] (in `expected`, ran on tidb-rs, no longer a mismatch),
     "rejected": Counter (normalized session statements tidb-rs rejected: `b_set_rejected` records
     and `USE` counted as b_error), "causes": Counter (normalized causing statement -> reads
-    skipped as "session diverged")}, or None when there is none. Per test, "skipped" counts the
+    skipped as "session diverged"), "a_only": Counter (the same for statements that ran on A only:
+    a session binding, which hides the plan-source reads after it)}, or None when there is none. Per test, "skipped" counts the
     reads skipped as "session diverged"."""
     expected = expected or {}
     if not base:
@@ -165,7 +166,7 @@ def integration(base, expected=None):
     if not hits:
         return None
     totals, tests, reasons, errors, mismatches, known = Counter(), defaultdict(Counter), Counter(), Counter(), [], []
-    ran, rejected, causes = {}, Counter(), Counter()
+    ran, rejected, causes, a_only = {}, Counter(), Counter(), Counter()
     with open(hits[0]) as f:
         for line in f:
             if not line.strip():
@@ -179,7 +180,10 @@ def integration(base, expected=None):
             if v == "b_set_rejected" or (v == "b_error" and r.get("kind") == "use rejected"):
                 rejected[norm_sql(r.get("query", ""))] += 1
             elif v == "skipped":
-                causes[norm_sql((r.get("cause") or {}).get("sql", "?"))] += 1
+                cause = r.get("cause") or {}
+                # A session binding ran on A only (a write B never runs): not a rejection.
+                target = a_only if cause.get("var") == A_ONLY_CAUSE else causes
+                target[norm_sql(cause.get("sql", "?"))] += 1
             if v == "unsupported":
                 reasons[reason(r.get("detail") or r.get("kind") or "")] += 1
             elif v == "b_error":
@@ -191,11 +195,15 @@ def integration(base, expected=None):
     fixed = sorted((k, ran[k]) for k in expected if k in ran and k not in seen)
     return {"totals": totals, "tests": tests, "reasons": reasons, "errors": errors,
             "mismatches": mismatches, "known": known, "fixed": fixed, "rejected": rejected,
-            "causes": causes,
+            "causes": causes, "a_only": a_only,
             # Results written before ab recorded rejected session statements have none; every
             # real run has some (the tests set plan variables tidb-rs does not know).
             "records_rejected": bool(rejected)}
 
+
+# The `cause.var` of a read skipped after a statement that ran on A only, not one tidb-rs
+# rejected (tools/ab/src/integration.rs SESSION_BINDING).
+A_ONLY_CAUSE = "session binding"
 
 # results.jsonl verdicts of reads sent to tidb-rs (the others: "b_set_rejected", a session
 # statement tidb-rs rejected; "skipped", a read not sent because the session diverged).
@@ -692,12 +700,18 @@ def section_rulings(ledger, cur, records, errors, warnings, table, full, lines):
 
 def section_diverged(cur, prev, lines):
     """Session statements tidb-rs rejected and the reads skipped because of them."""
-    rejected, causes = cur["rejected"], cur["causes"]
+    rejected, causes, a_only = cur["rejected"], cur["causes"], cur.get("a_only") or Counter()
     lines.append(
         f"Session statements tidb-rs rejected: {sum(rejected.values())} ({len(rejected)} distinct; "
         f"a rejected `USE` also counts as a tidb-rs error). Reads skipped because a rejected "
         f"statement left tidb-rs's session answering differently (`session diverged`): "
         f"**{sum(causes.values())}**.\n")
+    if a_only:
+        lines.append(
+            f"Plan-source reads (`@@last_plan_from_cache` / `@@last_plan_from_binding`) skipped as "
+            f"`session diverged` after a session binding that ran on A only (not rejected: tidb-rs "
+            f"never runs writes): **{sum(a_only.values())}**, after {len(a_only)} distinct "
+            f"statements.\n")
     g = it_diverged_growth(cur, prev)
     if g:
         lines.append(f"Skipped as `session diverged` over the tests both runs ran: {g[0]} last run, "

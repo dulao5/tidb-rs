@@ -82,7 +82,9 @@ whose session diverged (tidb-rs rejected a result-affecting `SET` / `USE`; `tool
 Those skips must not hide defects, so the report counts them, lists the rejected session
 statements with the reads skipped after each (statements not rejected in the previous run are
 marked **new**), and an increase over the tests both runs ran is REGRESSED. A rejected `USE`
-also counts as a tidb-rs error.
+also counts as a tidb-rs error. Plan-source reads (`@@last_plan_from_cache`,
+`@@last_plan_from_binding`) skipped after a session binding that ran on A only are counted on a
+line of their own: that statement was not rejected.
 
 `ddl/index_modify` turns `tidb_ddl_enable_fast_reorg` on, and Go TiDB then refuses `ADD INDEX`
 (8256, "no enough space") when the disk under its `temp-dir` has less than 10% free; the reads
