@@ -172,6 +172,7 @@ impl SessionFactory for Factory {
             stmt: StmtMetrics::default(),
             router: None,
             prev_stmt: router::LastStmtInfo::default(),
+            set_applied: 0,
         };
         if self.new_stack != NewStackMode::Off {
             let domain = self
@@ -225,6 +226,9 @@ pub struct Session {
     stmt: StmtMetrics,
     /// The router between the PoC and the ported stack (`--new-stack=fallback|strict`); `None` with `off`.
     router: Option<Box<Router>>,
+    /// How many assignments of the current statement's `SET` were applied (`run_set`); 0 for
+    /// any other statement.
+    set_applied: usize,
 }
 
 /// What the Go session metrics need to know about the statement in flight: its type and how
@@ -508,6 +512,7 @@ impl Session {
         params: &[Literal],
         ts: Option<TsFuture>,
     ) -> Result<Response, SqlError> {
+        self.set_applied = 0;
         match &lowered.stmt {
             Statement::Select(sel) => self.select(sel, params, ts).await.map(Response::ResultSet),
             Statement::Use(db) => {
@@ -711,16 +716,22 @@ impl Session {
     }
 
     fn set(&mut self, assignments: &[SetAssignment]) -> Result<(), SqlError> {
-        // Validate everything first, then apply (a failing SET changes nothing).
-        let change = check_set(assignments)?;
-        if let Some((cs, coll)) = change.names {
-            self.charset = cs;
-            self.collation = coll;
-        }
-        if let Some(r) = change.results {
-            self.results_charset = r;
-        }
-        Ok(())
+        let (charset, collation, results_charset) = (
+            &mut self.charset,
+            &mut self.collation,
+            &mut self.results_charset,
+        );
+        let (applied, result) = run_set(assignments, |change| {
+            if let Some((cs, coll)) = change.names {
+                *charset = cs;
+                *collation = coll;
+            }
+            if let Some(r) = change.results {
+                *results_charset = r;
+            }
+        });
+        self.set_applied = applied;
+        result
     }
 }
 
@@ -733,8 +744,27 @@ struct SetChange {
     results: Option<Option<String>>,
 }
 
+/// `SET assignments` on the prototype as Go's `SetExecutor.Next` runs them (`set.go:63-106`):
+/// each assignment is checked and applied (`apply`) before the next one is checked; the first
+/// error ends the statement, and the assignments before it stay applied. Returns how many
+/// assignments were applied, and the statement's result.
+// glue: the assignment loop of SetExecutor.Next (D12.12) on the prototype's SET
+fn run_set(
+    assignments: &[SetAssignment],
+    mut apply: impl FnMut(SetChange),
+) -> (usize, Result<(), SqlError>) {
+    for (i, a) in assignments.iter().enumerate() {
+        match check_set(std::slice::from_ref(a)) {
+            Ok(change) => apply(change),
+            Err(e) => return (i, Err(e)),
+        }
+    }
+    (assignments.len(), Ok(()))
+}
+
 /// The checks of `SET assignments` on the prototype, in order, before anything is applied:
-/// the change to apply, or the first assignment's error.
+/// the change to apply, or the first assignment's error. `run_set` calls it for one
+/// assignment at a time.
 fn check_set(assignments: &[SetAssignment]) -> Result<SetChange, SqlError> {
     let mut names = None;
     let mut results = None;
@@ -1095,6 +1125,10 @@ impl router::PocEngine for Session {
         self.poc_values()
     }
 
+    fn set_applied(&self) -> usize {
+        self.set_applied
+    }
+
     fn begin_command(&mut self) {
         self.timer.begin();
         self.mdl = None;
@@ -1199,12 +1233,28 @@ mod fence_tests {
         assert!(txn_fence(&select.stmt).is_none());
     }
 
-    /// `SET` of one assignment on the prototype (the checks before anything is applied).
+    /// `SET` on the prototype as `Session::set` runs it: the change of each applied
+    /// assignment, in order, and the statement's result.
+    fn run(sql: &str) -> (Vec<SetChange>, Result<(), SqlError>) {
+        let Statement::Set(a) = tidb_sql::parse_and_lower(sql).unwrap().stmt else {
+            panic!("{sql}");
+        };
+        let mut changes = Vec::new();
+        let (applied, result) = run_set(&a, |c| changes.push(c));
+        assert_eq!(applied, changes.len(), "{sql}");
+        (changes, result)
+    }
+
+    /// A `SET` that succeeds: what it changes in the session; or its error.
     fn set(sql: &str) -> Result<SetChange, SqlError> {
-        match tidb_sql::parse_and_lower(sql).unwrap().stmt {
-            Statement::Set(a) => check_set(&a),
-            other => panic!("{sql}: {other:?}"),
+        let (changes, result) = run(sql);
+        result?;
+        let mut all = SetChange::default();
+        for c in changes {
+            all.names = c.names.or(all.names);
+            all.results = c.results.or(all.results);
         }
+        Ok(all)
     }
 
     /// The whole client error: code, SQLSTATE and message.
@@ -1259,7 +1309,14 @@ mod fence_tests {
             );
         }
         // A value the prototype cannot evaluate is not supported (it was 1231 without a value).
-        assert_eq!(set("SET autocommit = 1 + 1").unwrap_err().code, 1235);
+        assert_eq!(
+            err("SET autocommit = 1 + 1"),
+            (
+                1235,
+                "42000".to_owned(),
+                "This version of TiDB doesn't yet support 'this SET value'".to_owned()
+            )
+        );
     }
 
     /// An unknown sql_mode is the parser's `ErrWrongValueForVar` (`mysql.NewErr`, not a TiDB
@@ -1299,10 +1356,14 @@ mod fence_tests {
             assert_eq!(set(sql), Ok(SetChange::default()), "{sql}");
         }
         assert_eq!(
-            set("SET sql_mode = 'pad_char_to_full_length'")
-                .unwrap_err()
-                .code,
-            1235
+            err("SET sql_mode = 'pad_char_to_full_length'"),
+            (
+                1235,
+                "42000".to_owned(),
+                "This version of TiDB doesn't yet support 'this sql_mode \
+                 (PAD_CHAR_TO_FULL_LENGTH changes CHAR results)'"
+                    .to_owned()
+            )
         );
     }
 
@@ -1349,12 +1410,27 @@ mod fence_tests {
                 results: Some(Some("utf8mb4".to_owned()))
             })
         );
-        // A failing assignment fails the statement; nothing is applied.
+        // Go's `SetExecutor.Next`: the first failing assignment ends the statement with its
+        // error; the assignments before it stay applied, the ones after it are not run.
+        let (changes, result) = run("SET NAMES latin1, autocommit = 'abc', NAMES ascii");
+        let e = result.unwrap_err();
         assert_eq!(
-            set("SET NAMES latin1, autocommit = 'abc'")
-                .unwrap_err()
-                .code,
-            1231
+            (e.code, e.state.to_string(), e.message),
+            (
+                1231,
+                "42000".to_owned(),
+                "Variable 'autocommit' can't be set to the value of 'abc'".to_owned()
+            )
         );
+        assert_eq!(
+            changes,
+            [SetChange {
+                names: Some(("latin1".to_owned(), "latin1_bin".to_owned())),
+                results: Some(Some("latin1".to_owned()))
+            }]
+        );
+        let (changes, result) = run("SET autocommit = 'abc', NAMES latin1");
+        assert_eq!(result.unwrap_err().code, 1231);
+        assert!(changes.is_empty());
     }
 }

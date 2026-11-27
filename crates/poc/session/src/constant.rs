@@ -431,7 +431,17 @@ mod tests {
         .unwrap();
         assert_eq!(r.rows[0], vec![Value::Int(1), Value::Int(1), Value::Int(1)]);
         // A known variable the prototype does not answer is not supported (it was 1193).
-        assert_eq!(run("SELECT @@warning_count", &[]).unwrap_err().code, 1235);
+        assert_eq!(
+            err("SELECT @@warning_count"),
+            (
+                1235,
+                "42000",
+                "This version of TiDB doesn't yet support 'reading system variable \
+                 'warning_count' (the prototype answers only the variables clients read \
+                 while connecting)'"
+                    .to_owned()
+            )
+        );
     }
 
     /// Every variable the prototype answers is a Go system variable, so the checks above
