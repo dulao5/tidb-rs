@@ -44,12 +44,26 @@ pub struct StatusInfo {
     /// The MySQL server version string (Go: `mysql.ServerVersion`).
     pub version: String,
     pub git_hash: String,
+    /// Configured `status-host` (Go `http_status.go:97-102` logs `net.JoinHostPort(host, port)`
+    /// for `"listening on addr"` rather than the dual-stack listener address). Empty falls back
+    /// to `listener.local_addr()`.
+    pub listen_host: String,
 }
 
-/// Formats a bound listen address the way Go's `net.Listen("tcp", ...)` reports it:
-/// unspecified addresses (`0.0.0.0` / `::`) render as `[::]:<port>` because Go opens a dual-stack
-/// listener; specific IP addresses keep their standard `<ip>:<port>` formatting.
-fn format_go_listen_addr(addr: std::net::SocketAddr) -> String {
+/// Go's `net.JoinHostPort(host, port)`: wraps IPv6 literals (containing `:`) in `[...]`.
+fn format_go_host_port(host: &str, port: u16) -> String {
+    let trimmed = host.trim_matches(|c| c == '[' || c == ']');
+    if trimmed.contains(':') {
+        format!("[{trimmed}]:{port}")
+    } else {
+        format!("{trimmed}:{port}")
+    }
+}
+
+/// Formats a bound listener address the way Go's `net.OpError` (`accept tcp <addr>: ...`)
+/// reports it on shutdown: unspecified addresses (`0.0.0.0` / `::`) render as `[::]:<port>`
+/// because Go opens a dual-stack listener; specific IPs keep their standard formatting.
+fn format_go_accept_addr(addr: std::net::SocketAddr) -> String {
     if addr.ip().is_unspecified() {
         format!("[::]:{}", addr.port())
     } else {
@@ -59,14 +73,18 @@ fn format_go_listen_addr(addr: std::net::SocketAddr) -> String {
 
 /// Serve the status API on `listener` until `shutdown` completes.
 pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Future<Output = ()>) {
-    let local_addr = match listener.local_addr() {
+    let accept_addr = match listener.local_addr() {
         Ok(addr) => {
-            let addr_str = format_go_listen_addr(addr);
+            let listen_str = if info.listen_host.is_empty() {
+                addr.to_string()
+            } else {
+                format_go_host_port(&info.listen_host, addr.port())
+            };
             tidb_base::log_info!(
                 "for status and metrics report",
-                "listening on addr" => &addr_str,
+                "listening on addr" => &listen_str,
             );
-            Some(addr_str)
+            Some(format_go_accept_addr(addr))
         }
         Err(e) => {
             warn!(error = %e, "status server address unknown");
@@ -114,7 +132,7 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
     // Emit the three Go status/RPC shutdown WARNs (pkg/server/http_status.go:535,540,545,
     // spec §4.2) when the status/gRPC server stops. Match Go's `net.OpError` format:
     // `accept tcp <addr>: use of closed network connection`.
-    let accept_err = match local_addr {
+    let accept_err = match accept_addr {
         Some(addr) => format!("accept tcp {addr}: use of closed network connection"),
         None => "use of closed network connection".to_owned(),
     };
@@ -416,6 +434,7 @@ mod tests {
         let info = StatusInfo {
             version: "8.0.11-TiDB-v8.5.8-tidb-rs".to_owned(),
             git_hash: "abc".to_owned(),
+            listen_host: "127.0.0.1".to_owned(),
         };
         tokio::spawn(serve(listener, info, async move {
             let _ = rx.await;
@@ -694,14 +713,20 @@ mod tests {
         };
         tidb_log::init_logger_with_sinks(&cfg, "", sink.clone(), None).unwrap();
 
-        for (bind_addr, expect_unspecified) in [("127.0.0.1:0", false), ("0.0.0.0:0", true)] {
-            let listener = TcpListener::bind(bind_addr).await.unwrap();
+        assert_eq!(format_go_host_port("0.0.0.0", 10080), "0.0.0.0:10080");
+        assert_eq!(format_go_host_port("::", 10080), "[::]:10080");
+        assert_eq!(format_go_host_port("::1", 10080), "[::1]:10080");
+        assert_eq!(format_go_host_port("[::1]", 10080), "[::1]:10080");
+
+        for (bind_host, expect_unspecified) in [("127.0.0.1", false), ("0.0.0.0", true)] {
+            let listener = TcpListener::bind((bind_host, 0)).await.unwrap();
             let addr = listener.local_addr().unwrap();
             let port = addr.port();
             let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
             let info = StatusInfo {
                 version: "8.5.8-TiDB-v8.5.8".into(),
                 git_hash: "test".into(),
+                listen_host: bind_host.to_owned(),
             };
             let handle = tokio::spawn(async move {
                 serve(listener, info, async move {
@@ -716,7 +741,7 @@ mod tests {
             let lines: Vec<String> = captured.lines().map(normalize_status_caller_line).collect();
             let (want_listen_field, want_accept_addr) = if expect_unspecified {
                 (
-                    format!(r#"["listening on addr"="[::]:{port}"]"#),
+                    format!(r#"["listening on addr"=0.0.0.0:{port}]"#),
                     format!("[::]:{port}"),
                 )
             } else {
@@ -739,7 +764,7 @@ mod tests {
                         r#"[WARN] [status.rs:<line>] ["start status/rpc server error"] [error="accept tcp {want_accept_addr}: use of closed network connection"]"#
                     ),
                 ],
-                "bind_addr={bind_addr}"
+                "bind_host={bind_host}"
             );
         }
     }

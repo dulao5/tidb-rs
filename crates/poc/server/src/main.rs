@@ -492,6 +492,7 @@ fn main() {
             let info = status::StatusInfo {
                 version: config.server_version.clone(),
                 git_hash: tidb_log::TIDB_GIT_HASH.to_owned(),
+                listen_host: effective_status_host.clone(),
             };
             pool.spawn("status-server", async move {
                 status::serve(status_listener, info, async move {
