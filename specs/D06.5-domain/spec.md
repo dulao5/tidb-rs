@@ -59,7 +59,7 @@ Go 用 errgroup 按 `splitForConcurrentFetch` 的分组并发读取（`fetchSche
 
 | 桩 | 类别 | 说明 |
 |---|---|---|
-| `getTimestampForSchemaVersionWithNonEmptyDiff` | 临时，`blocked-by:D07.1` | Go 用 `store/helper` 的 `GetMvccByEncodedKeyWithTS`（TiKV 的 MVCC 调试接口）读 schema diff 的提交时间戳。没有它时 Go 对非 TiKV store 返回 "cannot get store from domain"，调用方记 warning 并用 0。桩照此返回，结果是 `InfoCache` 中的时间戳为 0，`GetBySnapshotTS` 找不到版本，`GetSnapshotInfoSchema` 退回加载历史版本（结果正确，只是多读一次）。新栈目前不处理快照读（`tidb_snapshot` / stale read 走 PoC），不受影响 |
+| `getTimestampForSchemaVersionWithNonEmptyDiff` | 临时，`blocked-by:D07.1` | Go 用 `store/helper` 的 `GetMvccByEncodedKeyWithTS`（TiKV 的 MVCC 调试接口）读 schema diff 的提交时间戳。没有它时 Go 对非 TiKV store 返回 "cannot get store from domain"，调用方每次加载都记一条 warning 并用 0（`pkg/domain/domain.go` 第 308–311 行；接 TiKV 的 Go 不会走到这里，所以 Go 实际上从不打这条）。桩返回 `blocked(...)`（`blocked-by:D07.1`），调用方同样用 0；但因为 sync 循环每秒加载一次，每次都记 warning 会刷屏（#484），所以对 `blocked(...)` 每个 domain 只在第一次加载（启动时）记一条 WARN `schema version commit ts is not available, logged once`（字段 `error`、`version`、`reason`），其他错误仍照 Go 每次记 `failed to get schema version`（字段 `error`、`version`）。结果是 `InfoCache` 中的时间戳为 0，`GetBySnapshotTS` 找不到版本，`GetSnapshotInfoSchema` 退回加载历史版本（结果正确，只是多读一次）。新栈目前不处理快照读（`tidb_snapshot` / stale read 走 PoC），不受影响 |
 | `InfoCache.gcOldVersion`（D06.3） | 临时，`blocked-by:D06.2` | 见 D06.3 spec §10 |
 
 ## 4. 第 2 部分：schema validator、reload 循环、lease（未做）
@@ -76,6 +76,7 @@ VS1-17 原计划还包括 schema validator。N11（集群成员身份、schema �
 - `crates/domain/tests/load_info_schema.rs`：内存 store（按提交时间戳返回 meta 状态，meta 键照 Go 的布局写出）。
   - `full_load_then_diff_load`：第一次全量加载；同版本命中缓存；CREATE TABLE 的 diff 增量加载（`RelatedSchemaChange` 的表 ID 与 action）；旧版本仍可按版本取到且看不到新表；空 diff 的版本不推进。
   - `large_gap_is_a_full_reload`：版本差达到 `LoadSchemaDiffVersionGapThreshold` 时全量加载。
+- `crates/domain/tests/schema_ts_warning.rs`（单独的测试二进制，`tracing` 按调用点缓存是否有订阅者，与同一进程里其他线程的测试会互相干扰）：`blocked_schema_ts_lookup_warns_once` 走 21 次加载（启动时全量、缓存命中、diff 增量、快照加载），整行比较捕获到的 WARN：只有第一次加载的一行。两个测试文件共用 `tests/common/mod.rs` 的内存 store。
 - 单元测试：`Divide2Batches`、`getFlashbackStartTSFromErrorMsg`、`canSkipSchemaCheckerDDL`。
 - 不另做 govec：加载的每一步（全量加载、成批应用 diff、出错退回全量加载）已由 D06.3 的 govec `infoschema` 领域按 domain 的流程覆盖（D06.3 spec §7）；本部分新增的只是版本选择（缓存命中 / 增量 / 全量），上面的测试逐条覆盖。
 - 端到端：路由器测试 `real_prepare_is_blocked_and_restored` 在真实的新会话上用含 `sbtest1` 的 InfoSchema 执行 `PREPARE`，预处理找到表后停在下一个桩（§6）。
