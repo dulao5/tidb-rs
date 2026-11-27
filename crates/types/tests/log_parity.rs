@@ -42,9 +42,13 @@ fn normalize_caller_and_stack(line: &str) -> String {
     let stack_body = stack_quoted
         .strip_suffix("\"]")
         .unwrap_or_else(|| panic!("stack must be the final field in: {base}"));
+    // `release-checked` builds with `debug = false`, so `Backtrace::force_capture` emits
+    // symbolized frames separated by `\n` without `\n\t<file>:<line>` source locations.
     assert!(
-        !stack_body.is_empty() && stack_body.contains("\\n\\t"),
-        "expected non-empty Go-style \\n\\t stack frames in: {stack_body:?}"
+        !stack_body.is_empty()
+            && stack_body.contains("\\n")
+            && (!cfg!(debug_assertions) || stack_body.contains("\\n\\t")),
+        "expected non-empty backtrace frames (with \\n\\t under debug) in: {stack_body:?}"
     );
     format!("{prefix} [stack=\"<STACK>\"]")
 }

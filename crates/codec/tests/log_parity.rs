@@ -37,9 +37,13 @@ fn hash_code_unexpected_datum_kind_matches_go_whole_line() {
     let stack_body = stack_quoted
         .strip_suffix("\"]")
         .unwrap_or_else(|| panic!("stack must be final field: {line}"));
+    // `release-checked` builds with `debug = false`, so `Backtrace::force_capture` emits
+    // symbolized frames separated by `\n` without `\n\t<file>:<line>` source locations.
     assert!(
-        !stack_body.is_empty() && stack_body.contains("\\n\\t"),
-        "expected non-empty Go-style \\n\\t stack frames: {stack_body:?}"
+        !stack_body.is_empty()
+            && stack_body.contains("\\n")
+            && (!cfg!(debug_assertions) || stack_body.contains("\\n\\t")),
+        "expected non-empty backtrace frames (with \\n\\t under debug): {stack_body:?}"
     );
     let normalized_prefix = if let Some((head, tail)) = prefix.split_once("[codec.rs:")
         && let Some((line_no, rest)) = tail.split_once(']')
