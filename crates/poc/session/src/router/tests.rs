@@ -46,6 +46,9 @@ struct FakePoc {
     prepare_fails: bool,
     prepared: HashMap<u32, Lowered>,
     log: Vec<String>,
+    /// The schema sync's registry: when set, the schema version is the real PoC's
+    /// computation over it, with `schema_version` as the ADR 0003 cache's newest entry.
+    registry: Option<Arc<poc_domain::Registry>>,
 }
 
 fn col(name: &str) -> ColumnDef {
@@ -79,7 +82,12 @@ impl FakePoc {
 
 impl PocEngine for FakePoc {
     fn schema_version(&self) -> Option<i64> {
-        self.schema_version
+        match &self.registry {
+            Some(r) => crate::router_schema_version(Some(r), std::time::Instant::now(), || {
+                self.schema_version
+            }),
+            None => self.schema_version,
+        }
     }
     fn in_txn(&self) -> bool {
         self.in_txn
@@ -611,6 +619,25 @@ fn step0_schema_versions_must_be_equal() {
         r.route(&parse(POINT), &p, false),
         Route::Poc(Reason::SchemaVersion)
     );
+}
+
+/// Step 0: a statement goes to the new stack only while the synced schema is admissible.
+/// Here the node is not registered in the cluster (never registered, or deregistered): the
+/// DDL owner does not wait for it, so the new stack's InfoSchema may be two versions behind
+/// the data. The ADR 0003 cache still holds the new stack's version, and the versions
+/// compare equal; the statement must still run on the PoC, whose path checks the schema at
+/// the statement's own timestamp.
+#[test]
+fn step0_unadmissible_schema_lease_goes_to_the_poc() {
+    let mut p = poc();
+    p.registry = Some(poc_domain::Registry::new(poc_domain::Limits::default()));
+    let (mut r, script) = scripted(NewStackMode::Strict, &p);
+    script.lock().unwrap().version = Some(1);
+    assert_ne!(r.route(&parse(POINT), &p, false), Route::New);
+    // Even in strict mode the statement runs on the PoC.
+    let res = block_on(r.query(&mut p, POINT));
+    assert_eq!(rows(&res).map(|r| r.0), Some(3));
+    assert!(script.lock().unwrap().log.is_empty());
 }
 
 /// Step 0 comes before the kind and the AST pre-check.
