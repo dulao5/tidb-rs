@@ -27,19 +27,19 @@
 1. `joinNode.Right == nil` 时只建左边（`:731-733`，已在 VS1 中移植）。
 2. 用 `containsLateralTableSource` 判断右边是否含 LATERAL（`:740`）；置 `FlagPredicatePushDown`，非 LATERAL 时再置 `FlagJoinReOrder`，然后置 `FlagPredicateSimplification`（`:742-748`）。
 3. 建左边；LATERAL 时把左边的 schema（有 `FullSchema` 时用它）压进 `outerSchemas` / `outerNames`，`lateralOuterCount++`，用 `defer` 在所有返回路径上弹出（`:756-784`）。再建右边。
-4. LATERAL 时，右边直接就是 LATERAL 表源，或右边的计划确实引用了左边的列，就转去 `buildLateralJoin` 建 `LogicalApply`（`:800-815`）；否则当普通 join 继续。
+4. LATERAL 时，右边直接就是 LATERAL 表源，或右边的计划确实引用了左边的列，就转去 `buildLateralJoin` 建 `LogicalApply`（`:803-816`）；否则当普通 join 继续。
 5. 右边是递归 CTE 的递归部分而且是 LEFT JOIN 时报 `ErrCTERecursiveForbiddenJoinOrder`（`:818-820`）。
-6. `handleHelper` 弹出两层再合并压回（`:822-824`）；`LogicalJoin.Init`（**此处分配 join 的 plan id**，`:827`），`StraightJoin` 取 `joinNode.StraightJoin || b.inStraightJoin`；schema 是两边 schema 的合并，输出名是两边输出名的拼接（指针拷贝）。
-7. join 类型（`:834-848`）：`LEFT JOIN` → `LeftOuterJoin`，置 `FlagEliminateOuterJoin`，**右边各列去掉 NOT NULL 标志**（`util.ResetNotNullFlag`，先复制 `FieldType` 再改）；`RIGHT JOIN` → `RightOuterJoin`，左边各列去掉 NOT NULL；其余（解析器的 `CrossJoin`，即 `JOIN` / `INNER JOIN` / `CROSS JOIN` / 逗号）→ `InnerJoin`。
-8. `FullSchema` / `FullNames`（`:850-897`）：**每个 join 都有**。左右两边是 join（或 apply）且有 `FullSchema` 时取它，否则取该边的 schema 和输出名；`RIGHT JOIN` 时交换，使 `FullSchema` 总是"外表在前、内表在后"；外连接时内表一侧去掉 NOT NULL；`FullNames` 逐个**按值复制** `FieldName`（之后 USING 会在副本上标 `Redundant`）。
+6. `handleHelper` 弹出两层再合并压回（`:823-825`）；`LogicalJoin.Init`（**此处分配 join 的 plan id**，`:827`），`StraightJoin` 取 `joinNode.StraightJoin || b.inStraightJoin`；schema 是两边 schema 的合并，输出名是两边输出名的拼接（指针拷贝）。
+7. join 类型（`:834-848`）：`LEFT JOIN` → `LeftOuterJoin`，置 `FlagEliminateOuterJoin`，**右边各列去掉 NOT NULL 标志**（`util.ResetNotNullFlag`，先复制 `FieldType` 再改）；`RIGHT JOIN` → `RightOuterJoin`，同样置 `FlagEliminateOuterJoin`，左边各列去掉 NOT NULL（`:840`、`:845`）；其余（解析器的 `CrossJoin`，即 `JOIN` / `INNER JOIN` / `CROSS JOIN` / 逗号）→ `InnerJoin`。
+8. `FullSchema` / `FullNames`（`:850-899`）：**每个 join 都有**。左右两边**本身**是 `*LogicalJoin` 或 `*LogicalApply`（直接类型断言，`:858-877`）且有 `FullSchema` 时取它，否则取该边的 schema 和输出名。这里**不用** `findJoinFullSchema`：只有 `buildLateralJoin` 用它穿过 `LogicalSelection` 去找（`:1029`、`:1040`），所以子节点是 inner join 加 ON 生成的 `LogicalSelection` 时，`buildJoin` 取的是 `LogicalSelection` 的 schema，移植时不能换成 `findJoinFullSchema`；`RIGHT JOIN` 时交换，使 `FullSchema` 总是"外表在前、内表在后"；外连接时内表一侧去掉 NOT NULL（`:887`）；`FullNames` 逐个**按值复制** `FieldName`（之后 USING 会在副本上标 `Redundant`）。
 9. `SetPreferredJoinTypeAndOrder(b.TableHints())`（`:902`），根据表级 join hint 设置 `PreferJoinType` 等。
 10. 条件（`:911-946`）：NATURAL → `buildNaturalJoin`；USING → `buildUsingClause`；ON → `curClause = onClause`，`checkColPriv` 临时改为 `reportColumnErrOption`，改写 ON 表达式（改写返回后、检查错误之前就恢复 `checkColPriv`），改写产生了新计划（ON 里有子查询）时报 `errors.New("ON condition doesn't support subqueries yet")`（错误码 1105），按 CNF 拆开；**inner join 的 ON 条件不挂在 join 上，而是在 join 上面建一个 `LogicalSelection`**（`:936-940`，再分配一个 plan id），外连接则 `AttachOnConds`；没有 ON / USING 的 inner join 标 `CartesianJoin = true`。
 
-**`coalesceCommonColumns`（`:1140-1344`）**：两边 schema 先 `Clone`，外连接的内表一侧去掉 NOT NULL；`RIGHT JOIN` 交换左右。USING 先分别检查左、右两边的同名列（`ErrAmbiguous`），NATURAL 统计两边同名列的次数，任一边多于一次报 `ErrAmbiguous`。然后把共有列按左边的顺序挪到最前面（跳过 `_tidb_rowid` 和隐藏列），每个共有列的两侧都追加列权限检查（`appendColNamesToVisitInfo`，视图用视图名，CTE 跳过）；USING 里有找不到的列时遍历 `filter` map 报 `ErrUnknownColumn`（`:1305-1310`）；为每个共有列建 `EQ(左列, 右列)` 条件放在 `OtherConditions` 最前面，并在 `FullNames` 中把内表（`RIGHT JOIN` 时是左表）那一列标为 `Redundant`。join 的 schema 变成"共有列 + 左边其余列 + 右边其余列"。
+**`coalesceCommonColumns`（`:1140-1344`）**：两边 schema 先 `Clone`，外连接的内表一侧去掉 NOT NULL；`RIGHT JOIN` 交换左右。USING 先分别检查左、右两边的同名列（`ErrAmbiguous`），NATURAL 统计两边同名列的次数，任一边多于一次报 `ErrAmbiguous`。然后把共有列按（交换之后的）左边的顺序挪到最前面：左边的 `_tidb_rowid` 和隐藏列跳过（`:1242-1248`，所以 `USING (_tidb_rowid)` 找不到列，报 `ErrUnknownColumn`）；在右边找到同名列、但它不在 USING 里时，**直接 `break`**，不再往后找（`:1257-1260`）；每个共有列的两侧都追加列权限检查（`appendColNamesToVisitInfo`，视图用视图名，CTE 跳过）；USING 里有找不到的列时遍历 `filter` map 报 `ErrUnknownColumn`（`:1305-1310`）；为每个共有列建 `EQ(左列, 右列)` 条件放在 `OtherConditions` 最前面，并在 `FullNames` 中把内表（`RIGHT JOIN` 时是左表）那一列标为 `Redundant`。join 的 schema 变成"共有列 + 左边其余列 + 右边其余列"（`:1313-1318`），这里的"左""右"是交换之后的：**`RIGHT JOIN` 时是"右表的共有列 + 右表其余列 + 左表其余列"**（`:1150-1153`），`SELECT *` 的列顺序和客户端列定义随之改变。
 
 **`LogicalJoin` 的条件**：`EqualConditions`（两边各一个列的 `=` / `<=>`）、`NAEQConditions`（null-aware 反半连接）、`LeftConditions` / `RightConditions`（只引用一边的条件）、`OtherConditions`（其余）。`ExtractOnCondition`（`logical_join.go:1288-1380`）按以下顺序分类：来自 `IN` 改写的等值条件放 `OtherConditions`；两边各一列的二元函数，按需推导 `IS NOT NULL`（`deriveLeft` / `deriveRight`，用 `IsNullRejected`），是 `=` / `<=>` 时重建为"左列在前"放进 `eqCond`；没有列的常量条件交给 `pushDownConstExpr`（按 join 类型推到一边或两边，外连接时还会追加到 join 自己的 `RightConditions` / `LeftConditions`）；只引用一边的放对应一边；其余放 `OtherConditions`，并按需推导放松后的 DNF 过滤条件。
 
-**等值条件整理 `updateEQCond`（`:1581-1679`）**：谓词下推之后**从后往前**扫描 `OtherConditions`，把两边各一个表达式的 `=` 取出来；表达式不是列时，用 `getProj` 在对应子节点上加（或复用已有的）`LogicalProjection` 并 `AppendExpr`，再建等值条件。因此 `EqualConditions` 中新加的条件与 `OtherConditions` 中的原顺序相反，移植时照抄。
+**等值条件整理 `updateEQCond`（`:1581-1679`）**：谓词下推之后**从后往前**扫描 `OtherConditions`，把两边各一个表达式的 `=` 取出来；表达式不是列时，用 `getProj` 在对应子节点上加（或复用已有的）`LogicalProjection` 并 `AppendExpr`，再建等值条件。来自 `IN` 改写的等值条件（`IsEQCondFromIn`）跳过，留在 `OtherConditions`（`:1593`）。因此 `EqualConditions` 中新加的条件与 `OtherConditions` 中的原顺序相反，移植时照抄。之后取 NA 等值条件的一轮（`OptimizerEnableNAAJ` 打开且可以 NAAJ 时）是**从前往后**扫描（`:1657-1661`），两轮的方向不同。
 
 **`LogicalApply`**：`buildApplyWithJoinType` 调 `LogicalApply.Init`（分配 plan id）；`buildSemiApply` 先 `buildSemiJoin`（`LogicalJoin.Init` 分配 plan id），再把这个 join **按值复制**进 `LogicalApply`，只改 TP 和 `self`，**不再分配 plan id**（`:5836-5850`）；`buildSemiJoin` 在 `asScalar` 时为结果列分配一个列 id。
 
@@ -84,14 +84,15 @@
 | D09.4（第 A、B 部分已合并） | `buildDistinct`、`buildFuncDependCol`、`tblInfoFromCol`、`LogicalAggregation` | `crates/planner/src/core/logical_plan_builder.rs`、`logicalop/logical_aggregation.rs` |
 | D09.13 / D09.14 | `LogicalPlan` trait、`BaseLogicalPlan`（`BuildKeyInfo`、`FindBestTask`）、`LogicalSchemaProducer`（`BuildKeyInfo`、`InlineProjection`）、`LogicalSelection`（`Init`、`PredicatePushDown`、`PruneColumns`）、`LogicalProjection`（`Init`、`AppendExpr`）、`AddSelection`、`AppendTableDualTraceStep`、`Conds2TableDual`、`AppendAddSelectionTraceStep`、`logicaltrace`、规则标志常量 | `crates/planner/src/logicalop/`、`core/`、`util/` |
 | D13.3 hint | `PlanHints.IfPreferMergeJoin` 等 20 个 `IfPrefer*`、`MatchTableName`、`HintedTable` | `crates/planner/src/hint/hint.rs` |
-| D05.2 会话变量 | `optimizer_enable_naaj`、`enable_semi_join_rewrite`、`enable_advanced_join_hint`、`tidb_opt_join_reorder_threshold`、`alloc_plan_column_id` | `crates/sessionctx/src/variable/session_fields.rs` |
+| D05.2 会话变量 | `optimizer_enable_naaj`、`enable_semi_join_rewrite`、`enable_advanced_join_hint`、`tidb_opt_join_reorder_threshold` | `crates/sessionctx/src/variable/session_fields.rs` |
+| D08.1 表达式上下文 | `alloc_plan_column_id` | `crates/sessionctx/src/exprctx/context.rs` |
 | D00.2 错误 | `ErrAmbiguous`、`ErrUnknownColumn`、`ErrCTERecursiveForbiddenJoinOrder`、`ErrInvalidLateralJoin` 等 `plannererrors` 常量 | `crates/base/src/dbterror/plannererrors.rs` |
 
 ### 2.2 未移植（随部分一起移植的辅助函数，或 `blocked-by` 边界）
 
 | 依赖 | 所属块 | 用在哪里 | 处理 |
 |---|---|---|---|
-| `util/null_misc.go` 全部 14 个函数（`IsNullRejected`、`ResetNotNullFlag` 等，约 310 行） | D10.10 | `ExtractOnCondition`、`deriveNotNullExpr`、`simplifyOuterJoin`、`ConvertOuterToInnerJoin`；`buildJoin`、`coalesceCommonColumns`、`BuildLogicalJoinSchema` 的 NOT NULL 处理 | 依赖都已就绪，**随第 A 部分整文件移植**，计入 D10.10 |
+| `util/null_misc.go` 全部 14 个函数（`IsNullRejected`、`ResetNotNullFlag` 等，约 310 行） | D10.10 | `ExtractOnCondition`、`deriveNotNullExpr`、`simplifyOuterJoin`、`ConvertOuterToInnerJoin`；`buildJoin`、`coalesceCommonColumns`、`BuildLogicalJoinSchema` 的 NOT NULL 处理 | 依赖都已就绪，**随第 A 部分整文件移植**，计入 D10.10。`crates/spike/planner-pilot/src/util.rs:52` 已有一个 spike 版的 `reset_not_null_flag`，**不要复用 spike 代码**，照 Go 移植到 `crates/planner/src/util/` |
 | `PlanCtxExtended.GetNullRejectCheckExprCtx`（`pkg/planner/plannersession/context.go:46`） | D09.13 | `IsNullRejected` 用的表达式上下文 | 随第 A 部分移植（表达式侧已有 `is_in_null_reject_check`） |
 | `ExtractTableAlias`（`pkg/planner/util/misc.go:316`） | D10.10 | `SetPreferredJoinTypeAndOrder` 取两边的表别名 | 随第 A 部分移植 |
 | `infoschema.TableIsView`（`pkg/infoschema/infoschema.go:246`） | D06.3 | `coalesceCommonColumns` 的列权限检查 | 随第 A 部分移植（小函数，依赖就绪） |
@@ -101,11 +102,12 @@
 | `pkg/planner/funcdep`（`FDSet`） | D09.14 | `LogicalJoin.ExtractFD*`、`LogicalApply.ExtractFD` | 与 `DataSource` / `LogicalSelection` / `LogicalAggregation` 一致，作 `blocked-by:D09.14` 桩（只有 `tidb_enable_new_only_full_group_by_check = ON` 才调用，默认 OFF） |
 | `cardinality.EstimateFullJoinRowCount`（`pkg/planner/cardinality/join.go`） | D10.6 | `LogicalJoin.DeriveStats` | D10.6 的 join 部分；第 B 部分开工前确认，未就绪则 `DeriveStats` 留 `blocked-by:D10.6` |
 | `constraint.DeleteTrueExprsBySchema` | D09.8 | `LogicalJoin.PredicatePushDown` | 随第 B 部分移植（`crates/planner/src/core/constraint/exprs.rs` 文件头已说明它跟 join 的谓词下推一起来） |
-| `ruleutil.BuildKeyInfoPortal`（`rule/util/build_key_info_misc.go:91`，一个函数变量钩子） | D09.13 | `LogicalJoin.PredicatePushDown:321`、D09.9 | 随第 B 部分落地为一个普通函数（不需要钩子：Rust 没有包循环引用的问题），计入 D09.13 |
+| `ruleutil.BuildKeyInfoPortal`（`rule/util/build_key_info_misc.go:91`，一个函数变量钩子） | D09.13 | `LogicalJoin.PredicatePushDown:321`、D09.9 | 随第 B 部分落地为一个普通函数（不需要钩子：Rust 没有包循环引用的问题）。它是变量，tracker `func_blocks.tsv` 没有对应行，不计入任何块的函数数 |
 | `coreusage.ExtractCorColumnsBySchema4LogicalPlan`（D10.10） | D10.10 | `buildJoin` 的 LATERAL 判断、`buildLateralJoin`、`setIsInApplyForCTE` | 随第 C 部分移植 |
 | `setIsInApplyForCTE`（`:5855`） | D09.5 | apply 构建 | 随第 C 部分移植，计入 D09.5；Rust 还没有 `LogicalCTE`，CTE 分支随 D09.5 |
 | 子查询构建（`expression_rewriter.go` 的 `handleExistSubquery` / `handleInSubquery` 等）、`buildMaxOneRow` | D09.6 | 调用第 C 部分的 `buildSemiApply` / `buildApplyWithJoinType` | **第 C 部分的前置条件**：与 D09.6 同步 |
 | 解析器的 LATERAL（`tidb_typed.y:3415` 目前是占位节点）和 `ast::TableSource` 的 `lateral` 字段 | D02.2 | `containsLateralTableSource`、`isImmediateLateralTableSource`、`buildLateralJoin` | 第 A 部分先给 `ast::TableSource` 加 `lateral: bool`（解析器现在总是 false，LATERAL 语法在解析阶段就停在占位节点）；解析器支持 LATERAL 属于 D02.2，是第 C 部分 LATERAL 路径的前置条件 |
+| 权限检查栈：`append_table_select_visit_info`（R29）、`PlanBuilder.rowid_orig_tbl` 与 `precollect_col_names(name, Some(unique_id))`（R32）、1142 / 1143 的检查顺序（R30） | D04.1（权限检查） | 第 A 部分的 USING / NATURAL 列权限、`_tidb_rowid`、每个基表的表级 `SELECT` | 在 PR #468–#471、#480 中，写本 spec 时**尚未合并**；第 A 部分在它们合并之后开工，按 §4.8 接入 |
 | `JoinReOrderSolver` 等 | D09.10 | 每个非 LATERAL 的 join 都置 `FlagJoinReOrder` | 优化器中现有 `JOIN_RE_ORDER_SOLVER` 桩（`blocked-by:D09.10`）保留；见 §3.8 |
 | 物理 join 算子、枚举、代价、执行器 | D10.1、D10.3、D10.5、D10.9、D12.6 | 端到端 | 见 §3.8 |
 
@@ -198,7 +200,7 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 | 第 B 部分 | `LogicalJoin.ExtractCorrelatedCols`（`:685`） | D09.6 | 优化器入口对整棵树调用 |
 | 第 B 部分 | `LogicalJoin.PreparePossibleProperties`（`:651`） | D10.2 | 物理优化入口 |
 | 第 B 部分 | `LogicalJoin.DeriveStats`（`:567`）、`ExtractColGroups`（`:625`），以及 `cardinality/join.go` 中它们用到的函数 | D10.6 | D10.6 的 join 部分已就绪时一起做，否则留 `blocked-by:D10.6` |
-| 第 B 部分 | `ruleutil.BuildKeyInfoPortal`、`collectPredicateColumnsForJoin`（`collect_column_stats_usage.go:166`）、`rule_constant_propagation` 的 join 分支 | D09.13 | 谓词下推和统计列收集遇到 join 时调用 |
+| 第 B 部分 | `ruleutil.BuildKeyInfoPortal`（变量，不计数）、`collectPredicateColumnsForJoin`（`collect_column_stats_usage.go:166`）、`rule_constant_propagation` 的 join 分支 | D09.13 | 谓词下推和统计列收集遇到 join 时调用 |
 | 第 C 部分 | `setIsInApplyForCTE`（`:5855`） | D09.5 | apply 构建调用 |
 | 第 C 部分 | `coreusage.ExtractCorColumnsBySchema4LogicalPlan` | D10.10 | LATERAL 判断 |
 | 第 C 部分 | `LogicalApply.PruneColumns`（`:141`）、`DeriveStats`（`:198`）、`ExtractColGroups`（`:282`）、`ExtractCorrelatedCols`（`:310`），以及第 A 部分各函数中 Apply 的分支 | D09.7 / D10.6 / D09.6 / D09.1 / D09.4 | 同上 |
@@ -239,14 +241,14 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 3. **trait 方法要全部显式写出**：Go 中 `LogicalJoin` 重写的每个 `LogicalPlan` 接口方法，第 A 部分都在 Rust 中显式实现，没移植的返回所属块的 `blocked(...)`（`PredicatePushDown` / `ConstantPropagation` / `ConvertOuterToInnerJoin` → D09.8，`PruneColumns` → D09.7，`PushDownTopN` → D09.11，`DeriveStats` / `ExtractColGroups` → D10.6，`PreparePossibleProperties` → D10.2，`ExtractCorrelatedCols` → D09.6，`ExhaustPhysicalPlans` → D10.3，`ExtractFD` → D09.14），不能落到 `BaseLogicalPlan` 的默认实现（那会静默偏离）。第 B 部分把依赖就绪的这些桩换成实现。
 4. **摘出分派**：`PredicatePushDown` 等改树的方法用 `logical_dispatch!` 摘出 `LogicalJoin`；`getProj` 改的是子节点（另一个 `PlanId`），经 `ctx.arena` 访问，摘出期间不回查 `this`。本块不需要 `PlanCtx::split()`；一次分派中不会两次摘出同一个节点。
 5. **plan id 与列 id 的分配顺序照 Go**：`buildJoin` 中先建左右子树，再 `handleHelper`，再 `LogicalJoin::init`，inner join 带 ON 时改写 ON 之后再 `LogicalSelection::init`；`buildSemiJoin` 先 `LogicalJoin::init`，`asScalar` 时再 `alloc_plan_column_id`；`buildSemiApply` 把这个 join 的值移进 `LogicalApply`，只改 TP，**不调用 `alloc_plan_id`**；`buildLateralJoin` 在提取关联列之后 `LogicalApply::init`；`getProj` 新建投影时在谓词下推当中分配 plan id。
-6. **`FullNames` 按值复制**：`buildJoin:889-897`、`buildLateralJoin` 逐个复制 `FieldName`（`Arc::new(FieldName::clone(&n))`），因为 USING 之后要在副本上设 `Redundant`；输出名 `OutputNames` 则共享子节点的 `Arc<FieldName>`（Go 是指针拷贝）。
-7. **`coalesceCommonColumns` 的原地挪动**：Go 用 `copy` 在两份 `Clone` 出来的列切片和 `Shallow` 出来的名字切片上原地挪动（`:1255-1267`），`RIGHT JOIN` 时 `lColumns` 与 `rsc.Columns` 是同一个底层数组，之后用 `lsc.Columns[i]` / `rsc.Columns[i]` 取共有列（`:1323`）。Rust 用 `Vec::rotate_right` 在同样的两份 `Vec` 上做相同的挪动，交换时交换的是对这两份 `Vec` 的引用，保证 `lc` 总是原左表的列、`rc` 总是原右表的列（L1，逐行对照）。
+6. **`FullNames` 按值复制**：`buildJoin:890-899`、`buildLateralJoin:1057-1065` 逐个复制 `FieldName`（`Arc::new(FieldName::clone(&n))`），因为 USING 之后要在副本上设 `Redundant`；输出名 `OutputNames` 则共享子节点的 `Arc<FieldName>`（Go 是指针拷贝）。
+7. **`coalesceCommonColumns` 的原地挪动**：Go 用 `copy` 在两份 `Clone` 出来的列切片和 `Shallow` 出来的名字切片上原地挪动（`:1265-1279`；`:1255-1263` 是 `filter` 的判断），`RIGHT JOIN` 时 `lColumns` 与 `rsc.Columns` 是同一个底层数组，之后用 `lsc.Columns[i]` / `rsc.Columns[i]` 取共有列（`:1323`）。Rust 用 `Vec::rotate_right` 在同样的两份 `Vec` 上做相同的挪动，交换时交换的是对这两份 `Vec` 的引用，保证 `lc` 总是原左表的列、`rc` 总是原右表的列（L1，逐行对照）。
 
 ### 4.3 错误顺序与 `defer`
 
 - **`buildJoin` 的报错顺序**：左边的错误 → 右边的错误 → （LATERAL 的错误）→ 递归 CTE 在 LEFT JOIN 右边（`:818-820`，Rust 还没有 `LogicalCTETable`，此分支随 D09.5）→ USING：左边同名列、右边同名列（`ErrAmbiguous`）→ NATURAL：右边扫描时左边计数大于 1、再查右边计数（`ErrAmbiguous`）→ USING 找不到列（`ErrUnknownColumn`）→ 建 `EQ` 的错误 → ON：改写的错误 → ON 里有子查询（1105）。
 - **`checkColPriv` 的恢复**：ON 子句（`:923-927`）在改写返回后、检查错误之前恢复，Rust 写成 `let res = self.rewrite(...); self.check_col_priv = origin; let (expr, plan) = res?;`；`coalesceCommonColumns`（`:1233-1237`）用 `defer`，Rust 用 drop guard（`M-DEFER`），配一个"`ErrUnknownColumn` 返回后 `check_col_priv` 已恢复"的测试。
-- **LATERAL 的 `defer`**（`:776-780`）：弹出 `outer_schemas` / `outer_names` 并 `lateral_outer_count -= 1`，用 drop guard，配一个"右边构建出错后栈已恢复"的测试（第 C 部分）。
+- **LATERAL 的 `defer`**（`:775-779`）：弹出 `outer_schemas` / `outer_names` 并 `lateral_outer_count -= 1`，用 drop guard，配一个"右边构建出错后栈已恢复"的测试（第 C 部分）。
 - **Go 忽略错误的地方**：`LogicalJoin.PredicatePushDown:322-325` 在 `SemiJoinRewrite` 出错时返回原计划、不报错。与 D09.9 spec §4.4 一致（负责人 2026-11-24 在 PR #340 确认）：错误是 `blocked` 时向上返回，其他错误照 Go 吞掉（只有在命中未移植块的桩时才有差异，见 §7 第 3 条）。
 - **`ON condition doesn't support subqueries yet`**：Go 是 `errors.New`，客户端看到 1105。Rust 按 `M-ERR` 建一个 1105 错误，文案相同。D09.6 之前，ON 里的子查询先在改写器停在 `blocked-by:D09.6`。
 
@@ -269,11 +271,11 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 
 | Go 位置 | 写入 / 共享内容 | 结论 | 处理 |
 |---|---|---|---|
-| `logical_plan_builder.go:829, 1005, 5821`（`MergeSchema` 后 `ResetNotNullFlag`）；`coalesceCommonColumns:1144-1146`；`logical_join.go:2061-2065` | `ResetNotNullFlag`（`util/null_misc.go:469`）先复制列和 `FieldType` 再去掉 NOT NULL | **S** | 改的是副本；Rust 用 `Arc::make_mut` |
+| `logical_plan_builder.go:840, 845, 887, 5826`（`buildJoin` 与 `buildApplyWithJoinType` 的 `ResetNotNullFlag`，作用于 `:829`、`:883`、`:5821` 的 `MergeSchema` 新建的 schema；`buildLateralJoin:1005` 只有 `MergeSchema`，不去掉 NOT NULL）；`coalesceCommonColumns:1144-1146`；`logical_join.go:2063, 2065` | `ResetNotNullFlag`（`util/null_misc.go:469`）先复制列和 `FieldType` 再去掉 NOT NULL | **S** | 改的是副本；Rust 用 `Arc::make_mut` |
 | `logical_plan_builder.go:1331, 1333` | `FullNames[i].Redundant = true` | **S** | `FullNames` 是 `buildJoin` 按值复制出来的 |
 | `logical_plan_builder.go:2006-2023`（`unionJoinFieldType`） | 改 `AggFieldType` 新建的类型 | **S** | 第 D 部分 |
 | **`logical_plan_builder.go:2204`（`buildSemiJoinForSetOperator`）** | `joinPlan.SetSchema(leftPlan.Schema())`，**不 Clone**，join 与左边的 `LogicalAggregation`（`buildDistinct`）共享同一个 `*Schema` | **待第 D 部分判定**（推断为 V0：之后改 schema 的规则对 join 都是整体换新 schema，见 `MergeSchema`） | 默认写时复制；第 D 部分实现时按 N1 §5 逐处核对 `INTERSECT` / `EXCEPT` 在列裁剪前后的计划，若 EXPLAIN 对照有差异再显式模拟 |
-| `logical_plan_builder.go:5895, 5902`（`buildSemiJoin`） | 外表 schema `Clone` 后追加新列 | **S** | — |
+| `logical_plan_builder.go:5889, 5902`（`buildSemiJoin`） | 外表 schema `Clone` 后追加新列 | **S** | — |
 | `logical_join.go:1691`（`getProj`） | 新投影的 schema 是子节点 schema 的 `Clone` | **S** | — |
 | `logical_join.go:1809-1825`（`SemiJoinRewrite`） | 新建或 `Clone` 的 schema | **S** | — |
 | `logical_join.go:2044`（`Conds2TableDual`） | `dual.SetSchema(p.Schema())` 共享 | 已移植（VS1 plan 的审计表：共享期间不写） | 不变 |
@@ -283,6 +285,17 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 
 没有需要显式模拟的 `M-FT` 位置（`grep 'Go aliasing (M-FT)'` 不新增）；新增的 `M-SHARE` 模拟只有 `logical_apply.go:104` 一处。
 
+### 4.8 权限检查（裁定 R29–R32）
+
+权限检查栈（D04.1，PR #468–#471、#480，写本 spec 时尚未合并）按负责人 2026-11-26 的裁定 R29–R32（`docs/testing/rulings.toml`）与 Go 有意不同：每个数据源登记表级 `SELECT`（R29，`column = "*"`，没有权限报 1142）；先查表级再查列级（R30）；读 `_tidb_rowid` 要整表 `SELECT`（R32，经 `PlanBuilder.rowid_orig_tbl` 按列的 `unique_id` 找到物理表）。本块扩展的正是这些代码，实现时按下面几条做：
+
+1. **join 的 schema 保留列的 `unique_id`**：`MergeSchema`、`Schema.Clone`、`ResetNotNullFlag`（复制 `Column` 时 `UniqueID` 不变，`util/null_misc.go:469`）和 `FullNames` 的按值复制都保留 `unique_id`。R32 的 `rowid_orig_tbl` 查找、`coalesceCommonColumns:1331, 1333` 的 `FullSchema.ColumnIndex(lc / rc)` 都按 `unique_id` 匹配，所以实现**不能为这些列重新分配 id**（这也是 §4.2 第 5 条 plan id / 列 id 顺序的要求）。
+2. **R29 的表级登记**：join 不另外登记，每个基表由它自己的 `DataSource` 登记一次 `("*", 1142)`；第 A 部分要验证 join 中每个基表恰好一条。
+3. **USING / NATURAL 的列权限**：`coalesceCommonColumns` 对每个共有列的两边各调用一次 `appendColNamesToVisitInfo`（`:1281-1297`），派生表的列 `DBName` 为空，被 `:1291` 的非空检查跳过；`_tidb_rowid` 不会成为共有列（`:1242`）。照 Go 移植，错误按 R30 的顺序给出。
+4. **外层列（第 C 部分，以及 D09.6）**：Go 在 `toColumn` 中遍历 `outerSchemas` 找到外层列后也会登记列权限（`expression_rewriter.go:2625-2631`，`fieldName4PrivilegeCheck = outerName[idx]`，之后进入 `precollectColNames`）；Rust 的这个循环现在是空的。第 C 部分（或 D09.6，先做的那个）补上时，**必须把外层列的 `unique_id` 传给 `precollect_col_names`**。否则 `t1 JOIN LATERAL (SELECT t1._tidb_rowid) d`、关联子查询中的 `t._tidb_rowid` 查不到 `rowid_orig_tbl`，只有 `SELECT(a)` 权限的用户可以读到 `_tidb_rowid`（R32 失效）。配一个 R32 测试。
+5. **govec 计数**：`crates/planner/tests/govec_selectbuild.rs` 中 `EXPECTED_R29_NORMALIZED`（PR #468 / #470 中为 2321）是按 R29 规范化的向量条数；第 A 部分把 6 条 `D09.3` 的 `EXPECTED_BLOCKED` 转为正常比对后，这个数会变，第 A 部分的 PR 按实际结果更新并说明。
+6. **LATERAL 的 ON 子句**：Go 不切换 `checkColPriv`，见 §9.1 第 1 点（需要负责人决定）。
+
 ### 4.7 对其他块的要求
 
 - **D09.4**：第 A 部分接通 `findJoinFullSchema`（`buildAggregation`、`resolveGbyExprs`）、`buildJoinFuncDepend`（`checkOnlyFullGroupBy*`）和 `resolveFromPlan` 的 join 分支，删掉这些地方"单表、没有 join"的注释和 L2 理由。
@@ -290,7 +303,7 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 - **D09.10**：贪心 / DP 重排需要的 `LogicalJoin` 方法全部在第 A 部分；`SetPreferredJoinType` 发出的 hint 冲突 warning 照 Go。
 - **D10.3 / D10.1**：第 E 部分随 D10.3 的 join 部分移植；物理 join 的候选必须全部枚举（含 index join 和 merge join），即使它们的执行器还没移植。
 - **D12.0 / D12.6**：`crates/executor/src/builder.rs:1295, 1311` 的 TODO：`stmt_ctx_mut()` 用 `Arc::get_mut`，在已有执行器持有 `StatementContext` 时会 panic。多子节点的执行器（join、union、apply）合并前必须先改（例如把 `table_ids` 改成语句内的可追加结构），否则第二个 TableReader 构建时会 panic。hash join 的哈希表、行容器、落盘按 A1 记账；是否等 N6（哈希 join 数据结构的例外，原则同意、尚无 spec）由 D12.6 的 spec 决定（D12.3 的先例是不等）。
-- **D02.2**：解析器把 `FULL OUTER JOIN` 合成为 `JoinType::FullJoin`（`crates/parser/src/lexer.rs:641-643`、`grammar/tidb_typed.y:3491`），而 v8.5.8 的 `parser.y:10107-10115` 中 `JoinType` 只有 `LEFT` / `RIGHT`，Go 对 `t1 FULL OUTER JOIN t2` 报语法错误（`FULL` 只能作别名，后面的 `OUTER JOIN` 不合语法；按 `parser.y` 推断，未在集群上执行）。建议维护者开 issue 由 D02.2 修正解析器；在那之前，第 A 部分的 `build_join` 对 `FullJoin` 显式返回 `blocked("D02.2", ...)`，**不能落进"其余都是 inner join"的分支**。另外 LATERAL 的解析（第 C 部分前置）也在 D02.2。
+- **D02.2**：解析器把 `FULL OUTER JOIN` 合成为 `JoinType::FullJoin`（`crates/parser/src/lexer.rs:641-643`、`grammar/tidb_typed.y:3491`），而 v8.5.8 的 `parser.y:10107-10115` 中 `JoinType` 只有 `LEFT` / `RIGHT`，Go 对 `t1 FULL OUTER JOIN t2 ...` 报语法错误（评审人在 v8.5.8 的解析器上验证过）；而 `t1 full join t2 ...` 在 Go 中能解析，`full` 是 `t1` 的别名，整句是 inner join，所以 Rust 修正后这种写法要照 Go 当作别名加 inner join，**不能**也一起拒绝。建议维护者开 issue 由 D02.2 修正解析器；在那之前，第 A 部分的 `build_join` 对 `FullJoin` 显式返回 `blocked("D02.2", ...)`，**不能落进"其余都是 inner join"的分支**。另外 LATERAL 的解析（第 C 部分前置）也在 D02.2。
 
 ## 5. 边界桩
 
@@ -332,11 +345,11 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 
 - **扩展现有领域 `selectbuild`**（tracker `govec/domains/selectbuild.go`，`Blocks` 中加 `D09.3`）：
   - 计划节点快照加 `LogicalJoin`：`join_type`、`equal` / `na_equal` / `left` / `right` / `other` 条件、`cartesian_join`、`straight_join`、`prefer_join_type` / `left_prefer_join_type` / `right_prefer_join_type` / `prefer_join_order`、`schema`（含 NOT NULL 标志）、`output_names`、`full_schema`、`full_names`（含 `redundant`）；第 C 部分加 `LogicalApply` 的 `cor_cols`、`no_decorrelate`、`is_lateral`。
-  - **第 A 部分**的用例：现有 `EXPECTED_BLOCKED` 中 6 条 `D09.3` 记录转为正常比对（`SELECT * FROM t2 JOIN t3`、`SELECT * FROM t2, t3` 等）；`JOIN` / `INNER JOIN` / `CROSS JOIN` / 逗号 / `STRAIGHT_JOIN`（含 `SELECT STRAIGHT_JOIN`）；`LEFT` / `RIGHT [OUTER] JOIN` 的 NOT NULL 清除（客户端列定义）；ON 条件（等值、非等值、只引用一边、常量、多个 AND）；USING（单列、多列、找不到的列只放一个、左右各自同名列报 `ErrAmbiguous`）；NATURAL（`_tidb_rowid`、三表时同名列多于一次报错）；嵌套 join 的 `FullSchema`（`SELECT t1.*, t2.* FROM t1 JOIN t2 USING (b)`、`SELECT t2.a FROM t1 JOIN t2 USING (a) WHERE t2.a > 0`）；`ONLY_FULL_GROUP_BY` 加 join（`buildJoinFuncDepend` 的三种 join 类型）；`HAVING` / `ORDER BY` 引用 USING 的冗余列；ON 里有子查询（D09.6 前为 `blocked`）；列权限（列权限检查的 visitInfo 顺序，若领域能表达）。
+  - **第 A 部分**的用例：现有 `EXPECTED_BLOCKED` 中 6 条 `D09.3` 记录转为正常比对（`SELECT * FROM t2 JOIN t3`、`SELECT * FROM t2, t3` 等）；`JOIN` / `INNER JOIN` / `CROSS JOIN` / 逗号 / `STRAIGHT_JOIN`（含 `SELECT STRAIGHT_JOIN`）；`LEFT` / `RIGHT [OUTER] JOIN` 的 NOT NULL 清除（客户端列定义）；ON 条件（等值、非等值、只引用一边、常量、多个 AND）；USING（单列、多列、找不到的列只放一个、左右各自同名列报 `ErrAmbiguous`）；NATURAL（`_tidb_rowid`、三表时同名列多于一次报错）；嵌套 join 的 `FullSchema`（`SELECT t1.*, t2.* FROM t1 JOIN t2 USING (b)`、`SELECT t2.a FROM t1 JOIN t2 USING (a) WHERE t2.a > 0`）；`ONLY_FULL_GROUP_BY` 加 join（`buildJoinFuncDepend` 的三种 join 类型）；`HAVING` / `ORDER BY` 引用 USING 的冗余列；ON 里有子查询（D09.6 前为 `blocked`）；列权限（列权限检查的 visitInfo 顺序，若领域能表达）；**`SELECT * FROM t1 RIGHT JOIN t2 USING (a)`**（交换之后的 schema 顺序，§1.2）。
   - 逻辑算子方法的 op：`ExtractOnCondition`（四种分类、`deriveLeft` / `deriveRight`、`IN` 改写的等值条件）、`pushDownConstExpr`（7 种 join 类型）、`BuildKeyInfo`、`BuildLogicalJoinSchema`、`GetJoinKeys` / `GetNAJoinKeys` / `GetPotentialPartitionKeys` / `IsNAAJ` / `PreferAny` / `getGroupNDVs`、`containDifferentJoinTypes` / `setPreferredJoinTypeFromOneSide`（按位输入，不需要 hint 语法）、`JoinType.String`。
   - 随第 A 部分移植的 `util/null_misc.go`：在 `planutil` 领域加 `IsNullRejected` 的 op（各类表达式、`IS NULL`、`IN`、`COALESCE` / `IF` / `IFNULL`、常量）。
 - **扩展 `logicalrules`**（第 B 部分，`Blocks` 加 `D09.3`）：谓词下推、外连接化简、常量传播、列裁剪、TopN 下推在 join 上的结果计划；`updateEQCond` 的非列等值键（产生 `getProj` 投影）、`OtherConditions` 从后往前取出的顺序；`SemiJoinRewrite`（`tidb_opt_enable_sem_join_rewrite` 开 / 关，等 D09.6 有 semi join 后补）；`TestJoinPredicatePushDown` 等 Go 单测的 SQL。
-- **第 C 部分**：apply 与 LATERAL 的构建，等 D09.6 / D02.2 后补；`ReplaceExprColumns` 同步关联列的回归用例。
+- **第 C 部分**：apply 与 LATERAL 的构建，等 D09.6 / D02.2 后补；`ReplaceExprColumns` 同步关联列的回归用例；`buildSemiApply` 的 plan id 用 `selectbuild` 向量固定（领域已比较 `plan_id` / `col_id` 的增量），证明把 join 移进 `LogicalApply` 时没有多分配 id、arena 中也没有留下孤立的节点，不能只靠单元测试。
 - 向量双架构：amd64 与 arm64 两份都由 tracker CI `scripts/govec.sh --check` 逐字节校验，amd64 来自 CI 产物。
 
 ### 6.3 Rust 单元测试
@@ -346,13 +359,16 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 - `full_join_is_blocked_not_inner`：`ast::JoinType::FullJoin` 返回 `blocked("D02.2")`。
 - `join_trait_methods_are_explicit`：第 A 部分每个 Go 重写的接口方法都返回实现或所属块的 `blocked`，不落到 `BaseLogicalPlan` 默认实现。
 - `semi_apply_reuses_join_plan_id`（第 C 部分）、`lateral_outer_schema_stack_restored_on_error`（第 C 部分）、`apply_replace_expr_columns_syncs_inner_corr_cols`（第 C 部分，§4.6）。
-- `update_eq_cond_reverse_order`（第 B 部分）。
+- `update_eq_cond_reverse_order`（第 B 部分；含 `IsEQCondFromIn` 条件被跳过、NA 等值一轮从前往后）。
+- **权限测试**（§4.8，放在 `crates/planner/tests/` 的权限测试中，按部分）：
+  - 第 A 部分：只有 `SELECT(a)` 的用户执行 `SELECT a FROM t1 JOIN t2 USING (b)` → 1143（共有列的两边都登记）；`SELECT t1._tidb_rowid FROM t1 JOIN t2 ON ...` → 1143（R32）；`SELECT * FROM t1 JOIN t2 USING (_tidb_rowid)` → `ErrUnknownColumn`；join 中每个基表恰好一条 `("*", 1142)`（R29）；`EXPECTED_R29_NORMALIZED` 按实际更新。
+  - 第 C 部分（或 D09.6）：`t1 JOIN LATERAL (SELECT t1._tidb_rowid) d`、关联子查询中的 `t._tidb_rowid`，只有 `SELECT(a)` 的用户 → 1143（R32，外层列传 `unique_id`）；LATERAL ON 的列权限按 §9.1 第 1 点的决定。
 
 ### 6.4 端到端验收
 
 按 `docs/process/agent-workflow.md` 的规定（2026-11-24），凡是让原来回退的语句改走新栈执行的 PR，合并前要有一次 `tools/ab` 结果（fallback 与 strict 各一轮），由 Maya 在本机跑：
 
-- **第 A、B 部分**：join 语句仍在执行之前停在 `blocked`（下一个未移植的块），由路由器回退到原型。验收：会话测试确认回退之后会话状态、warning 数与 Go 相同（第 A 部分的 `SetPreferredJoinTypeAndOrder`、第 B 部分的 `SetPreferredJoinType` 可能写 hint warning，回退时不能残留）；`tools/ab` 对现有工作负载不退化（宪章第七条 4）。
+- **第 A、B 部分**：生产路径是 `tidb-server` 收到 join 语句 → 新栈的计划构建（第 A 部分）和逻辑优化（第 B 部分）→ 停在下一个未移植块的 `blocked`（1235）→ 路由器在 fallback 模式下回退到原型执行；strict 模式下直接返回 1235。join 语句仍在执行之前停住，不会执行两次。验收：会话测试确认回退之后会话状态、warning 数与 Go 相同（第 A 部分的 `SetPreferredJoinTypeAndOrder`、第 B 部分的 `SetPreferredJoinType` 可能写 hint warning，回退时不能残留）；`tools/ab` 对现有工作负载不退化（宪章第七条 4）。权限错误（1142 / 1143 / `ErrUnknownColumn`）在计划构建阶段就给出，不回退，所以第 A 部分合并后 join 语句的权限错误由新栈给出，会话测试要覆盖 §6.3 的权限用例。
 - **§3.8 序列全部完成后**：维护者用 `tools/ab` 对 `SELECT t1.a, t2.b FROM t1 JOIN t2 ON t1.a = t2.a` 及其变体（`LEFT JOIN`、多条件 ON、带 WHERE、带 ORDER BY / LIMIT、两表都没有 join 键索引）做 EXPLAIN 和结果对比；为了让计划可比，Go 端的表与 Rust 一样没有收集统计信息（Rust 现在只有 pseudo 统计）。index join、merge join 被选中时执行器构建停在 `blocked` 并回退，结果仍由原型给出。
 
 ## 7. 与 Go 的已知差异
@@ -363,15 +379,17 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 4. **`JoinType` 的 `init()` 断言改为编译期断言**（`logical_join.go:66-74`）：L2，没有可见差异。
 5. **`BuildKeyInfoPortal` 从函数变量钩子改为普通函数**（`rule/util/build_key_info_misc.go:91`）：Go 用钩子只是为了避开包的循环引用，Rust 没有这个问题；L2，没有可见差异。
 6. **`LogicalApply.ReplaceExprColumns` 的关联列共享改为显式同步**（`logical_apply.go:104`）：见 §4.6，结果与 Go 相同。
-7. **临时边界差异（随对应块消失）**：`FULL OUTER JOIN`（Rust 解析器接受、Go 语法错误；`blocked-by:D02.2`，§4.7）、LATERAL（`blocked-by:D02.2` / 第 C 部分）、ON 里的子查询（`blocked-by:D09.6`，Go 报 1105）、`LogicalJoin.ExplainInfo`（`blocked-by:D10.9`）、`ExtractFD*`（`blocked-by:D09.14`）、物理 join 枚举（`blocked-by:D10.3`）、join 重排（`blocked-by:D09.10`）。
+7. **第 A、B 部分期间 EXPLAIN 无法比对**：`LogicalJoin.ExplainInfo` 和物理计划要到 D10.9 / D10.3 才有，第 A、B 部分只能比对逻辑计划快照（govec），EXPLAIN 文本只在 §3.8 序列完成后的 `tools/ab` 中比对。这是已知的检查空缺，不是行为差异。
+8. **权限检查按裁定 R29–R32**（§4.8）：join 中的表级 `SELECT`、`_tidb_rowid` 与 Go 有意不同，负责人已裁定。
+9. **临时边界差异（随对应块消失）**：`FULL OUTER JOIN`（Rust 解析器接受、Go 语法错误；`blocked-by:D02.2`，§4.7）、LATERAL（`blocked-by:D02.2` / 第 C 部分）、ON 里的子查询（`blocked-by:D09.6`，Go 报 1105）、`LogicalJoin.ExplainInfo`（`blocked-by:D10.9`）、`ExtractFD*`（`blocked-by:D09.14`）、物理 join 枚举（`blocked-by:D10.3`）、join 重排（`blocked-by:D09.10`）。
 
 ## 8. 读代码发现的可能的 Go 问题（均未复现）
 
-以下几条只读了 v8.5.8 的代码，**没有在 v8.5.8 上用 SQL 复现**（本次没有集群），不算问题。由对应部分的实现任务先复现：复现成立的按宪章第九条 3 或第 1 款处理并开 `upstream-pitfall` issue；不成立的删掉。
+以下几条只读了 v8.5.8 的代码，**没有在 v8.5.8 上用 SQL 复现**（本次没有集群），不算问题。由对应部分的实现任务先复现：复现成立的按宪章第九条 3 处理并开 `upstream-pitfall` issue；不成立的删掉。涉及权限的一条（原第 1 条，LATERAL 的 ON 子句）属于安全问题，按 CLAUDE.md §2 第 6 条移到 §9.1 由负责人决定，不走第九条 3。
 
-1. **LATERAL 的 ON 子句不切换列权限检查方式**（`logical_plan_builder.go:1069-1072` 对照 `:922-927`）：`buildJoin` 改写 ON 时把 `checkColPriv` 临时设为 `reportColumnErrOption`，`buildLateralJoin` 没有。缺少列权限的用户执行 `... JOIN LATERAL (...) ON <列>` 时，报错可能与普通 `JOIN ... ON` 不同。复现：一个只有部分列权限的用户，分别执行两种写法，比较错误码和文案。第 C 部分。
+1. （原第 1 条已移到 §9.1 第 1 点。）
 2. **`ExtractUsedCols` 只在子节点是 `*LogicalJoin` 时查 `FullSchema`**（`logical_join.go:1124-1134`），而 `findJoinFullSchema`（`logical_plan_builder.go:652`）和 `findChildFullSchema`（`logical_apply.go:121`）会穿过 `LogicalSelection` 并认 `LogicalApply`。当 USING join 的冗余列被上层引用、而左子节点是 apply（LATERAL 叠在 USING join 上）时，列裁剪可能把这一列分给错误的一边或丢掉。复现：`SELECT t2.a FROM (t1 JOIN t2 USING (a)) JOIN LATERAL (SELECT t2.a AS x) d ON TRUE JOIN t3 ON ...` 一类语句，看是否报错或结果错误。第 C 部分。
-3. **`USING (a, a)` 中重复的列名不报错**（`logical_plan_builder.go:1102-1106, 1305`）：`filter` map 去重后只有一项，`len(filter) == commonLen`，不报错。是否与 MySQL 8.0 不同需要对照（不确定 MySQL 的行为）。第 A 部分。
+3. **`USING (a, a)` 中重复的列名不报错**（`logical_plan_builder.go:1102-1106, 1305`）：`filter` map 去重后只有一项，`len(filter) == commonLen`，不报错。Go 一侧评审人已在 v8.5.8 上确认不报错；是否与 MySQL 8.0 不同仍需对照（不确定 MySQL 的行为）。第 A 部分。
 
 ## 9. 决定点
 
@@ -379,7 +397,14 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 
 ### 9.1 需要负责人决定（宪章第九条 1）
 
-无。本块照 Go 移植；§7 的差异都没有用户可见的影响，或者是随对应块消失的临时边界；§8 的几条都没有复现；`FULL OUTER JOIN` 是 Rust 解析器与 Go 不一致，修正方向是回到 Go 的行为，不需要负责人决定。
+**1. LATERAL 的 ON 子句是否登记列权限**（第 9.1 款 (a)：用户看得到的、长期保留的与 Go 不同的行为；涉及安全，CLAUDE.md §2 第 6 条）
+
+- **背景**：Go 的 `checkColPriv` 默认是 `noCheckOption`（`planbuilder.go:207`），这时改写器收集到的列**不登记**权限（`expression_rewriter.go:304`）。`buildJoin` 改写 ON 时临时改为 `reportColumnErrOption`（`logical_plan_builder.go:923-926`），所以普通 `JOIN ... ON` 中引用的列要有列级 `SELECT` 权限，没有报 1143。`buildLateralJoin` 改写 ON 时没有这一步（`:1069-1072`，评审人读代码确认）。因此在 v8.5.8 中，只有 `SELECT(a)` 权限的用户可能在 `t1 JOIN LATERAL (...) d ON t1.b = d.x` 里引用没有权限的 `t1.b`，借过滤结果推断 `b` 的值。表级的 R29 不能挡住这种情况（用户有 `a` 列的权限，就有表的读权限）。**没有在 v8.5.8 上复现**（本次没有集群），只读了代码。
+- **选项**：
+  - A：照 Go，LATERAL 的 ON 不登记列权限。与 Go 节点一致，但保留一个列级权限的旁路。
+  - B：与普通 `JOIN ... ON` 一致，LATERAL 的 ON 也临时切换为 `reportColumnErrOption`，没有权限报 1143。与 Go 不同（Go 允许的语句 tidb-rs 报 1143），需要在 `docs/testing/rulings.toml` 加一条裁定。
+- **建议**：B。
+- **理由**：与 R29–R32 的方向一致（负责人已经为同类的权限旁路选了更严格的一边）；改动只是在 `buildLateralJoin` 中加上与 `buildJoin:923-926` 相同的切换和恢复；只影响 LATERAL，第 C 部分才会用到，不影响第 A、B 部分。决定之前第 C 部分不开工这一处；实现任务先在 v8.5.8 上复现，并按 CLAUDE.md §2 第 6 条开英文 issue。
 
 ### 9.2 维护者已定（宪章第九条 2；以下均为提议，待 Lucky / Maya 确认）
 
@@ -397,6 +422,7 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 12. **`USING` 找不到多个列时按 USING 列表顺序报第一个**（`M-MAPORDER`，§4.5）。
 13. **govec 扩展 `selectbuild`、`logicalrules`、`planutil` 三个领域**（§6.2），不新建领域。理由：计划构建、逻辑规则、`planner/util` 已有对应领域，join 只是新的节点类型和用例。
 14. **§8 的几条由对应部分的实现任务先在 v8.5.8 上复现，复现成立再开 issue**。理由：本次没有集群；与 #343 的做法一致。
+15. **权限检查按 §4.8 接入**：第 A 部分在权限 PR #468–#471、#480 合并之后开工；join 的列保留 `unique_id`；外层列传 `unique_id`；`EXPECTED_R29_NORMALIZED` 在第 A 部分更新。理由：按已确认的裁定 R29–R32 实现，不是新的决定。
 
 ## 本文所用 ID
 
@@ -406,6 +432,7 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 - D00.2：常量、错误码与配置
 - D01.x：类型与值（`FieldType`、`FieldName` 等）
 - D02.2：parser 扩展（AST 节点、hint 列表、LATERAL 等）
+- D04.1：权限检查（`SELECT` 权限的登记与检查）
 - D05.2：`SessionVars` 与 `StatementContext`
 - D06.3：infoschema
 - D08.1：表达式框架
@@ -449,6 +476,7 @@ tidb-rs 不支持 `tidb_enable_cascades_planner=1`（与 D09.4、D09.14 一致�
 - N4：表达式求值（§3.5 关联列的槽）
 - N6：哈希聚合、哈希 join、排序的数据结构（例外，原则同意，尚无 spec）
 - N13：长期共享元数据与 `Arc<FieldType>` 写时复制
+- R29 / R30 / R31 / R32：负责人 2026-11-26 对权限检查的裁定（每个数据源登记表级 `SELECT`；先查表级再查列级；表不存在时按语句的权限检查；读 `_tidb_rowid` 要整表 `SELECT`），见 `docs/testing/rulings.toml`
 - S / V0 / V1：N1 §5 共享修改审计的结论（S：只改本处新建或已复制的对象；V0：共享但没有可见影响；V1：共享且改变计划、结果或客户端列定义）
 - VS1 / VS1-23：第一条纵向切片及其逻辑算子与基本规则任务
 - X：不在 tidb-rs 范围内的代码（写路径等）
