@@ -4067,7 +4067,7 @@ dependencies = [
 name = "tidb-privilege"
 version = "0.0.0"
 dependencies = [
- "parking_lot 0.12.5",
+ "arc-swap 1.9.3",
  "tidb-base",
  "tidb-parser",
  "tidb-types",

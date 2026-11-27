@@ -6,18 +6,98 @@
 
 #![allow(non_upper_case_globals)]
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 use tidb_base::mysql::{
     AlterPriv, CreatePriv, CreateViewPriv, DeletePriv, DropPriv, ExecutePriv, GrantPriv, IndexPriv,
-    InsertPriv, PrivilegeType, ReferencesPriv, SelectPriv, ShowDBPriv, ShowViewPriv, SuperPriv,
-    TriggerPriv, UpdatePriv, UsagePriv,
+    InsertPriv, PrivilegeType, ProcessPriv, ReferencesPriv, SelectPriv, ShowDBPriv, ShowViewPriv,
+    SuperPriv, TriggerPriv, UpdatePriv, UsagePriv,
 };
 use tidb_parser::auth::RoleIdentity;
 use tidb_types::stringutil::{compile_pattern_binary, do_match_binary};
+
+/// Unicode case-insensitive comparison matching Go `strings.EqualFold` (with ASCII fast path).
+// glue: Go strings.EqualFold
+#[inline]
+fn eq_fold(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a.to_lowercase() == b.to_lowercase()
+    }
+}
+
+/// Host specificity rank matching Go `compareHost` (`pkg/privilege/privileges/cache.go`):
+/// exact non-empty host < `prefix%` (longer first) < `""` < `"%"`.
+// go: compareHost L1
+fn compare_host(x: &str, y: &str) -> Ordering {
+    let rank = |h: &str| -> u8 {
+        if h == "%" {
+            3
+        } else if h.is_empty() {
+            2
+        } else if h.ends_with('%') {
+            1
+        } else {
+            0
+        }
+    };
+    let rx = rank(x);
+    let ry = rank(y);
+    if rx != ry {
+        return rx.cmp(&ry);
+    }
+    match rx {
+        // Longer wildcard prefix sorts first (e.g. `192.168.199.%` before `192.168.%`),
+        // with deterministic lexicographical tie-break for total ordering.
+        1 => y.len().cmp(&x.len()).then_with(|| x.cmp(y)),
+        _ => x.cmp(y),
+    }
+}
+
+// go: compareBaseRecord L1
+fn compare_base_record(x: &BaseRecord, y: &BaseRecord) -> Ordering {
+    compare_host(&x.host, &y.host).then_with(|| x.user.cmp(&y.user))
+}
+
+// go: compareUserRecord L1
+fn compare_user_record(x: &UserRecord, y: &UserRecord) -> Ordering {
+    compare_base_record(&x.base, &y.base)
+}
+
+// go: compareDBRecord L1
+fn compare_db_record(x: &DbRecord, y: &DbRecord) -> Ordering {
+    compare_base_record(&x.base, &y.base).then_with(|| x.db.cmp(&y.db))
+}
+
+// go: compareTablesPrivRecord L1
+fn compare_tables_priv_record(x: &TablesPrivRecord, y: &TablesPrivRecord) -> Ordering {
+    compare_base_record(&x.base, &y.base)
+        .then_with(|| x.db.cmp(&y.db))
+        .then_with(|| x.table_name.cmp(&y.table_name))
+}
+
+// go: compareColumnsPrivRecord L1
+fn compare_columns_priv_record(x: &ColumnsPrivRecord, y: &ColumnsPrivRecord) -> Ordering {
+    compare_base_record(&x.base, &y.base)
+        .then_with(|| x.db.cmp(&y.db))
+        .then_with(|| x.table_name.cmp(&y.table_name))
+        .then_with(|| x.column_name.cmp(&y.column_name))
+}
+
+// go: compareDynamicPrivRecord L1
+fn compare_dynamic_priv_record(x: &DynamicPrivRecord, y: &DynamicPrivRecord) -> Ordering {
+    compare_base_record(&x.base, &y.base)
+}
+
+// go: compareDefaultRoleRecord L1
+fn compare_default_role_record(x: &DefaultRoleRecord, y: &DefaultRoleRecord) -> Ordering {
+    compare_base_record(&x.base, &y.base)
+}
 
 const globalDBVisible: u64 = CreatePriv.0
     | SelectPriv.0
@@ -135,6 +215,7 @@ impl BaseRecord {
 pub struct UserRecord {
     pub base: BaseRecord,
     pub privileges: PrivilegeType,
+    pub auth_string: String,
     pub account_locked: bool,
 }
 
@@ -148,8 +229,16 @@ impl UserRecord {
         Self {
             base: BaseRecord::new(user, host),
             privileges,
+            auth_string: String::new(),
             account_locked: false,
         }
+    }
+
+    /// Sets `mysql.user.authentication_string` (used for password verification on login).
+    // glue: builder helper for authentication_string
+    pub fn with_auth_string(mut self, auth_string: impl Into<String>) -> Self {
+        self.auth_string = auth_string.into();
+        self
     }
 }
 
@@ -220,9 +309,7 @@ impl TablesPrivRecord {
 
     // go: tablesPrivRecord.match L1
     pub fn matches(&self, user: &str, host: &str, db: &str, table: &str) -> bool {
-        self.base.matches(user, host)
-            && self.db.eq_ignore_ascii_case(db)
-            && self.table_name.eq_ignore_ascii_case(table)
+        self.base.matches(user, host) && eq_fold(&self.db, db) && eq_fold(&self.table_name, table)
     }
 }
 
@@ -263,9 +350,9 @@ impl ColumnsPrivRecord {
     // go: columnsPrivRecord.match L1
     pub fn matches(&self, user: &str, host: &str, db: &str, table: &str, col: &str) -> bool {
         self.base.matches(user, host)
-            && self.db.eq_ignore_ascii_case(db)
-            && self.table_name.eq_ignore_ascii_case(table)
-            && (self.column_name.eq_ignore_ascii_case(col)
+            && eq_fold(&self.db, db)
+            && eq_fold(&self.table_name, table)
+            && (eq_fold(&self.column_name, col)
                 || (col == "*" && (self.column_priv.0 & SelectPriv.0) > 0))
     }
 }
@@ -328,10 +415,18 @@ struct RoleGraphEdgesTable {
 impl RoleGraphEdgesTable {
     // go: roleGraphEdgesTable.Find L1
     fn find(&self, user: &str, host: &str) -> bool {
-        self.role_list.contains_key(&RoleKey {
+        let mut key = RoleKey {
             username: user.to_owned(),
             hostname: host.to_owned(),
-        })
+        };
+        if self.role_list.contains_key(&key) {
+            return true;
+        }
+        if key.hostname.is_empty() {
+            key.hostname = "%".to_owned();
+            return self.role_list.contains_key(&key);
+        }
+        false
     }
 }
 
@@ -354,53 +449,57 @@ impl MySQLPrivilege {
         Self::default()
     }
 
-    /// Registers a `mysql.user` record.
-    // glue: builder helper for tests and callers
+    /// Registers a `mysql.user` record and maintains Go's host-specificity sort order.
+    // glue: builder helper for tests and loaders
     pub fn add_user(&mut self, record: UserRecord) {
-        self.user
-            .entry(record.base.user.clone())
-            .or_default()
-            .push(record);
+        let recs = self.user.entry(record.base.user.clone()).or_default();
+        recs.push(record);
+        recs.sort_by(compare_user_record);
     }
 
-    /// Registers a `mysql.db` record.
-    // glue: builder helper for tests and callers
+    /// Registers a `mysql.db` record and maintains Go's host-specificity sort order.
+    // glue: builder helper for tests and loaders
     pub fn add_db(&mut self, record: DbRecord) {
-        self.db
-            .entry(record.base.user.clone())
-            .or_default()
-            .push(record);
+        let recs = self.db.entry(record.base.user.clone()).or_default();
+        recs.push(record);
+        recs.sort_by(compare_db_record);
     }
 
-    /// Registers a `mysql.tables_priv` record.
-    // glue: builder helper for tests and callers
+    /// Registers a `mysql.tables_priv` record and maintains Go's host-specificity sort order.
+    // glue: builder helper for tests and loaders
     pub fn add_table_priv(&mut self, record: TablesPrivRecord) {
-        self.tables_priv
+        let recs = self
+            .tables_priv
             .entry(record.base.user.clone())
-            .or_default()
-            .push(record);
+            .or_default();
+        recs.push(record);
+        recs.sort_by(compare_tables_priv_record);
     }
 
-    /// Registers a `mysql.columns_priv` record.
-    // glue: builder helper for tests and callers
+    /// Registers a `mysql.columns_priv` record and maintains Go's host-specificity sort order.
+    // glue: builder helper for tests and loaders
     pub fn add_column_priv(&mut self, record: ColumnsPrivRecord) {
-        self.columns_priv
+        let recs = self
+            .columns_priv
             .entry(record.base.user.clone())
-            .or_default()
-            .push(record);
+            .or_default();
+        recs.push(record);
+        recs.sort_by(compare_columns_priv_record);
     }
 
-    /// Registers a `mysql.global_grants` dynamic privilege record.
-    // glue: builder helper for tests and callers
+    /// Registers a `mysql.global_grants` dynamic privilege record and maintains Go's sort order.
+    // glue: builder helper for tests and loaders
     pub fn add_dynamic_priv(&mut self, record: DynamicPrivRecord) {
-        self.dynamic_priv
+        let recs = self
+            .dynamic_priv
             .entry(record.base.user.clone())
-            .or_default()
-            .push(record);
+            .or_default();
+        recs.push(record);
+        recs.sort_by(compare_dynamic_priv_record);
     }
 
-    /// Registers a `mysql.default_roles` record.
-    // glue: builder helper for tests and callers
+    /// Registers a `mysql.default_roles` record and maintains Go's sort order.
+    // glue: builder helper for tests and loaders
     pub fn add_default_role(
         &mut self,
         user: impl Into<String>,
@@ -413,10 +512,33 @@ impl MySQLPrivilege {
             default_role_user: role_user.into(),
             default_role_host: role_host.into(),
         };
-        self.default_roles
-            .entry(rec.base.user.clone())
-            .or_default()
-            .push(rec);
+        let recs = self.default_roles.entry(rec.base.user.clone()).or_default();
+        recs.push(rec);
+        recs.sort_by(compare_default_role_record);
+    }
+
+    /// Sorts every privilege bucket using Go's host-specificity order (`SortUserTable`,
+    /// `LoadDBTable`, `LoadTablesPrivTable`, `LoadColumnsPrivTable`, `LoadGlobalGrantsTable`).
+    // go: MySQLPrivilege.SortUserTable L1
+    pub fn sort_all(&mut self) {
+        for recs in self.user.values_mut() {
+            recs.sort_by(compare_user_record);
+        }
+        for recs in self.db.values_mut() {
+            recs.sort_by(compare_db_record);
+        }
+        for recs in self.tables_priv.values_mut() {
+            recs.sort_by(compare_tables_priv_record);
+        }
+        for recs in self.columns_priv.values_mut() {
+            recs.sort_by(compare_columns_priv_record);
+        }
+        for recs in self.dynamic_priv.values_mut() {
+            recs.sort_by(compare_dynamic_priv_record);
+        }
+        for recs in self.default_roles.values_mut() {
+            recs.sort_by(compare_default_role_record);
+        }
     }
 
     /// Registers a `mysql.role_edges` grant: `from_role` is granted to `(to_user, to_host)`.
@@ -444,7 +566,8 @@ impl MySQLPrivilege {
     }
 
     /// Removes all `tables_priv` / `columns_priv` / `db` / global privileges for `user`.
-    // glue: helper to simulate REVOKE in live Handle updates
+    // glue: test helper to simulate REVOKE in live Handle updates
+    #[cfg(test)]
     pub fn revoke_user_all_privs(&mut self, user: &str) {
         if let Some(recs) = self.user.get_mut(user) {
             for r in recs {
@@ -704,9 +827,17 @@ impl MySQLPrivilege {
 
     // go: MySQLPrivilege.DBIsVisible L1
     pub fn db_is_visible(&self, user: &str, host: &str, db: &str) -> bool {
-        if let Some(rec) = self.match_user(user, host)
-            && (rec.privileges.0 & globalDBVisible) > 0
-        {
+        if let Some(rec) = self.match_user(user, host) {
+            if (rec.privileges.0 & globalDBVisible) > 0 {
+                return true;
+            }
+            // For metrics_schema, `PROCESS` also grants visibility.
+            if (rec.privileges.0 & ProcessPriv.0) > 0 && eq_fold(db, "metrics_schema") {
+                return true;
+            }
+        }
+        // INFORMATION_SCHEMA is visible to all users.
+        if eq_fold(db, "INFORMATION_SCHEMA") {
             return true;
         }
         if let Some(rec) = self.match_db(user, host, db)
@@ -717,8 +848,8 @@ impl MySQLPrivilege {
         if let Some(records) = self.tables_priv.get(user) {
             for rec in records {
                 if rec.base.matches(user, host)
-                    && rec.db.eq_ignore_ascii_case(db)
-                    && rec.table_priv.0 != 0
+                    && eq_fold(&rec.db, db)
+                    && (rec.table_priv.0 != 0 || rec.column_priv.0 != 0)
                 {
                     return true;
                 }
@@ -726,10 +857,7 @@ impl MySQLPrivilege {
         }
         if let Some(records) = self.columns_priv.get(user) {
             for rec in records {
-                if rec.base.matches(user, host)
-                    && rec.db.eq_ignore_ascii_case(db)
-                    && rec.column_priv.0 != 0
-                {
+                if rec.base.matches(user, host) && eq_fold(&rec.db, db) && rec.column_priv.0 != 0 {
                     return true;
                 }
             }
@@ -738,29 +866,32 @@ impl MySQLPrivilege {
     }
 }
 
-/// Handle wraps a live, atomically replaceable [`MySQLPrivilege`] snapshot so `GRANT` / `REVOKE`
-/// updates take effect immediately on existing sessions and cached plans.
+/// Handle wraps a live, lock-free atomically replaceable [`MySQLPrivilege`] snapshot (using
+/// `ArcSwap`, matching Go's `atomic.Pointer[MySQLPrivilege]`) so `GRANT` / `REVOKE` updates take
+/// effect immediately on existing sessions and cached plans.
 #[derive(Debug, Default)]
 pub struct Handle {
-    priv_: RwLock<Arc<MySQLPrivilege>>,
+    priv_: ArcSwap<MySQLPrivilege>,
 }
 
 impl Handle {
-    // go: NewHandle L2 (in-memory snapshot; storage-backed UpdateAll comes in later D04.1 part)
-    pub fn new(initial: MySQLPrivilege) -> Self {
+    // go: NewHandle L2 (in-memory snapshot; cluster mysql.* loader wired in Part 5/5)
+    pub fn new(mut initial: MySQLPrivilege) -> Self {
+        initial.sort_all();
         Self {
-            priv_: RwLock::new(Arc::new(initial)),
+            priv_: ArcSwap::from_pointee(initial),
         }
     }
 
     // go: Handle.Get L1
     pub fn get(&self) -> Arc<MySQLPrivilege> {
-        Arc::clone(&self.priv_.read())
+        self.priv_.load_full()
     }
 
     /// Atomically installs a new [`MySQLPrivilege`] snapshot (e.g. after `GRANT` / `REVOKE`).
     // glue: live snapshot update
-    pub fn replace(&self, next: MySQLPrivilege) {
-        *self.priv_.write() = Arc::new(next);
+    pub fn replace(&self, mut next: MySQLPrivilege) {
+        next.sort_all();
+        self.priv_.store(Arc::new(next));
     }
 }

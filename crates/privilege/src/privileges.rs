@@ -139,21 +139,7 @@ impl PrivilegeManager for UserPrivileges {
             return true;
         }
         if db.eq_ignore_ascii_case(INFORMATION_SCHEMA_LOWER) {
-            return !matches!(
-                priv_,
-                CreatePriv
-                    | AlterPriv
-                    | DropPriv
-                    | IndexPriv
-                    | CreateViewPriv
-                    | InsertPriv
-                    | UpdatePriv
-                    | DeletePriv
-                    | ReferencesPriv
-                    | ExecutePriv
-                    | ShowViewPriv
-                    | LockTablesPriv
-            );
+            return true;
         }
         let mysql_priv = self.handle.get();
         let roles = mysql_priv.get_default_roles(&user.username, &user.hostname);
@@ -324,5 +310,249 @@ mod tests {
         revoked.revoke_user_all_privs("r_reader");
         handle.replace(revoked);
         assert!(!up.request_verification(&[role], "test", "t", "*", SelectPriv));
+    }
+
+    #[test]
+    fn host_specificity_sorting_independent_of_insertion_order() {
+        // Must-fix #1: u@'%' (no priv) + u@'localhost' (SELECT) inserted in both orders must
+        // always match the more specific host first (allowing localhost, denying remote IP).
+        for wildcard_first in [true, false] {
+            let mut mp = MySQLPrivilege::new();
+            let rec_wild = UserRecord::new("%", "u", PrivilegeType(0));
+            let rec_local = UserRecord::new("localhost", "u", SelectPriv);
+            if wildcard_first {
+                mp.add_user(rec_wild);
+                mp.add_user(rec_local);
+            } else {
+                mp.add_user(rec_local);
+                mp.add_user(rec_wild);
+            }
+            // Also verify db record specificity (exact host before prefix% before %).
+            let db_wild = DbRecord::new("u_db", "%", "test", PrivilegeType(0));
+            let db_prefix = DbRecord::new("u_db", "192.168.%", "test", InsertPriv);
+            let db_more = DbRecord::new("u_db", "192.168.1.%", "test", SelectPriv);
+            if wildcard_first {
+                mp.add_db(db_wild);
+                mp.add_db(db_prefix);
+                mp.add_db(db_more);
+            } else {
+                mp.add_db(db_more);
+                mp.add_db(db_prefix);
+                mp.add_db(db_wild);
+            }
+            let handle = Arc::new(Handle::new(mp));
+
+            let u_local = UserPrivileges::new("u", "localhost", Arc::clone(&handle));
+            let u_loopback = UserPrivileges::new("u", "127.0.0.1", Arc::clone(&handle));
+            let u_remote = UserPrivileges::new("u", "10.0.0.5", Arc::clone(&handle));
+            assert!(
+                u_local.request_verification(&[], "test", "t", "*", SelectPriv),
+                "wildcard_first={wildcard_first}"
+            );
+            assert!(
+                u_loopback.request_verification(&[], "test", "t", "*", SelectPriv),
+                "localhost loopback 127.0.0.1 must match localhost, wildcard_first={wildcard_first}"
+            );
+            assert!(
+                !u_remote.request_verification(&[], "test", "t", "*", SelectPriv),
+                "wildcard_first={wildcard_first}"
+            );
+
+            let u_db_spec = UserPrivileges::new("u_db", "192.168.1.42", Arc::clone(&handle));
+            let u_db_broad = UserPrivileges::new("u_db", "192.168.2.42", Arc::clone(&handle));
+            assert!(u_db_spec.request_verification(&[], "test", "t", "*", SelectPriv));
+            assert!(!u_db_broad.request_verification(&[], "test", "t", "*", SelectPriv));
+            assert!(u_db_broad.request_verification(&[], "test", "t", "", InsertPriv));
+        }
+    }
+
+    #[test]
+    fn host_netmask_and_ipv6_loopback_matching() {
+        let mut mp = MySQLPrivilege::new();
+        mp.add_user(UserRecord::new(
+            "192.168.1.0/255.255.255.0",
+            "u_net",
+            SelectPriv,
+        ));
+        mp.add_user(UserRecord::new("localhost", "u_v6", SelectPriv));
+        let handle = Arc::new(Handle::new(mp));
+
+        let ok_net = UserPrivileges::new("u_net", "192.168.1.99", Arc::clone(&handle));
+        let bad_net = UserPrivileges::new("u_net", "192.168.2.99", Arc::clone(&handle));
+        let v6_lo = UserPrivileges::new("u_v6", "::1", Arc::clone(&handle));
+        assert!(ok_net.request_verification(&[], "test", "t", "*", SelectPriv));
+        assert!(!bad_net.request_verification(&[], "test", "t", "*", SelectPriv));
+        assert!(v6_lo.request_verification(&[], "test", "t", "*", SelectPriv));
+    }
+
+    #[test]
+    fn role_chain_two_levels_and_empty_host_fallback() {
+        let mut mp = MySQLPrivilege::new();
+        mp.add_user(UserRecord::new("%", "u", PrivilegeType(0)));
+        mp.add_user(UserRecord::new("%", "r1", PrivilegeType(0)));
+        mp.add_user(UserRecord::new("%", "r2", PrivilegeType(0)));
+        mp.add_table_priv(TablesPrivRecord::new("r1", "%", "test", "t1", SelectPriv));
+        mp.add_table_priv(TablesPrivRecord::new("r2", "%", "test", "t2", SelectPriv));
+        // Two-level chain: u -> r1 -> r2.
+        mp.add_role_edge("r2", "%", "r1", "%");
+        mp.add_role_edge("r1", "%", "u", "%");
+        let handle = Arc::new(Handle::new(mp));
+
+        let up = UserPrivileges::new("u", "%", handle);
+        // Active role r1@% traverses two levels u -> r1 -> r2.
+        let role_r1 = RoleIdentity {
+            username: "r1".to_owned(),
+            hostname: "%".to_owned(),
+        };
+        assert!(up.request_verification(
+            std::slice::from_ref(&role_r1),
+            "test",
+            "t1",
+            "*",
+            SelectPriv
+        ));
+        assert!(up.request_verification(&[role_r1], "test", "t2", "*", SelectPriv));
+
+        // Active role given with empty hostname "" must fall back to "%" in RoleGraphEdgesTable::find
+        // (Go cache.go:268), matching r1@% direct privileges.
+        let role_empty_host = RoleIdentity {
+            username: "r1".to_owned(),
+            hostname: String::new(),
+        };
+        assert!(up.request_verification(&[role_empty_host], "test", "t1", "*", SelectPriv));
+    }
+
+    #[test]
+    fn memory_db_full_deny_list_and_skip_with_grant() {
+        let mut mp = MySQLPrivilege::new();
+        mp.add_user(UserRecord::new("%", "u_all", tidb_base::mysql::AllPrivMask));
+        mp.add_user(UserRecord::new("%", "u_none", PrivilegeType(0)));
+        let handle = Arc::new(Handle::new(mp));
+
+        let u_all = UserPrivileges::new("u_all", "%", Arc::clone(&handle));
+        for mem_db in ["information_schema", "performance_schema", "metrics_schema"] {
+            for denied in [
+                CreatePriv,
+                AlterPriv,
+                DropPriv,
+                IndexPriv,
+                CreateViewPriv,
+                InsertPriv,
+                UpdatePriv,
+                DeletePriv,
+                ReferencesPriv,
+                ExecutePriv,
+                ShowViewPriv,
+                LockTablesPriv,
+            ] {
+                assert!(
+                    !u_all.request_verification(&[], mem_db, "tables", "", denied),
+                    "{mem_db} must deny {denied:?}"
+                );
+            }
+        }
+
+        // skip_with_grant short-circuits all verification paths.
+        let mut skip = UserPrivileges::new("u_none", "%", handle);
+        skip.skip_with_grant = true;
+        let user_id = UserIdentity {
+            username: "u_none".to_owned(),
+            hostname: "%".to_owned(),
+            ..Default::default()
+        };
+        assert!(skip.request_verification(&[], "test", "t", "*", SelectPriv));
+        assert!(skip.request_verification_with_user("test", "t", "*", SelectPriv, Some(&user_id)));
+        assert!(skip.request_dynamic_verification(&[], "SYSTEM_VARIABLES_ADMIN", true));
+        assert!(skip.request_dynamic_verification_with_user(
+            "SYSTEM_VARIABLES_ADMIN",
+            true,
+            Some(&user_id)
+        ));
+        assert!(skip.db_is_visible(&[], "test"));
+    }
+
+    #[test]
+    fn db_is_visible_request_with_user_dynamic_privs_and_unicode_folding() {
+        use crate::cache::DynamicPrivRecord;
+        use tidb_base::mysql::SuperPriv;
+
+        let mut mp = MySQLPrivilege::new();
+        mp.add_user(UserRecord::new("%", "u_none", PrivilegeType(0)));
+        mp.add_user(UserRecord::new("%", "u_proc", ProcessPriv));
+        mp.add_user(UserRecord::new("%", "u_super", SuperPriv));
+        mp.add_user(UserRecord::new("%", "u_dyn", PrivilegeType(0)));
+        mp.add_dynamic_priv(DynamicPrivRecord::new(
+            "u_dyn",
+            "%",
+            "RESTRICTED_TABLES_ADMIN",
+            false,
+        ));
+        mp.add_dynamic_priv(DynamicPrivRecord::new(
+            "u_dyn",
+            "%",
+            "SYSTEM_VARIABLES_ADMIN",
+            true,
+        ));
+        // tables_priv row with table_priv == 0 but column_priv != 0 (Go cache.go:1704).
+        let mut tp_col_only =
+            TablesPrivRecord::new("u_colvis", "%", "db_col", "t", PrivilegeType(0));
+        tp_col_only.column_priv = SelectPriv;
+        mp.add_user(UserRecord::new("%", "u_colvis", PrivilegeType(0)));
+        mp.add_table_priv(tp_col_only);
+        // Non-ASCII case-folded table name (`db.ТАБ` vs `db.таб`).
+        mp.add_user(UserRecord::new("%", "u_cyr", PrivilegeType(0)));
+        mp.add_table_priv(TablesPrivRecord::new(
+            "u_cyr", "%", "db_cyr", "ТАБ", SelectPriv,
+        ));
+        // Default role for request_verification_with_user.
+        mp.add_user(UserRecord::new("%", "u_def", PrivilegeType(0)));
+        mp.add_user(UserRecord::new("%", "r_def", PrivilegeType(0)));
+        mp.add_table_priv(TablesPrivRecord::new("r_def", "%", "test", "t", SelectPriv));
+        mp.add_role_edge("r_def", "%", "u_def", "%");
+        mp.add_default_role("u_def", "%", "r_def", "%");
+
+        let handle = Arc::new(Handle::new(mp));
+
+        // DBIsVisible: INFORMATION_SCHEMA always visible, metrics_schema visible with PROCESS,
+        // tables_priv with column_priv != 0 visible.
+        let u_none = UserPrivileges::new("u_none", "%", Arc::clone(&handle));
+        assert!(u_none.db_is_visible(&[], "information_schema"));
+        assert!(!u_none.db_is_visible(&[], "metrics_schema"));
+        assert!(!u_none.db_is_visible(&[], "test"));
+
+        let u_proc = UserPrivileges::new("u_proc", "%", Arc::clone(&handle));
+        assert!(u_proc.db_is_visible(&[], "metrics_schema"));
+
+        let u_colvis = UserPrivileges::new("u_colvis", "%", Arc::clone(&handle));
+        assert!(u_colvis.db_is_visible(&[], "db_col"));
+
+        // RequestVerificationWithUser: information_schema returns true (matches Go privileges.go:219),
+        // default role grants work.
+        let def_id = UserIdentity {
+            username: "u_def".to_owned(),
+            hostname: "%".to_owned(),
+            ..Default::default()
+        };
+        assert!(u_none.request_verification_with_user(
+            "information_schema",
+            "tables",
+            "",
+            InsertPriv,
+            Some(&def_id)
+        ));
+        assert!(u_none.request_verification_with_user("test", "t", "*", SelectPriv, Some(&def_id)));
+        assert!(!u_none.request_verification_with_user("test", "t", "*", SelectPriv, None));
+
+        // Dynamic privileges: with_grant respected, SUPER fallback works.
+        let u_dyn = UserPrivileges::new("u_dyn", "%", Arc::clone(&handle));
+        assert!(u_dyn.request_dynamic_verification(&[], "RESTRICTED_TABLES_ADMIN", false));
+        assert!(!u_dyn.request_dynamic_verification(&[], "RESTRICTED_TABLES_ADMIN", true));
+        assert!(u_dyn.request_dynamic_verification(&[], "SYSTEM_VARIABLES_ADMIN", true));
+        let u_super = UserPrivileges::new("u_super", "%", Arc::clone(&handle));
+        assert!(u_super.request_dynamic_verification(&[], "RESTRICTED_TABLES_ADMIN", false));
+
+        // Non-ASCII case folding: `db_cyr.ТАБ` matches query on `db_cyr.таб`.
+        let u_cyr = UserPrivileges::new("u_cyr", "%", handle);
+        assert!(u_cyr.request_verification(&[], "db_cyr", "таб", "*", SelectPriv));
     }
 }
