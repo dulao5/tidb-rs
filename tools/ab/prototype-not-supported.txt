@@ -72,6 +72,7 @@ optimizer hints
 origin default .* of column .* \(type .*\)
 pushed\-down Limit 0
 reading column '.*' of type .* \(TIMESTAMP/ENUM/SET/BIT/JSON/\.\.\. are not supported yet\)
+reading system variable '.*' \(the prototype answers only the variables clients read while connecting\)
 reading the virtual generated column '.*'
 returning value .*
 setting system variable '.*'
