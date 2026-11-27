@@ -3666,8 +3666,51 @@ fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
     assert_eq!(got_c, vec![b"row-2".to_vec()]);
     assert!(s.is_idle(), "{}", s.state_snapshot());
 
-    // Double-read IndexLookUp with ORDER BY k DESC preserves descending index order.
-    let desc_sql = "SELECT c FROM sbtest1 WHERE k BETWEEN 20 AND 40 ORDER BY k DESC";
+    // Double-read IndexLookUp with ORDER BY k DESC LIMIT 3 preserves descending index order
+    // without a Sort/TopN operator (keep_order && desc on IndexLookUpReader).
+    let desc_sql = "SELECT c FROM sbtest1 WHERE k BETWEEN 20 AND 40 ORDER BY k DESC LIMIT 3";
+    {
+        use tidb_planner::core::physical_plans::{PhysicalIndexLookUpReader, PhysicalIndexScan};
+        fn find_lookup(p: &tidb_planner::PhysicalPlanRef) -> Option<&PhysicalIndexLookUpReader> {
+            assert_ne!(
+                p.kind(),
+                PhysicalKind::Sort,
+                "DESC IndexLookUp query must not add Sort"
+            );
+            assert_ne!(
+                p.kind(),
+                PhysicalKind::TopN,
+                "DESC IndexLookUp query must not add TopN"
+            );
+            if let Some(ilu) = p.as_any().downcast_ref::<PhysicalIndexLookUpReader>() {
+                return Some(ilu);
+            }
+            p.children().iter().find_map(find_lookup)
+        }
+        block_on(s.finish_unfinished_stmt());
+        block_on(s.core.prepare_txn_ctx()).unwrap();
+        let node = parse(desc_sql);
+        reset_context_of_stmt(&mut s.core, &node, desc_sql).unwrap();
+        s.core
+            .txn_manager
+            .on_stmt_start(&mut s.core.sctx, Some(&node))
+            .unwrap();
+        let stmt = tidb_executor::compiler::Compiler
+            .compile(&mut s.core, node, desc_sql)
+            .unwrap_or_else(|e| panic!("{desc_sql}: {e}"));
+        let plan = stmt.plan.as_ref().expect("compiled DESC plan");
+        let ilu = find_lookup(plan)
+            .unwrap_or_else(|| panic!("expected PhysicalIndexLookUpReader, got {:?}", plan.kind()));
+        assert!(ilu.keep_order, "DESC IndexLookUpReader must set keep_order");
+        let iscan = ilu.index_plans[0]
+            .as_any()
+            .downcast_ref::<PhysicalIndexScan>()
+            .expect("PhysicalIndexScan downcast");
+        assert!(iscan.desc, "DESC IndexLookUpReader must scan index in DESC");
+        s.core.rollback_on_error();
+        s.core.txn_manager.on_stmt_end();
+        assert!(s.is_idle(), "{}", s.state_snapshot());
+    }
     let got_desc = rt.block_on(async {
         let mut rs = s
             .execute_stmt(parse(desc_sql), desc_sql)
@@ -3743,6 +3786,10 @@ fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
             got_prep,
             vec![b"row-2".to_vec(), b"row-3".to_vec(), b"row-4".to_vec()]
         );
+        assert!(
+            !s.vars().found_in_plan_cache,
+            "first EXECUTE should populate plan cache (miss)"
+        );
         // Second execute exercises cached-plan range rebuild with different parameters.
         let mut got_prep2 = rt.block_on(async {
             let mut rs = s
@@ -3764,6 +3811,10 @@ fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
             rs.close(&mut s).await.unwrap();
             out
         });
+        assert!(
+            s.vars().found_in_plan_cache,
+            "second EXECUTE must hit instance plan cache and exercise range rebuild"
+        );
         got_prep2.sort();
         assert_eq!(got_prep2, vec![b"row-1".to_vec(), b"row-2".to_vec()]);
         s.drop_prepared_stmt(info.stmt_id).unwrap();

@@ -1647,6 +1647,7 @@ impl ExecutorBuilder {
         // Pre-Open fallback guards (spec §11.1, §11.2): detect unsupported branches before
         // mutating StatementContext, TelemetryInfo, or opening any executor.
         if is.is_partition().0 || ts.is_partition().0 {
+            // glue: blocked-by:D06.4 (static partitioned table read in buildIndexLookUpReader)
             self.err = Some(blocked(
                 "D06.4",
                 "static partitioned table read in IndexLookUpReader (PartitionedTable.GetPartition)",
@@ -1659,6 +1660,7 @@ impl ExecutorBuilder {
             .use_dynamic_partition_prune()
             && is.table.get_partition_info().is_some()
         {
+            // glue: blocked-by:D09.12 (dynamic partition pruning in buildIndexLookUpReader)
             self.err = Some(blocked(
                 "D09.12",
                 "dynamic partition pruning in buildIndexLookUpReader",
@@ -1666,6 +1668,7 @@ impl ExecutorBuilder {
             return None;
         }
         if is.table.table_cache_status_type != TableCacheStatusDisable {
+            // glue: blocked-by:D06.4 (reading a cached table in buildIndexLookUpReader)
             self.err = Some(blocked(
                 "D06.4",
                 "reading a cached table in IndexLookUpReader",
@@ -1676,6 +1679,7 @@ impl ExecutorBuilder {
             .first()
             .is_some_and(|p| self.cor_col_in_access(p.as_ref()))
         {
+            // glue: blocked-by:D10.1 (rebuildIndexRanges correlated column in buildIndexLookUpReader)
             self.err = Some(blocked(
                 "D10.1",
                 "rebuildIndexRanges (correlated column in IndexLookUpReader access condition)",
@@ -1685,7 +1689,8 @@ impl ExecutorBuilder {
 
         // Write TelemetryInfo / StatementContext metadata before build_no_range_index_look_up_reader
         // shares StatementContext with BaseExecutorV2; restore all fields on error so fallback
-        // leaves session/statement state untouched.
+        // leaves session/statement state untouched. (Go sets UseTableLookUp earlier and does not
+        // restore it on error; telemetry-only difference on failing/fallback statements.)
         let prev_use_table_look_up = self.ti.use_table_look_up.swap(true, Ordering::SeqCst);
         let prev_is_tikv = sctx
             .get_session_vars()
@@ -1877,6 +1882,7 @@ pub async fn build_table_req(
     };
     let (is_partition, _physical_table_id) = ts.is_partition();
     if is_partition {
+        // glue: blocked-by:D06.4 (static partitioned table read in buildTableReq)
         return Err(blocked(
             "D06.4",
             "static partitioned table read in buildTableReq (PartitionedTable.GetPartition)",

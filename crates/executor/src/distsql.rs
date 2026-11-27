@@ -2042,8 +2042,12 @@ impl IndexLookUpExecutor {
         let task_res = match done_rx.await {
             Ok(res) => res?,
             Err(_) => {
-                // Sender dropped due to shutdown/cancel.
-                return Ok(None);
+                if self.finished_tx.as_ref().is_some_and(|tx| *tx.borrow()) {
+                    return Ok(None);
+                }
+                return Err(Error::plain(
+                    "IndexLookUpExecutor: table worker dropped task channel unexpectedly",
+                ));
             }
         };
         if let (Some(stats), Some(start_t), Some(fetched_t)) =
@@ -2992,6 +2996,7 @@ impl TableWorker {
         _exec_ctx: &ExecCtx,
         _table_reader: &mut TableReaderExecutor,
     ) -> Result<LookupTableTaskResult, Error> {
+        // glue: blocked-by:D06.4 (ADMIN CHECK tables.CompareIndexAndVal in IndexLookUp compareData)
         Err(blocked(
             "D06.4",
             "tables.CompareIndexAndVal in IndexLookUp compareData",
@@ -3150,7 +3155,11 @@ impl TableWorker {
                     is_common,
                     GetHandleType::FromTable,
                 )?;
-                let pos = order_map.get(&handle).copied().unwrap_or(0);
+                let Some(&pos) = order_map.get(&handle) else {
+                    return Err(Error::plain(format!(
+                        "IndexLookUpExecutor: handle {handle:?} missing from indexOrder"
+                    )));
+                };
                 task_res.row_idx.push(pos);
                 let _ = stride.checkpoint(&()).await;
                 self.shared.base.killer.handle_sql_killer_signal()?;
@@ -4812,5 +4821,144 @@ mod tests {
             assert!(s.vars.stmt_ctx().index_names.is_empty());
             assert!(s.vars.stmt_ctx().table_ids.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn index_lookup_table_request_sorts_handles_and_pins_kv_ranges() {
+        let (tbl, plan) = make_lookup_table_and_plan(true, false, false);
+        let tbl_id = tbl.id;
+        let is = make_info_schema(tbl).await;
+        let mut s = MockSession::new(100);
+        s.vars.index_lookup_size = 10;
+        let mut b = new_executor_builder(&s, Some(is), Arc::new(TelemetryInfo::default()));
+        let mut ilu = b.build_index_look_up_reader(&mut s, &plan).await.unwrap();
+
+        let captured_ranges: Arc<parking_lot::Mutex<Vec<tidb_kv::KeyRange>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let captured_flags: Arc<parking_lot::Mutex<Option<(bool, bool)>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+
+        let idx_closed = Arc::new(AtomicBool::new(false));
+        let ic = Arc::clone(&idx_closed);
+        ilu.select_result_hook.select_result_func = Some(Arc::new(move |_, _, _, _, _| {
+            let c = Arc::clone(&ic);
+            Box::pin(async move {
+                // Deliberately unsorted handles from index scan: [30, 10, 20].
+                Ok(Box::new(TrackedMockSelectResult {
+                    rows: vec![vec![30], vec![10], vec![20]],
+                    pos: 0,
+                    closed: c,
+                    next_err: None,
+                    close_err: None,
+                }) as Box<dyn SelectResult>)
+            })
+        }));
+
+        let cr = Arc::clone(&captured_ranges);
+        let cf = Arc::clone(&captured_flags);
+        let tbl_closed = Arc::new(AtomicBool::new(false));
+        let tc = Arc::clone(&tbl_closed);
+        ilu.data_reader_builder
+            .select_result_hook
+            .select_result_func = Some(Arc::new(move |_, _, req, _, _| {
+            *cr.lock() = req
+                .key_ranges
+                .as_ref()
+                .map(|kr| kr.ranges().iter().flatten().cloned().collect())
+                .unwrap_or_default();
+            *cf.lock() = Some((req.keep_order, req.desc));
+            let c = Arc::clone(&tc);
+            Box::pin(async move {
+                Ok(Box::new(TrackedMockSelectResult {
+                    rows: vec![vec![10, 100], vec![20, 200], vec![30, 300]],
+                    pos: 0,
+                    closed: c,
+                    next_err: None,
+                    close_err: None,
+                }) as Box<dyn SelectResult>)
+            })
+        }));
+
+        let ctx = ExecCtx::new(s.vars.stmt_ctx_arc());
+        exec::open(&ctx, &mut ilu).await.unwrap();
+        let mut chk = exec::new_first_chunk(&ilu);
+        let mut got = Vec::new();
+        loop {
+            exec::next(&ctx, &mut ilu, &mut chk).await.unwrap();
+            if chk.num_rows() == 0 {
+                break;
+            }
+            for i in 0..chk.num_rows() {
+                got.push((chk.get_row(i).get_int64(0), chk.get_row(i).get_int64(1)));
+            }
+        }
+        exec::close(&mut ilu).await.unwrap();
+
+        // Output preserves index order [30, 10, 20], while the table-side KV request MUST sort
+        // handles ascending [10, 20, 30] (Go builder.go:4944).
+        assert_eq!(got, vec![(30, 300), (10, 100), (20, 200)]);
+        let rec_prefix = tidb_tablecodec::gen_table_record_prefix(tbl_id);
+        let expected_ranges: Vec<tidb_kv::KeyRange> = [10i64, 20, 30]
+            .into_iter()
+            .map(|h| {
+                let start =
+                    tidb_tablecodec::encode_record_key(&rec_prefix, &Handle::Int(IntHandle(h)));
+                let end = start.prefix_next();
+                tidb_kv::KeyRange {
+                    start_key: start,
+                    end_key: end,
+                }
+            })
+            .collect();
+        assert_eq!(*captured_ranges.lock(), expected_ranges);
+        assert_eq!(*captured_flags.lock(), Some((false, false)));
+    }
+
+    #[tokio::test]
+    async fn index_lookup_dropped_done_tx_returns_error_unless_finished() {
+        let (tbl, plan) = make_lookup_table_and_plan(false, false, false);
+        let is = make_info_schema(tbl).await;
+        let mut s = MockSession::new(100);
+        let mut b = new_executor_builder(&s, Some(is), Arc::new(TelemetryInfo::default()));
+        let mut ilu = b.build_index_look_up_reader(&mut s, &plan).await.unwrap();
+
+        // Unfinished executor + dropped oneshot sender -> internal error (never silent EOF).
+        let (fin_tx, _fin_rx) = watch::channel(false);
+        let (res_tx, res_rx) = mpsc::channel(1);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        drop(done_tx);
+        res_tx.send(done_rx).await.unwrap();
+        drop(res_tx);
+        ilu.finished_tx = Some(fin_tx.clone());
+        ilu.result_rx = Some(res_rx);
+
+        let err = ilu
+            .get_result_task()
+            .await
+            .err()
+            .expect("dropped done_tx without finished must return an error");
+        assert!(err.to_string().contains("dropped task channel"), "{err}");
+
+        // Once finished is signaled, a dropped oneshot sender cleanly yields Ok(None).
+        let _ = fin_tx.send(true);
+        let (res_tx2, res_rx2) = mpsc::channel(1);
+        let (done_tx2, done_rx2) = tokio::sync::oneshot::channel();
+        drop(done_tx2);
+        res_tx2.send(done_rx2).await.unwrap();
+        drop(res_tx2);
+        ilu.result_rx = Some(res_rx2);
+        assert!(ilu.get_result_task().await.unwrap().is_none());
+    }
+
+    #[test]
+    fn index_lookup_get_datum_row_extracts_column_datums() {
+        let fts = vec![Arc::new(int_ft()), Arc::new(int_ft())];
+        let mut chk = chunk::new_chunk_with_capacity(&fts, 1);
+        chk.append_int64(0, 7);
+        chk.append_int64(1, 42);
+        let ds = get_datum_row(&chk.get_row(0), &fts);
+        assert_eq!(ds.len(), 2);
+        assert_eq!(ds[0].get_int64(), 7);
+        assert_eq!(ds[1].get_int64(), 42);
     }
 }
