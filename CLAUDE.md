@@ -83,12 +83,15 @@ file and over any task description.
 11. **Wired, and tested for real** (#474 R-2; #462 and the privilege-check implementation #467
     both passed unit tests but did nothing in the running server):
     - Every new runtime entry point (a log line, a check, a background loop, a hook, a config
-      item) needs a **production caller**, reachable from `tidb-server` outside `#[cfg(test)]`,
-      or it is a registered stub (rule 3) with a plain-language reason. The PR body names the
-      production call path. Code only tests call is not "done".
+      item) needs a **production caller**, reachable from the server binary's `main`
+      (`crates/poc/server/src/main.rs`) outside `#[cfg(test)]`, or it is a registered stub
+      (rule 3) with a plain-language reason. The PR body names the production call path; code
+      reachable only with the new stack on (`--new-stack fallback|strict`) counts, and the PR
+      body says which mode. Code only tests call is not "done".
     - A test must call the code it claims to test. Reviewers read the test body, not only its
       name.
-    - Byte-parity outputs (logs, wire metadata, error text) are compared on the **whole line or
+    - Byte-parity outputs (logs, wire metadata such as result-column `org_table` / `org_name`,
+      error text) are compared on the **whole line or
       value**. A `contains()` / substring check is not a parity test.
 
 ## 3. Verify before opening a PR
@@ -127,7 +130,7 @@ report in the issue. Delete your worktree's `target/` after the PR is merged.
   stubs added/removed (and the ratchet change), the merge order "tracker#N → #M", and at the end
   a list defining every project ID used in it. If the PR touches an **external contract**, add
   a section "External contract" that answers each of: etcd keys or lease order; HTTP / gRPC
-  routes; wire protocol, log or error format; resource thresholds (memory, time, concurrency);
+  routes; wire protocol (including result-column metadata), log or error format; resource thresholds (memory, time, concurrency);
   metrics names and labels; metadata read from a mixed cluster (versions, unknown fields). Write
   what changes and how it was compared with Go, or "not touched". Update your task's row in
   `specs/VS1-vertical-slice/tasks.md`. Commits end with a `Co-Authored-By:` line for the model
