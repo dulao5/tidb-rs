@@ -20,7 +20,7 @@
 //!   are not ported.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tidb_base::Error;
@@ -98,6 +98,8 @@ pub struct Domain {
     /// `instancePlanCache`: set once by `InitInstancePlanCache` (plan_cache.rs).
     pub(crate) instance_plan_cache:
         std::sync::OnceLock<Arc<dyn tidb_sessionctx::context::InstancePlanCache>>,
+    /// Whether the blocked schema ts lookup was logged (`report_schema_ts_blocked`).
+    schema_ts_blocked_reported: AtomicBool,
 }
 
 /// `NewDomain`: the part schema loading needs (the store and the InfoCache).
@@ -111,6 +113,7 @@ pub fn new_domain(store: Arc<dyn Storage>) -> Domain {
         store,
         m: tokio::sync::Mutex::new(()),
         instance_plan_cache: std::sync::OnceLock::new(),
+        schema_ts_blocked_reported: AtomicBool::new(false),
     }
 }
 
@@ -231,10 +234,15 @@ impl Domain {
             .await
         {
             Ok(ts) => ts,
+            // The stub below returns `blocked(...)` on every load (once a second from the
+            // sync loop). Go warns on every failure, which with TiKV normally never happens;
+            // the blocked lookup is reported once per domain instead of on every load.
+            Err(e) if tidb_base::blocked::blocked_by(&e).is_some() => {
+                self.report_schema_ts_blocked(&e, needed_schema_version);
+                0
+            }
             Err(e) => {
-                log::warn!(
-                    "failed to get schema version, error: {e}, version: {needed_schema_version}"
-                );
+                tracing::warn!(error = %e, version = needed_schema_version, "failed to get schema version");
                 0
             }
         };
@@ -329,8 +337,10 @@ impl Domain {
 
     /// Returns the timestamp of a schema version, which is the commit timestamp of the
     /// schema diff. Go reads it with `store/helper`'s `GetMvccByEncodedKeyWithTS` (TiKV's
-    /// MVCC debug API, D07.1, not ported); without it Go returns "cannot get store from
-    /// domain" (a store that is not a `helper.Storage`), and the caller uses 0.
+    /// MVCC debug API, part of the store driver D07.1, not ported); a store that is not a
+    /// `helper.Storage` gets "cannot get store from domain", and the caller uses 0. Until
+    /// the helper is ported this returns [`tidb_base::blocked::blocked`], which the caller reports
+    /// once ([`Domain::report_schema_ts_blocked`]) and then also uses 0.
     // glue: stub of Domain.getTimestampForSchemaVersionWithNonEmptyDiff, blocked-by:D07.1 (store/helper GetMvccByEncodedKeyWithTS: the commit ts of the schema diff)
     async fn get_timestamp_for_schema_version_with_non_empty_diff(
         &self,
@@ -339,7 +349,29 @@ impl Domain {
         _start_ts: u64,
     ) -> Result<u64, Error> {
         let _ = m.encode_schema_diff_key(version);
-        Err(tidb_base::errors::new("cannot get store from domain"))
+        Err(tidb_base::blocked::blocked(
+            "D07.1",
+            "the commit ts of a schema version (TiKV MVCC API of store/helper)",
+        ))
+    }
+
+    /// Logs once per domain that the commit ts of schema versions is not available: the
+    /// first schema load at startup reaches the stub above, and every later load (once a
+    /// second) would otherwise log the same warning again.
+    // glue: log-once report of the stubbed schema ts lookup above (no Go counterpart)
+    fn report_schema_ts_blocked(&self, err: &Error, version: i64) {
+        if self
+            .schema_ts_blocked_reported
+            .swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
+        tracing::warn!(
+            error = %err,
+            version,
+            reason = "store/helper GetMvccByEncodedKeyWithTS (TiKV MVCC API) is not ported; schema versions are cached with ts 0, so a snapshot read loads its schema again",
+            "schema version commit ts is not available, logged once"
+        );
     }
 
     // go: Domain.fetchPolicies L1
