@@ -98,6 +98,27 @@ Go：`COM_STMT_CLOSE`（`DropPreparedStmt`）只登记，语句在事务结束�
 
 Go v8.5.8 只用第一条被关闭语句的 `PlanCacheStmt` 计算 key，之后每次循环还用它，所以一个事务里关闭多条语句时，每次删除的都是第一条的计划。照搬；`tidb_ignore_prepared_cache_close_stmt` 打开时不删计划，但语句照删。测试 `clean_retry_info_deletes_the_first_closed_stmt_plan_each_time`：关闭两条语句，替身 cache 收到的 `Delete` 是两次第一条的 key。可能的上游 bug，记录在此，不提交上游。
 
+### 4.4 原型答复的预处理语句也报 `skip prepared plan-cache`（#512）
+
+**问题。** Go 在 PREPARE 时判断语句能否用 plan cache（`GeneratePlanCacheStmtWithAST`，`pkg/planner/core/plan_cache_utils.go` 141–170 行：plan cache 关闭时原因是 "plan cache is disabled"，否则 `IsASTCacheable`，再看 `Fix49736`），不能用就在 PREPARE 时发 `Warning 1105 skip prepared plan-cache: <原因>`，原因存进 `PlanCacheStmt.UncacheableReason`，之后**每次** EXECUTE 再发一次（`GetPlanFromPlanCache` 204–216 行：先 `SetCacheType(SessionPrepared)`，再 `WarnSkipPlanCache(原因)`）。新栈已照搬这两处；但原型（PoC）答复的语句——三种 `--new-stack` 模式下的 `@@var`、`DATABASE()`、`USER()` 等，以及 `off` 模式（默认）下的全部预处理语句——没有 warning，原型的 SHOW WARNINGS 也一直是空的。每周 ab 的 prepared 部分因此有 44 条不一致。
+
+**做法（维护者在 #512 的决定 A）。** 原型不移植 Go 的任何函数，只调用已移植的判断：
+
+- planner 把 `GeneratePlanCacheStmtWithAST` 里这一段抽成 `prepare_cacheability(vars, is_prep_stmt, stmt, is)`（`// go-part`，返回 `(cacheable, reason, warnings)`），新栈的 PREPARE 调用它、把 warning 写进语句上下文，行为不变。
+- 原型新增模块 `crates/poc/session/src/plan_cache.rs`（glue）：`prepare_time_cacheability` 调用上面的函数；`execute_warnings` 用已移植的 `PlanCacheTracker`（`set_cache_type(SessionPrepared)` + `warn_skip_plan_cache`）生成 EXECUTE 的 warning。
+- 原型的会话有一个**语句 warning 列表**（Go 的 `StmtCtx` warnings）：
+  - 一条语句开始时清空（Go 的 `ResetContextOfStmt`），SHOW WARNINGS / SHOW ERRORS 除外（Go 保留上一条语句的 warning）。解析失败不清空（Go 在 `ResetContextOfStmt` 之前就返回，`PrepareExec.Next` 也是先解析）；原型不能降级（lowering）的语句清空（Go 会开始执行它）。
+  - PREPARE：原型准备好语句之后取判断结果，原因存在原型的语句上，PREPARE 的 warning 加入列表。PREPARE 的 OK 包 warning 数照 Go 为 0，warning 只能经 SHOW WARNINGS 看到。
+  - EXECUTE：找到语句、解码参数之后清空列表，加入 `skip prepared plan-cache: <原因>`（原因为空则不加），再执行。
+  - 每个成功的响应（结果集 / OK）的 warning 数取列表长度（Go 的 `StmtCtx.WarningCount()`）。
+  - SHOW WARNINGS / SHOW ERRORS 的行照 Go `ShowExec.fetchShowWarnings`：TiDB 错误用它的 MySQL 错误码和消息（`terror.ToSQLError`），其他错误用 `ErrUnknown`（1105）和错误文本；SHOW ERRORS 只列 Error 级别。路由器读新会话 warning 的函数改为共用同一个函数。
+- 判断的输入按模式不同：
+  - `fallback` / `strict`：路由器在原型准备好语句（归属 both 或 PoC）之后调用，用新会话同步过的系统变量；InfoSchema 用新会话的（已移植 domain 的），条件是它与原型的 schema 版本一致（路由第 0 步的版本检查，`schema_check`），并先像新会话规划前那样加载语句里的表（`load_stmt_tables`，改为 `pub`）。版本不一致或没有 domain 时不传 InfoSchema（见 §5 第 12 条）。判断碰到边界桩时，原型的副本关闭：新栈也准备好了就归新栈（归属 new），否则 PREPARE 返回该边界桩的 1235，不吞掉。
+  - `off`：没有路由器和新会话。原型第一次 PREPARE 时建一个 Go 默认变量的新会话（`tidb_session::Session::new` + `load_common_global_variables_if_needed`）只读它的变量；不传 InfoSchema（不写 `tidb_meta` 的适配器）。原型拒绝 `SET` 这个判断读到的变量（`tidb_enable_prepared_plan_cache`、`tidb_opt_fix_control` 等，1235），所以会话级取值总是 Go 的默认值。
+- 路由器：PREPARE 之后 SHOW WARNINGS 交给持有这次 PREPARE warning 的引擎——新栈准备了语句（或返回 Go 移植的错误）时是新会话，否则是原型（`last.engine`）。路由器自己答复的错误（`strict` 下无处回退）结束时清空原型的列表，这样随后交给原型的 SHOW WARNINGS 不会显示更早语句的 warning。
+- **不在本项**：优化时才产生的原因（TableDual、`LIMIT 0`、"may be converted to INT"、点查等，Go 在 `generateNewPlan` / 优化器里发出）原型没有，见 §5 第 11 条；它们在 ab 中的容忍条目要负责人批准，维护者在 #512 上询问，本项不加。
+- 也修好 #505 的最后一条（原型答复的 `@@var` / `DATABASE()` / `USER()` 预处理语句没有 warning）。
+
 ## 5. 与 Go 的差异（均在代码中标注）
 
 1. 不缓存（§1.2）：EXECUTE 从不命中，`@@last_plan_from_cache` 恒为 0。
@@ -109,6 +130,11 @@ Go v8.5.8 只用第一条被关闭语句的 `PlanCacheStmt` 计算 key，之后�
 7. `planCacheStmtProcessor` 不收集表列表（只给 cache key 的统计信息用，A3）。
 8. 元数据锁（已照 Go 移植，见 D05.4 事务上下文 spec §3a，#252）中的边界桩（没有 domain、会话扩展的 InfoSchema 未移植）返回 `Blocked`，而不是像 Go 那样把错误记日志后吞掉（§3.3）；Go 的普通错误照 Go 记日志、让缓存失效。
 9. PREPARE 核对 `?` 的个数（#356，Go 没有这一步）：Go 的 `GeneratePlanCacheStmtWithAST`（`pkg/planner/core/plan_cache_utils.go` 122–129 行，排序后逐个 `SetOrder(i)`）和 `ExtractAndSortParamMarkers`（同文件 603–616 行）直接给 extractor 找到的 `?` 编号，不检查是否漏了。Rust 的 extractor 用的是本项的 `Walker`（§2 第 5 条，代替还没有的 visitor），它进不去而表达式改写却会读到的节点里的 `?` 会保持 order 0、读第一个参数（#352 那样的错误结果）。所以解析器数出它生成的 `?` 个数（`ParseOutput::param_markers`），`generate_plan_cache_stmt_with_ast` 在 extractor 遍历之后、第一次用到个数（`ErrPsManyParam` 检查）之前比较两者，不同就返回 `blocked-by:D02.2`（"a parameter marker the AST walk does not reach"），语句回退。只有 Rust 的 `Walker` 漏掉某个节点时才会触发；触发时行为是回退，不是错误的结果；正常语句两个数相同，路径不变。Go 先报的错误（`SELECT ... INTO` 的 `ErrUnsupportedPs`）仍然先报。`ExtractAndSortParamMarkers` 拿不到解析器的个数，不核对（Rust 里只有测试调用它）。
+10. 原型路径（§4.4）在 `off` 模式下不查表：Go 的 `IsASTCacheable`（`pkg/planner/core/plan_cacheable_checker.go` 的 `cacheableChecker.Enter` 对 `TableName` 调用 `checkTableCacheable`）会检查分区表（static 分区裁剪模式）、生成列（`Fix45798`）、临时表和"表不存在"，原型没有已移植的 InfoSchema，按 Go 对 nil schema 的做法跳过这些检查（`plan_cacheable_checker.go` 中 `checker.schema != nil` 的判断）。所以分区表（static 模式）、有生成列的表、临时表上由原型答复的预处理语句会少 Go 的那条 warning，引用不存在的表时原型在 PREPARE 就报错（原型准备语句时解析表名）。
+11. 原型路径没有优化时才产生的原因：Go 在 `generateNewPlan` / 优化器中（`pkg/planner/core/plan_cache.go`、`plan_cacheable_checker.go` 的 `isPlanCacheable` / `isPhysicalPlanCacheable`，以及 `expression` 中 "may be converted to INT"）发出的 `skip prepared plan-cache`（TableDual、`LIMIT 0`、整型转换、点查等），原型不会发出。ab 的容忍条目等负责人批准（#512）。
+12. `fallback` / `strict` 下没有可接受的 InfoSchema（没有 domain、schema 租约过期、版本与原型不一致）时，判断也不查表，同第 10 条。
+13. `off` 模式用 Go 的默认全局变量（`DefaultGlobals`），不读集群上的全局值：集群上把 `tidb_enable_prepared_plan_cache` 或 `tidb_opt_fix_control` 的全局值改掉时，原型的原因可能与 Go 不同（Go 读 `GlobalVarAccessor`，`pkg/session/session.go` 的 `loadCommonGlobalVariablesIfNeeded`）。`fallback` / `strict` 用新会话同步的全局值，没有这个差异。
+14. 原型失败的语句不把错误加进 warning 列表：Go 的 SHOW WARNINGS 在失败语句之后列出这个错误（Error 级别），原型列表为空（原来就如此，本项没有改变）。
 
 ## 6. 边界桩（登记在 tracker `data/stubs.tsv`）
 
@@ -129,4 +155,5 @@ Go v8.5.8 只用第一条被关闭语句的 `PlanCacheStmt` 计算 key，之后�
 
 - govec `plancache`：见 §3.1。
 - 单测：planner `plan_cache_tests`（PREPARE 停在 plan builder 之前发出的 warning、参数个数 8112 与顺序、PREPARE 后 `?` 按位置编号为 0..n（`prepare_numbers_the_markers_by_position`，含 `LIMIT ?, ?` 遍历顺序与位置不同的情形）、`?` 个数核对（`prepare_stops_when_the_walk_misses_a_marker`：传入的解析器个数比遍历多一个或少一个时 PREPARE 返回 `blocked-by:D02.2`、不发 warning；`SELECT ... INTO` 仍先报 `ErrUnsupportedPs`；多个 `?` 的正常语句照常 PREPARE、编号 0..n，`LIMIT ?, ?` 通过核对、停在 plan builder 后面的 `D13.1` 边界，#356；解析器计数见 parser `counts_the_parameter_markers_it_builds`）、schema 变化后重新 preprocess 与 8113、未命中路径的 `UseCache` / `InPreparedPlanBuilding` / `isPlanCacheable` warning、`isPlanCacheable` 的开关与大小）；session（`cleanRetryInfo` 的坑、1461 计入已关闭语句、真正的 `PrepareStmt` 停在 D09.1 / D06.3 / 8115；`prepared_statement_markers_read_their_own_parameters`：表里有 1..10 行，`BETWEEN ? AND ?`、`>= ? AND <= ?`、`c = ? AND id BETWEEN ? AND ?`、`id = ? AND id = ?` 各执行两次（第一次未命中，第二次换参数、可缓存的命中），每次要么返回与 Go 相同的行，要么在固定的边界桩回退、没有执行器打开，#352）；表达式列名在 PREPARE、EXECUTE 未命中、EXECUTE 命中三处都和 Go 相同（会话测试 `expression_columns_are_named_by_their_text`，#361）；路由器（§4.2）。
+- 原型路径（§4.4）：`poc-session` 单测 `plan_cache::tests`（`@@var`、`@a`、`DATABASE()`、`USER()`、`CURRENT_USER()` 的原因与 PREPARE warning；可缓存语句没有 warning；plan cache 关闭时 PREPARE 不发、EXECUTE 发；每次 EXECUTE 一条；SHOW WARNINGS 的行是 `Warning | 1105 | <文本>`、SHOW ERRORS 没有）；路由器测试（判断用新会话的变量、在可接受时用新会话的 InfoSchema 查表、归属 both / PoC / new 时谁拿到判断、PREPARE 之后 SHOW WARNINGS 去哪个引擎、路由器自己答复错误时清空原型列表）；集群测试 `prepared_uncacheable_statements_warn_as_go`（需要 `TIDB_RS_PD`：`off` 模式下 PREPARE 后 SHOW WARNINGS、两次 EXECUTE 的 warning 数 1 和 SHOW WARNINGS、SHOW WARNINGS 连续两次相同、下一条语句清空、可缓存语句没有）。
 - **预处理点查（`SELECT c FROM sbtest1 WHERE id=?`）在 `strict` 模式下由新栈执行：本项做不到**。这条路径还被以下各项挡住：preprocess 查表（D06.3，VS1-17）、`PlanBuilder.Build`（D09.1，VS1-21）、`planner.Optimize`（D13.3，VS1-24；点查的 `TryFastPlan` 由它调用）、结果集与二进制参数的编码（D03.1，VS1-16）。本项完成后，PREPARE 在新会话中走到 preprocess 查表，`strict` 模式下 EXECUTE 报 `1235 blocked-by:D06.3`。

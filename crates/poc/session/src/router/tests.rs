@@ -49,6 +49,10 @@ struct FakePoc {
     /// The schema sync's registry: when set, the schema version is the real PoC's
     /// computation over it, and `schema_version` is ignored.
     registry: Option<Arc<poc_domain::Registry>>,
+    /// The plan-cache decisions handed over at PREPARE (#512), by statement id.
+    cacheability: HashMap<u32, crate::plan_cache::PrepareCacheability>,
+    /// How often the router cleared the PoC's warnings.
+    warnings_cleared: usize,
 }
 
 fn col(name: &str) -> ColumnDef {
@@ -166,6 +170,12 @@ impl PocEngine for FakePoc {
     fn close(&mut self, stmt_id: u32) {
         self.log.push(format!("close {stmt_id}"));
         self.prepared.remove(&stmt_id);
+    }
+    fn clear_warnings(&mut self) {
+        self.warnings_cleared += 1;
+    }
+    fn set_cacheability(&mut self, stmt_id: u32, c: crate::plan_cache::PrepareCacheability) {
+        self.cacheability.insert(stmt_id, c);
     }
 }
 
@@ -2006,4 +2016,118 @@ fn set_connection_id_propagates_to_new_stack_session_vars() {
     r.set_connection_id(2097158);
     assert_eq!(r.conn_id, 2097158);
     assert_eq!(r.new.session().vars().connection_id, 2097158);
+}
+
+// ---------------------------------------------------------------------------------------------
+// #512: Go's prepare-time plan-cache decision for the statements the PoC prepared.
+
+fn warning_texts(c: &crate::plan_cache::PrepareCacheability) -> Vec<String> {
+    c.warnings
+        .iter()
+        .map(|w| format!("{}: {}", w.level, String::from_utf8_lossy(&w.err.error())))
+        .collect()
+}
+
+/// A statement only the PoC prepares (a system variable read) gets Go's reason, decided with
+/// the new session's variables; SHOW WARNINGS then goes to the PoC. A cacheable one gets
+/// none.
+#[test]
+fn poc_prepare_takes_the_plan_cache_decision() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    r.last.engine = Engine::New;
+    block_on(r.prepare(&mut p, 1, "SELECT @@max_allowed_packet")).unwrap();
+    assert_eq!(r.owner(1), Some(&Owner::Poc(Reason::Ast("variable"))));
+    assert!(script.lock().unwrap().log.is_empty());
+    let c = &p.cacheability[&1];
+    assert_eq!(c.reason, "query has user-defined variables is un-cacheable");
+    assert_eq!(
+        warning_texts(c),
+        ["Warning: skip prepared plan-cache: query has user-defined variables is un-cacheable"]
+    );
+    assert_eq!(r.last.engine, Engine::Poc);
+    // Cacheable (no InfoSchema here: the table checks are left out).
+    block_on(r.prepare(&mut p, 2, "SELECT count(*) FROM t")).unwrap();
+    assert_eq!(
+        p.cacheability[&2],
+        crate::plan_cache::PrepareCacheability::default()
+    );
+}
+
+/// The decision reads the new session's (synced) variables: with the prepared plan cache
+/// switched off there, the reason is "plan cache is disabled".
+#[test]
+fn poc_prepare_uses_the_new_session_variables() {
+    let mut p = poc();
+    let (mut r, _script) = scripted(NewStackMode::Fallback, &p);
+    r.new
+        .session_mut()
+        .vars_mut()
+        .set_system_var("tidb_enable_prepared_plan_cache", "OFF")
+        .unwrap();
+    block_on(r.prepare(&mut p, 1, "SELECT count(*) FROM t")).unwrap();
+    assert_eq!(p.cacheability[&1].reason, "plan cache is disabled");
+}
+
+/// Prepared on both sides: the PoC's copy gets the decision too (it answers a fallback
+/// EXECUTE), and SHOW WARNINGS goes to the new session, which ran Go's PREPARE.
+#[test]
+fn both_prepared_statement_gets_the_decision_and_new_stack_warnings() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    assert!(matches!(r.owner(1), Some(Owner::Both { .. })));
+    assert_eq!(
+        p.cacheability[&1],
+        crate::plan_cache::PrepareCacheability::default()
+    );
+    assert_eq!(r.last.engine, Engine::New);
+    // New-stack Blocked at PREPARE: the PoC owns it and answers SHOW WARNINGS.
+    script.lock().unwrap().prepare = Some(Answer::Blocked("D13.1"));
+    block_on(r.prepare(&mut p, 2, POINT)).unwrap();
+    assert_eq!(r.last.engine, Engine::Poc);
+    assert!(p.cacheability.contains_key(&2));
+    // Prepared only by the new stack: no PoC copy, no decision for it.
+    p.prepare_fails = true;
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 3, POINT)).unwrap();
+    assert!(!p.cacheability.contains_key(&3));
+    assert_eq!(r.last.engine, Engine::New);
+}
+
+/// With an admissible InfoSchema, the decision checks the statement's tables in the new
+/// session's InfoSchema (a plain table: cacheable).
+#[test]
+fn poc_prepare_checks_tables_in_the_new_session_info_schema() {
+    let mut p = poc();
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().version = Some(1);
+    r.new
+        .session_mut()
+        .set_domain_info_schema(sbtest_info_schema());
+    block_on(r.prepare(&mut p, 1, "SELECT count(*) FROM test.sbtest1")).unwrap();
+    assert_eq!(r.owner(1), Some(&Owner::Poc(Reason::Ast("aggregate"))));
+    assert_eq!(
+        p.cacheability[&1],
+        crate::plan_cache::PrepareCacheability::default()
+    );
+}
+
+/// An error the router answers itself (strict mode, nothing to fall back to) clears the
+/// PoC's warnings, so a SHOW WARNINGS after it does not show an older statement's.
+#[test]
+fn router_error_clears_the_poc_warnings() {
+    let mut p = poc();
+    let (mut s, sscript) = scripted(NewStackMode::Strict, &p);
+    sscript.lock().unwrap().prepare = Some(Answer::Blocked("D13.1"));
+    block_on(s.prepare(&mut p, 1, POINT)).unwrap();
+    assert_eq!(p.warnings_cleared, 0);
+    block_on(s.execute(&mut p, 1, vec![])).unwrap_err();
+    assert_eq!(p.warnings_cleared, 1);
+    assert_eq!(s.last.engine, Engine::Poc);
+    // A statement the PoC answered: the PoC cleared its own list, the router does not.
+    block_on(s.prepare(&mut p, 2, "SELECT count(*) FROM t")).unwrap();
+    block_on(s.execute(&mut p, 2, vec![])).unwrap();
+    assert_eq!(p.warnings_cleared, 1);
 }

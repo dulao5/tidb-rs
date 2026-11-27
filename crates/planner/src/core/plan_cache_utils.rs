@@ -120,6 +120,62 @@ impl InfoSchemaLookup for InfoSchemaV2 {
     }
 }
 
+/// The cacheability decision of `GeneratePlanCacheStmtWithAST` (Go L141-170): "plan cache
+/// is disabled" when the session's switch is off, otherwise `IsASTCacheable` for a prepared
+/// statement, then the `Fix49736` override. Returns `(cacheable, reason, warnings)`: `reason`
+/// becomes `PlanCacheStmt.UncacheableReason` (warned again on every EXECUTE by
+/// `GetPlanFromPlanCache`), and `warnings` are the ones Go appends to the statement context
+/// at this point (`force plan-cache: ...` or `skip prepared plan-cache: ...`), for the caller
+/// to append. A separate function so that the prototype's prepared statements report the
+/// same reason (`poc-session`, #512): they never reach the rest of
+/// `GeneratePlanCacheStmtWithAST`.
+///
+/// `is` is `None` only for the prototype in `--new-stack=off`, which has no ported
+/// InfoSchema: `IsASTCacheable` then skips the table checks, as Go does for a nil schema.
+// go-part: GeneratePlanCacheStmtWithAST
+pub fn prepare_cacheability(
+    vars: &SessionVars,
+    is_prep_stmt: bool,
+    stmt: &Stmt,
+    is: Option<&dyn InfoSchemaLookup>,
+) -> Result<(bool, String, Vec<Error>), Error> {
+    let mut warnings = Vec::new();
+    let mut cacheable;
+    let mut reason;
+    if is_prep_stmt && !vars.enable_prepared_plan_cache
+        || !is_prep_stmt && !vars.enable_non_prepared_plan_cache
+    {
+        cacheable = false;
+        reason = "plan cache is disabled".to_owned();
+    } else {
+        if is_prep_stmt {
+            (cacheable, reason) = is_ast_cacheable(vars, stmt, is)?;
+        } else {
+            cacheable = true; // it is already checked here
+            reason = String::new();
+        }
+
+        if !cacheable
+            && fixcontrol::get_bool_with_default(
+                &vars.state.optimizer_fix_control,
+                fixcontrol::Fix49736,
+                false,
+            )
+        {
+            warnings.push(Error::plain(format!(
+                "force plan-cache: may use risky cached plan: {reason}"
+            )));
+            cacheable = true;
+            reason = String::new();
+        }
+
+        if !cacheable {
+            warnings.push(Error::plain(format!("skip prepared plan-cache: {reason}")));
+        }
+    }
+    Ok((cacheable, reason, warnings))
+}
+
 /// `ast.Prepared`: the prepared statement and its label.
 #[derive(Debug)]
 pub struct Prepared {
@@ -434,39 +490,10 @@ pub fn generate_plan_cache_stmt_with_ast(
     // glue: stub, blocked-by:D02.2 (parser.NormalizeDigest: the normalized SQL feeds Top SQL, the statement summary and the plan cache key, none on the new stack)
     let (normalized_sql, digest) = (String::new(), String::new());
 
-    let mut cacheable;
-    let mut reason;
-    if is_prep_stmt && !vars.enable_prepared_plan_cache
-        || !is_prep_stmt && !vars.enable_non_prepared_plan_cache
-    {
-        cacheable = false;
-        reason = "plan cache is disabled".to_owned();
-    } else {
-        if is_prep_stmt {
-            (cacheable, reason) = is_ast_cacheable(vars, &prepared.stmt, Some(is))?;
-        } else {
-            cacheable = true; // it is already checked here
-            reason = String::new();
-        }
-
-        if !cacheable
-            && fixcontrol::get_bool_with_default(
-                &vars.state.optimizer_fix_control,
-                fixcontrol::Fix49736,
-                false,
-            )
-        {
-            vars.stmt_ctx().append_warning(Error::plain(format!(
-                "force plan-cache: may use risky cached plan: {reason}"
-            )));
-            cacheable = true;
-            reason = String::new();
-        }
-
-        if !cacheable {
-            vars.stmt_ctx()
-                .append_warning(Error::plain(format!("skip prepared plan-cache: {reason}")));
-        }
+    let (mut cacheable, mut reason, warnings) =
+        prepare_cacheability(vars, is_prep_stmt, &prepared.stmt, Some(is))?;
+    for w in warnings {
+        vars.stmt_ctx().append_warning(w);
     }
 
     // For prepared statements like `prepare st from 'select * from t where a<?'`,

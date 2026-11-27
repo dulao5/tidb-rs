@@ -182,7 +182,7 @@ const _: () = {
 /// (`InfoSchema.TableByName`, which refills the cache), so that the synchronous planner
 /// finds them there (D06.3 spec §11.2). Errors are left to the planner's own lookup.
 // glue: the table loads before planning (D06.3 spec §11.2)
-fn load_stmt_tables(
+pub fn load_stmt_tables(
     sctx: &SessCtx,
     stmt: &ast::Stmt,
 ) -> impl std::future::Future<Output = ()> + Send + use<> {
