@@ -179,6 +179,11 @@ enum Answer {
     Rows,
     /// A Go-ported error (1054).
     GoError,
+    /// The error distsql's select result makes of a coprocessor response whose
+    /// `SelectResponse.error` TiKV set: `ClassTiKV.Synthesize(code, msg)`.
+    CopError(i32, &'static str),
+    /// A plain Go error (`errors.New`), not a `*terror.Error`.
+    PlainError(&'static str),
     /// The 1235 of `tidb_rc_read_check_ts` (sessiontxn, N11 D11): TiDB's "not supported",
     /// not a boundary stub.
     RcReadCheckTsNotSupported,
@@ -239,10 +244,12 @@ impl FakeNew {
                     warnings: 2,
                 }))
             }
-            Answer::GoError => Err(errors::normalize(
-                "Unknown column 'x' in 'field list'",
-                [errors::mysql_error_code(1054)],
-            )),
+            Answer::GoError => Err(tidb_base::dbterror::plannererrors::ErrUnknownColumn
+                .gen_with_stack_by_args(vec!["x".into(), "field list".into()])),
+            Answer::CopError(code, msg) => {
+                Err(tidb_base::dbterror::ClassTiKV.synthesize(code, msg))
+            }
+            Answer::PlainError(msg) => Err(errors::new(msg)),
             Answer::RcReadCheckTsNotSupported => {
                 Err(tidb_sessiontxn::isolation::err_rc_read_check_ts_not_supported())
             }
@@ -677,8 +684,77 @@ fn go_ported_error_is_not_a_fallback() {
     let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     script.lock().unwrap().answer = Some(Answer::GoError);
     let e = block_on(r.query(&mut p, POINT)).unwrap_err();
-    assert_eq!(e.code, 1054);
+    assert_eq!(
+        e,
+        SqlError {
+            code: 1054,
+            state: "42S22",
+            message: "Unknown column 'x' in 'field list'".into(),
+        }
+    );
     assert!(!p.log.iter().any(|l| l.starts_with("run")));
+}
+
+/// A coprocessor error TiKV returned (a pushed-down `id + 9223372036854775807 > 0`
+/// overflowing) reaches the client as Go's `clientConn.writeError` sends it: TiKV's code
+/// and message, and the SQLSTATE Go's `MySQLState` table gives the code (`22003` for
+/// `ErrDataOutOfRange`, not `HY000`). A code `ClassTiKV` did not register becomes
+/// `ErrUnknown` (`terror.ToSQLError`), as does a plain Go error.
+#[test]
+fn new_stack_errors_get_go_code_sqlstate_and_message() {
+    const OVERFLOW: &str = "BIGINT value is out of range in '(1 + 9223372036854775807)'";
+    let cases = [
+        (
+            Answer::CopError(1690, OVERFLOW),
+            SqlError {
+                code: 1690,
+                state: "22003",
+                message: OVERFLOW.into(),
+            },
+        ),
+        (
+            Answer::CopError(1365, "Division by 0"),
+            SqlError {
+                code: 1365,
+                state: "22012",
+                message: "Division by 0".into(),
+            },
+        ),
+        (
+            Answer::CopError(1406, "Data Too Long, field len 3"),
+            SqlError {
+                code: 1105,
+                state: "HY000",
+                message: "Data Too Long, field len 3".into(),
+            },
+        ),
+        (
+            Answer::PlainError("other error: region unavailable"),
+            SqlError {
+                code: 1105,
+                state: "HY000",
+                message: "other error: region unavailable".into(),
+            },
+        ),
+    ];
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
+        for (answer, want) in &cases {
+            let mut p = poc();
+            let (mut r, script) = scripted(mode, &p);
+            script.lock().unwrap().answer = Some(answer.clone());
+            let e = block_on(r.query(&mut p, POINT)).unwrap_err();
+            assert_eq!(&e, want, "{mode:?} {answer:?}");
+            assert_eq!(
+                e.to_string(),
+                format!("ERROR {} ({}): {}", want.code, want.state, want.message)
+            );
+            assert!(
+                !p.log.iter().any(|l| l.starts_with("run")),
+                "{mode:?}: no fallback"
+            );
+            assert_eq!(r.last_stmt().engine, Engine::New);
+        }
+    }
 }
 
 /// `tidb_rc_read_check_ts` is rejected by the new stack with a real 1235 (N11 D11,
@@ -1552,8 +1628,17 @@ fn blocked_after_open_is_an_error_not_a_fallback() {
         let (mut r, script) = scripted(mode, &p);
         script.lock().unwrap().answer = Some(Answer::BlockedAfterOpen("D12.2"));
         let e = block_on(r.query(&mut p, POINT)).unwrap_err();
-        assert_eq!(e.code, 1235, "{mode:?}");
-        assert!(e.message.contains("blocked-by:D12.2"), "{}", e.message);
+        assert_eq!(
+            e,
+            SqlError {
+                code: 1235,
+                state: "42000",
+                message: "This version of TiDB doesn't yet support 'something after the \
+                          executors opened (blocked-by:D12.2)'"
+                    .into(),
+            },
+            "{mode:?}"
+        );
         assert!(
             !p.log.iter().any(|l| l.starts_with("run")),
             "{mode:?}: no fallback"
