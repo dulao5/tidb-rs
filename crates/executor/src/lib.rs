@@ -29,12 +29,14 @@
 pub mod adapter;
 pub mod aggfuncs;
 pub mod aggregate;
+pub mod analyze_utils;
 #[cfg(test)]
 mod basic_executors_test;
 pub mod builder;
 pub mod compiler;
 pub mod consistency;
 pub mod detach;
+pub mod distsql;
 pub mod exec;
 #[cfg(test)]
 mod executor_required_rows_test;

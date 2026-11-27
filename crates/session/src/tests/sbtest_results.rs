@@ -443,41 +443,83 @@ fn constant_and_empty_results() {
     }
 }
 
-/// Ranges over the primary key never return rows on the new stack yet: they need the table
-/// reader (D12.1), so they fall back before any executor opened, as text queries and as
-/// prepared statements, also when the plan cache holds the plan of an earlier EXECUTE with
-/// other parameters. In the first port the prepared form returned 0 rows in strict mode for
-/// `BETWEEN -100 AND 50` (Go: 50) and for the full `BIGINT` range (Go: 100): every parameter
-/// marker had order 0 (issue #352), so `BETWEEN ? AND ?` read the first parameter twice and
-/// was planned as a point get on it; the markers are numbered by position since #354, and
-/// the range is planned as a range again. Go's rows for each range are the ids in it.
+/// Ranges over the primary key now run end-to-end on the new stack (`TableReaderExecutor` +
+/// `distsql` + `SortExec` / `TopNExec` / `LimitExec` / `SelectionExec` / `ProjectionExec`),
+/// as text queries and as prepared statements (both plan cache miss and plan cache hit with
+/// rebuilt ranges), verifying exact rows AND exact column metadata (names, types, flen,
+/// decimal, flags, charset) matching Go v8.5.8.
 #[test]
-fn ranges_fall_back_before_any_executor_opened() {
+fn ranges_run_on_new_stack_with_exact_rows_and_column_metadata() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _enter = rt.enter();
     let _serial = PREPARED_COUNT.lock();
     let (_store, mut s) = sysbench_cached_session();
+    let expected_c_rows = |lo: i64, hi: i64| -> Vec<Vec<String>> {
+        let start = lo.max(1);
+        let end = hi.min(100);
+        if start > end {
+            return Vec::new();
+        }
+        (start..=end).map(|id| vec![format!("c{id}")]).collect()
+    };
     let ranges = [(1, 10), (-100, 50), (i64::MIN, i64::MAX), (5, 104), (1, 10)];
     for (lo, hi) in ranges {
         let sql = format!("SELECT c FROM sbtest1 WHERE id BETWEEN {lo} AND {hi}");
-        let before = s.executed_stmts();
-        let r = run_text(&mut s, &sql);
-        assert_eq!(assert_falls_back(&s, &sql, before, r), "D12.1");
+        let (cols, rows) = run_text(&mut s, &sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        assert_eq!(cols, vec![col_c()], "{sql}");
+        assert_eq!(rows, expected_c_rows(lo, hi), "{sql}");
     }
     let sql = "SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ?";
     let info = block_on(s.prepare_stmt(sql)).unwrap();
-    assert_eq!(
-        info.fields.iter().map(col_of).collect::<Vec<_>>(),
-        vec![col_c()]
-    );
-    for (lo, hi) in ranges {
+    let prepared_cols: Vec<Col> = info.fields.iter().map(col_of).collect();
+    assert_eq!(prepared_cols, vec![col_c()]);
+    for (idx, (lo, hi)) in ranges.into_iter().enumerate() {
         let what = format!("{sql} ({lo}, {hi})");
-        let before = s.executed_stmts();
-        let r = run_prepared(
+        let (cols, rows) = run_prepared(
             &mut s,
             info.stmt_id,
             vec![new_int_datum(lo), new_int_datum(hi)],
+        )
+        .unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(
+            s.vars().found_in_plan_cache,
+            idx > 0,
+            "{what}: FoundInPlanCache"
         );
-        assert_eq!(assert_falls_back(&s, &what, before, r), "D12.1");
+        assert_eq!(cols, prepared_cols, "{what}");
+        assert_eq!(rows, expected_c_rows(lo, hi), "{what}");
     }
+    s.drop_prepared_stmt(info.stmt_id).unwrap();
+
+    // ORDER BY c (Sort > TableReader > TableRangeScan)
+    let order_sql = "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 12 ORDER BY c";
+    let (cols, rows) = run_text(&mut s, order_sql).unwrap();
+    assert_eq!(cols, vec![col_c()]);
+    let mut want_ordered: Vec<Vec<String>> = (1..=12).map(|id| vec![format!("c{id}")]).collect();
+    want_ordered.sort();
+    assert_eq!(rows, want_ordered);
+
+    // ORDER BY id DESC LIMIT 5 (Limit > TableReader > Limit > TableFullScan desc)
+    let desc_sql = "SELECT id, c FROM sbtest1 ORDER BY id DESC LIMIT 5";
+    let (cols, rows) = run_text(&mut s, desc_sql).unwrap();
+    assert_eq!(cols, vec![col_id(), col_c()]);
+    let want_desc: Vec<Vec<String>> = (96..=100)
+        .rev()
+        .map(|id| vec![id.to_string(), format!("c{id}")])
+        .collect();
+    assert_eq!(rows, want_desc);
+
+    // Full table scan
+    let full_sql = "SELECT id, c FROM sbtest1";
+    let (cols, rows) = run_text(&mut s, full_sql).unwrap();
+    assert_eq!(cols, vec![col_id(), col_c()]);
+    assert_eq!(rows.len(), 100);
+    assert_eq!(rows[0], vec!["1".to_owned(), "c1".to_owned()]);
+    assert_eq!(rows[99], vec!["100".to_owned(), "c100".to_owned()]);
 }
 
 /// `SUM(k)` over a range (sysbench's sum range) builds the logical aggregation (D09.4 part A)

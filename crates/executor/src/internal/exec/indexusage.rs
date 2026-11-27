@@ -15,6 +15,7 @@ use tidb_model::TableInfo;
 ///
 /// `reporter` (`*indexusage.StmtIndexUsageCollector`) and `statsMap`
 /// (`*stmtctx.UsedStatsInfo`) are D11.2's.
+#[derive(Clone)]
 pub struct IndexUsageReporter {
     runtime_stats_coll: Option<Arc<RuntimeStatsColl>>,
 }

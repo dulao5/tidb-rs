@@ -494,6 +494,23 @@ impl BaseExecutorV2 {
         None
     }
 
+    /// Shallow copy of `BaseExecutorV2` without children, used by executor `Detach`
+    /// implementations (`Detach` attaches detached children afterwards).
+    // glue: Go struct copy `*newExec = *e` in executor Detach
+    pub fn clone_without_children(&self) -> BaseExecutorV2 {
+        BaseExecutorV2 {
+            meta: ExecutorMeta {
+                schema: self.meta.schema.clone(),
+                children: Vec::new(),
+                ret_field_types: Arc::clone(&self.meta.ret_field_types),
+                id: self.meta.id,
+            },
+            stats: self.stats.clone(),
+            alloc: self.alloc.clone(),
+            killer: self.killer.clone(),
+        }
+    }
+
     /// BuildNewBaseExecutorV2 builds a new `BaseExecutorV2` based on the configuration of the
     /// current base executor. It's used to build a new sub-executor from an existing executor.
     /// For example, the `IndexLookUpExecutor` will use this function to build

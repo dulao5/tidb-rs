@@ -16,10 +16,14 @@ use std::sync::Arc;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::gostd::math;
+use tidb_sessionctx::variable::session::SessionVars;
 use tidb_statistics::HistColl;
 
 use crate::base::{PhysicalKind, PhysicalPlan};
-use crate::core::physical_plans::{PhysicalIndexReader, PhysicalIndexScan, PhysicalTableScan};
+use crate::cardinality::row_size::get_avg_row_size_with_vars;
+use crate::core::physical_plans::{
+    PhysicalIndexReader, PhysicalIndexScan, PhysicalTableReader, PhysicalTableScan,
+};
 use crate::core::point_get_plan::PointGetPlan;
 use crate::planctx::PlanCtx;
 use crate::util::costusage::CostFlagUseTrueCardinality;
@@ -145,5 +149,23 @@ impl PhysicalIndexReader {
             false,
         );
         index_plan.stats_count() * row_size
+    }
+}
+
+impl PhysicalTableReader {
+    /// GetNetDataSize calculates the estimated total data size fetched from storage.
+    // go: PhysicalTableReader.GetNetDataSize L1 [M-CTX]
+    pub fn get_net_data_size(&self, vars: &SessionVars) -> f64 {
+        let table_plan = self
+            .table_plan
+            .as_deref()
+            .expect("runtime error: invalid memory address or nil pointer dereference");
+        let default_coll = HistColl::default();
+        let tbl_stats = get_tbl_stats(table_plan)
+            .map(Arc::as_ref)
+            .unwrap_or(&default_coll);
+        let row_size =
+            get_avg_row_size_with_vars(vars, tbl_stats, &table_plan.schema().columns, false, false);
+        table_plan.stats_count() * row_size
     }
 }

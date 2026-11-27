@@ -256,8 +256,7 @@ impl Storage for MockStore {
         Arc::new(MockSnapshot(Arc::clone(&self.rows)))
     }
     fn get_client(&self) -> Arc<dyn Client> {
-        // The planning context takes the store's client (GetPlanCtx); nothing sends with it.
-        Arc::new(MockClient)
+        Arc::new(MockClient(Arc::clone(&self.rows)))
     }
     fn close(&self) -> Result<(), Error> {
         Ok(())
@@ -774,16 +773,14 @@ fn every_fallback_point_restores_the_session() {
             assert_eq!(blocked(&e), Some("D02.2"));
             "D02.2"
         }),
-        ("after Compile (executor builder stub)", |s| {
-            // The statement is planned (spec §9.2); building its table reader (the read
-            // executors, D12.1) is a boundary, before any executor opened. A statement
-            // without a table no longer stops in the builder: `SELECT 1` and `ORDER BY
-            // RAND()` over a dual table run on the basic executors (D12.2) and the sort
-            // executors (D12.5), so this point runs on the sysbench schema.
-            let sql = "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10";
+        ("after Compile (planner boundary stub)", |s| {
+            // `SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10` now runs end-to-end on the
+            // new stack (D12.1 Part 2A TableReader); use an aggregate query that stops in
+            // logical optimization (D09.13 BuildKeySolver) before any executor opens.
+            let sql = "SELECT COUNT(*) FROM sbtest1 WHERE id BETWEEN 1 AND 10";
             let e = block_on(s.execute_stmt(parse(sql), sql)).err().unwrap();
-            assert_eq!(blocked(&e), Some("D12.1"), "{e:?}");
-            "D12.1"
+            assert_eq!(blocked(&e), Some("D09.13"), "{e:?}");
+            "D09.13"
         }),
         ("after the warm-up (TSO pending)", |s| {
             let _ = compile(s, "SELECT a FROM t", 1);
@@ -1656,86 +1653,120 @@ fn assert_falls_back<T>(s: &Session, what: &str, before: u64, r: Result<T, Error
     block.to_owned()
 }
 
-/// Range scans and `ORDER BY ... LIMIT` over the sbtest table are planned to the end
-/// (`physicalOptimize` resolves the column indices of the whole plan, D10.9) and still fall
-/// back where `Exec` builds the first executor that is not ported yet, before any executor
-/// opened: the table reader (D12.1); the sort and top-n executors (D12.5) and the limit,
-/// selection and projection executors (D12.2) are ported and build their child first, so a
-/// statement with one stops below it;
-/// as text queries and as prepared statements. A plan whose schemas differ from
-/// Go's would end in a plain error (1105) from `ResolveIndices` here instead of a fallback.
-/// The stop of each statement is pinned: a statement that starts to run, or stops
-/// elsewhere, fails here.
+/// Range scans and `ORDER BY ... LIMIT` over the sbtest table now execute end-to-end on the
+/// new stack (D12.1 Part 2A `TableReaderExecutor` + D07.3 `distsql` + D12.2/D12.5 root
+/// operators) over the in-memory coprocessor `MockStore`, both as text queries and as
+/// prepared statements (including plan cache hits on the second EXECUTE).
 #[test]
-fn range_and_order_by_limit_queries_still_fall_back() {
+fn range_and_order_by_limit_queries_run_on_new_stack() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _enter = rt.enter();
     use tidb_types::datum::new_int_datum;
     let _serial = PREPARED_COUNT.lock();
     let store = MockStore::new(10);
+    for id in 1..=10 {
+        put_row(&store, 110, id, 2, &format!("c{id:02}"));
+    }
     let mut s = sbtest_session(&store);
-    let text = [
-        ("SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10", "D12.1"),
+    let text_cases: [(&str, Vec<String>); 4] = [
         (
-            "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 10 ORDER BY c",
-            "D12.1",
+            "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 5",
+            (1..=5).map(|i| format!("c{i:02}")).collect(),
         ),
-        ("SELECT c FROM sbtest1 ORDER BY id LIMIT 5", "D12.1"),
+        (
+            "SELECT c FROM sbtest1 WHERE id BETWEEN 1 AND 5 ORDER BY c",
+            (1..=5).map(|i| format!("c{i:02}")).collect(),
+        ),
+        (
+            "SELECT c FROM sbtest1 ORDER BY id LIMIT 5",
+            (1..=5).map(|i| format!("c{i:02}")).collect(),
+        ),
         (
             "SELECT id, c FROM sbtest1 WHERE id BETWEEN 1 AND 10 ORDER BY c LIMIT 3",
-            "D12.1",
+            (1..=3).map(|i| format!("c{i:02}")).collect(),
         ),
     ];
-    for (sql, stop) in text {
-        let before = s.executed_stmts();
-        let r = block_on(s.execute_stmt(parse(sql), sql));
-        assert_eq!(assert_falls_back(&s, sql, before, r), stop, "{sql}");
+    for (sql, want_c) in text_cases {
+        let mut rs = block_on(s.execute_stmt(parse(sql), sql))
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+            .expect("a result set");
+        let fields = rs.fields(&s).unwrap();
+        let c_idx = fields.len() - 1;
+        let mut chk = rs.new_chunk().unwrap();
+        let mut got = Vec::new();
+        loop {
+            block_on(rs.next(&mut s, &mut chk)).unwrap();
+            if chk.num_rows() == 0 {
+                break;
+            }
+            for i in 0..chk.num_rows() {
+                got.push(String::from_utf8_lossy(chk.get_row(i).get_string(c_idx)).into_owned());
+            }
+        }
+        block_on(rs.close(&mut s)).unwrap();
+        assert!(s.is_idle(), "{sql}: {}", s.state_snapshot());
+        assert_eq!(got, want_c, "{sql}");
     }
-    // The prepared ranges stop at the table reader like the text queries (D12.1), below the
-    // sort and top-n executors. Before #352 was fixed both markers read the first
-    // parameter, the range was a point and the point get needed a projection above it,
-    // which stopped first while the projection executor was a stub (D12.2); with the
-    // projection ported that point get ran (see `sbtest_results`).
     let prepared = [
-        ("SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ?", 2, "D12.1"),
+        ("SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ?", 2),
         (
             "SELECT c FROM sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c",
             2,
-            "D12.1",
         ),
         (
             "SELECT id, c FROM sbtest1 WHERE id BETWEEN ? AND ? ORDER BY c LIMIT 3",
             2,
-            "D12.1",
         ),
-        (
-            "SELECT c FROM sbtest1 WHERE id > ? ORDER BY id LIMIT 5",
-            1,
-            "D12.1",
-        ),
+        ("SELECT c FROM sbtest1 WHERE id > ? ORDER BY id LIMIT 5", 1),
     ];
-    for (sql, n, stop) in prepared {
+    for (sql, n) in prepared {
         let info = block_on(s.prepare_stmt(sql)).unwrap();
-        // Twice: the second EXECUTE may meet what the first one left in the plan cache.
         for round in 1..=2 {
-            let what = format!("EXECUTE {sql} (round {round})");
             let params = (0..n).map(|i| new_int_datum(1 + 9 * i)).collect();
-            let before = s.executed_stmts();
-            let r = block_on(s.execute_prepared_stmt(info.stmt_id, params));
-            assert_eq!(assert_falls_back(&s, &what, before, r), stop, "{what}");
+            let mut rs = block_on(s.execute_prepared_stmt(info.stmt_id, params))
+                .unwrap_or_else(|e| panic!("EXECUTE {sql} (round {round}): {e}"))
+                .expect("a result set");
+            let mut chk = rs.new_chunk().unwrap();
+            let mut count = 0usize;
+            loop {
+                block_on(rs.next(&mut s, &mut chk)).unwrap();
+                if chk.num_rows() == 0 {
+                    break;
+                }
+                count += chk.num_rows();
+            }
+            block_on(rs.close(&mut s)).unwrap();
+            assert!(s.is_idle());
+            assert!(count > 0, "EXECUTE {sql} (round {round}): expected rows");
         }
         s.drop_prepared_stmt(info.stmt_id).unwrap();
     }
-    // A parameter marker in LIMIT prepares on the new stack; EXECUTE falls back at the
-    // table reader executor (D12.1).
+    // Parameter marker in LIMIT executes on the new stack.
     let sql = "SELECT c FROM sbtest1 ORDER BY id LIMIT ?";
     let info = block_on(s.prepare_stmt(sql)).unwrap();
     for round in 1..=2 {
-        let what = format!("EXECUTE {sql} (round {round})");
-        let before = s.executed_stmts();
-        let r = block_on(s.execute_prepared_stmt(info.stmt_id, vec![new_int_datum(5)]));
-        assert_eq!(assert_falls_back(&s, &what, before, r), "D12.1", "{what}");
+        let mut rs = block_on(s.execute_prepared_stmt(info.stmt_id, vec![new_int_datum(5)]))
+            .unwrap_or_else(|e| panic!("EXECUTE {sql} (round {round}): {e}"))
+            .expect("a result set");
+        let mut chk = rs.new_chunk().unwrap();
+        let mut count = 0usize;
+        loop {
+            block_on(rs.next(&mut s, &mut chk)).unwrap();
+            if chk.num_rows() == 0 {
+                break;
+            }
+            count += chk.num_rows();
+        }
+        block_on(rs.close(&mut s)).unwrap();
+        assert!(s.is_idle());
+        assert_eq!(count, 5, "EXECUTE {sql} (round {round})");
     }
     s.drop_prepared_stmt(info.stmt_id).unwrap();
-    assert_eq!(s.executed_stmts(), 0, "no statement opened an executor");
+    assert!(s.executed_stmts() > 0);
 }
 
 /// What an EXECUTE of a prepared statement did: the rows `(id, c)` it returned when it ran
@@ -1802,38 +1833,28 @@ fn prepared_statement_markers_read_their_own_parameters() {
     };
     type Round = (Vec<Datum>, Vec<(i64, String)>, Option<&'static str>, bool);
     let cases: Vec<(&str, Vec<Round>)> = vec![
-        // A table range scan [3, 7], then [2, 9] (Go: TableReader > TableRangeScan); the table
-        // reader is not ported (D12.1), so both fall back; the second is a plan cache hit.
+        // A table range scan [3, 7], then [2, 9] (Go: TableReader > TableRangeScan); both now
+        // run end-to-end on the new stack, and the second is a plan cache hit.
         (
             "SELECT id, c FROM sbtest1 WHERE id BETWEEN ? AND ?",
             vec![
-                (vec![int(3), int(7)], rows(3..=7), Some("D12.1"), false),
-                (vec![int(2), int(9)], rows(2..=9), Some("D12.1"), true),
+                (vec![int(3), int(7)], rows(3..=7), None, false),
+                (vec![int(2), int(9)], rows(2..=9), None, true),
             ],
         ),
         (
             "SELECT id, c FROM sbtest1 WHERE id >= ? AND id <= ?",
             vec![
-                (vec![int(3), int(7)], rows(3..=7), Some("D12.1"), false),
-                (vec![int(2), int(9)], rows(2..=9), Some("D12.1"), true),
+                (vec![int(3), int(7)], rows(3..=7), None, false),
+                (vec![int(2), int(9)], rows(2..=9), None, true),
             ],
         ),
         // Markers not all in the range: the third parameter is the upper bound.
         (
             "SELECT id, c FROM sbtest1 WHERE c = ? AND id BETWEEN ? AND ?",
             vec![
-                (
-                    vec![str("c5"), int(3), int(7)],
-                    rows(5..=5),
-                    Some("D12.1"),
-                    false,
-                ),
-                (
-                    vec![str("c8"), int(2), int(9)],
-                    rows(8..=8),
-                    Some("D12.1"),
-                    true,
-                ),
+                (vec![str("c5"), int(3), int(7)], rows(5..=5), None, false),
+                (vec![str("c8"), int(2), int(9)], rows(8..=8), None, true),
             ],
         ),
         // Two equal conditions on the handle: the same value is a point get of that row,
@@ -1919,15 +1940,13 @@ fn execute_reads_the_parameters_through_the_session_expression_context() {
                 );
                 assert_eq!(s.executed_stmts(), 0, "{text}");
             }
-            // `id > NULL` is folded to a table dual: the Projection over it runs (D12.2,
-            // VS1-35) and returns an empty result set.
+            // With TableReaderExecutor (D12.1 Part 2A), `SELECT c FROM sbtest1 WHERE id > ?`
+            // runs to completion on the new stack (empty table here, so 0 rows).
             Ok(rs) => {
-                assert_eq!(
-                    text, "NULL",
-                    "only the NULL parameter plans to a table dual"
-                );
                 let mut rs = rs.expect("rows");
-                assert_eq!(drain(&mut s, &mut rs), Vec::<i64>::new(), "{text}");
+                let mut chk = rs.new_chunk().unwrap();
+                block_on(rs.next(&mut s, &mut chk)).unwrap();
+                assert_eq!(chk.num_rows(), 0, "{text}");
                 block_on(rs.close(&mut s)).unwrap();
             }
         }
@@ -2130,12 +2149,13 @@ fn plan_replayer_capture_records_the_table_stats_and_goes_on() {
     s.vars_mut().enable_plan_replayer_capture = true;
     assert!(s.vars().is_plan_replayer_capture_enabled());
     let info = block_on(s.prepare_stmt("SELECT c FROM sbtest1 WHERE id > ?")).unwrap();
-    let e =
+    let mut rs =
         block_on(s.execute_prepared_stmt(info.stmt_id, vec![tidb_types::datum::new_int_datum(1)]))
-            .err()
-            .unwrap();
-    assert_eq!(blocked(&e), Some("D12.1"), "{e}");
-    assert_eq!(s.executed_stmts(), 0);
+            .unwrap()
+            .expect("a result set");
+    let mut chk = rs.new_chunk().unwrap();
+    block_on(rs.next(&mut s, &mut chk)).unwrap();
+    block_on(rs.close(&mut s)).unwrap();
     let sc = s.vars().stmt_ctx();
     assert_eq!(sc.table_stats.len(), 1);
     let stats = sc.table_stats[&110]
@@ -2160,8 +2180,12 @@ fn execute_of_a_prepared_stmt_reaches_the_planner() {
     let _serial = PREPARED_COUNT.lock();
     let store = MockStore::new(10);
     let mut s = sbtest_session(&store);
+    // Prepare under default settings, then switch to cost_model_version=1 (EXC.B) before
+    // EXECUTE so EXECUTE reaches physical planning and falls back, exercising checkpoint /
+    // restore now that TableReader executes `SELECT c FROM sbtest1 WHERE id > ?`.
     let sql = "SELECT c FROM sbtest1 WHERE id > ?";
     let info = block_on(s.prepare_stmt(sql)).unwrap();
+    s.vars_mut().cost_model_version = 1;
     s.vars().stmt_ctx().append_warning(Error::plain("earlier"));
     let before = s.state_snapshot();
     let cp = s.checkpoint();
@@ -2169,10 +2193,7 @@ fn execute_of_a_prepared_stmt_reaches_the_planner() {
         block_on(s.execute_prepared_stmt(info.stmt_id, vec![tidb_types::datum::new_int_datum(1)]))
             .err()
             .unwrap();
-    assert!(
-        PHYSICAL_BOUNDARIES.contains(&blocked(&e).unwrap_or_default()),
-        "{e}"
-    );
+    assert_eq!(blocked(&e), Some("EXC.B"), "{e}");
     let sc = s.vars().stmt_ctx();
     assert!(sc.in_select_stmt);
     assert!(sc.is_read_only, "Compile ran planner.IsReadOnly");
@@ -2230,17 +2251,354 @@ fn execute_of_a_prepared_stmt_reaches_the_planner() {
 
 /// The coprocessor client of [`MockStore`]: the planner keeps it in the planning context;
 /// no test sends a request.
-struct MockClient;
+/// In-memory coprocessor client over [`MockRows`]: decodes `tipb::DagRequest`, scans matching
+/// key ranges from `MockStore.rows`, executes pushed-down `TableScan` / `Selection` / `TopN`
+/// / `Limit`, and encodes the result as a `tipb::SelectResponse` (`TypeChunk` or
+/// `TypeDefault`). Used by session integration tests (`sbtest_results`, range queries).
+struct MockClient(MockRows);
+
+struct MockCopSubset(Vec<u8>);
+
+impl tidb_kv::kv::ResultSubset for MockCopSubset {
+    fn get_data(&self) -> &[u8] {
+        &self.0
+    }
+    fn get_start_key(&self) -> &Key {
+        static EMPTY: Key = Key(Vec::new());
+        &EMPTY
+    }
+    fn mem_size(&self) -> i64 {
+        self.0.len() as i64
+    }
+    fn resp_time(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+}
+
+struct MockCopResponse {
+    data: Option<Vec<u8>>,
+}
+
+impl tidb_kv::kv::Response for MockCopResponse {
+    fn next<'a>(
+        &'a mut self,
+        _: &'a tidb_kv::Context,
+    ) -> KvFuture<'a, Option<Box<dyn tidb_kv::kv::ResultSubset>>> {
+        let data = self.data.take();
+        Box::pin(async move {
+            Ok(data.map(|d| Box::new(MockCopSubset(d)) as Box<dyn tidb_kv::kv::ResultSubset>))
+        })
+    }
+    fn close(&mut self) -> Result<(), Error> {
+        self.data = None;
+        Ok(())
+    }
+}
+
+fn tipb_col_to_field_type(col: &tipb::ColumnInfo) -> tidb_parser::types::FieldType {
+    let mut ft = tidb_types::field_type::new_field_type(col.get_tp() as u8);
+    ft.set_flag(col.get_flag() as usize);
+    ft.set_flen(col.get_column_len() as isize);
+    ft.set_decimal(col.get_decimal() as isize);
+    if matches!(
+        ft.get_type(),
+        tidb_base::mysql::TypeString
+            | tidb_base::mysql::TypeVarchar
+            | tidb_base::mysql::TypeVarString
+    ) {
+        ft.set_charset("utf8mb4");
+        ft.set_collate("utf8mb4_bin");
+    }
+    ft
+}
+
+fn eval_tipb_expr(expr: &tipb::Expr, row: &[tidb_types::datum::Datum]) -> tidb_types::datum::Datum {
+    use tidb_types::datum::{Datum, new_bytes_datum, new_int_datum, new_uint_datum};
+    match expr.get_tp() {
+        tipb::ExprType::ColumnRef => {
+            let (_, idx) = tidb_codec::number::decode_int(expr.get_val()).unwrap();
+            row[idx as usize].clone()
+        }
+        tipb::ExprType::Int64 => {
+            let (_, v) = tidb_codec::number::decode_int(expr.get_val()).unwrap();
+            new_int_datum(v)
+        }
+        tipb::ExprType::Uint64 => {
+            let (_, v) = tidb_codec::number::decode_uint(expr.get_val()).unwrap();
+            new_uint_datum(v)
+        }
+        tipb::ExprType::String | tipb::ExprType::Bytes => new_bytes_datum(expr.get_val().to_vec()),
+        tipb::ExprType::Null => Datum::default(),
+        tipb::ExprType::ScalarFunc => {
+            let children = expr.get_children();
+            let sig = expr.get_sig();
+            match sig {
+                tipb::ScalarFuncSig::EqInt
+                | tipb::ScalarFuncSig::NeInt
+                | tipb::ScalarFuncSig::LtInt
+                | tipb::ScalarFuncSig::LeInt
+                | tipb::ScalarFuncSig::GtInt
+                | tipb::ScalarFuncSig::GeInt => {
+                    let a = eval_tipb_expr(&children[0], row);
+                    let b = eval_tipb_expr(&children[1], row);
+                    if a.is_null() || b.is_null() {
+                        return Datum::default();
+                    }
+                    let (av, bv) = (a.get_int64(), b.get_int64());
+                    let res = match sig {
+                        tipb::ScalarFuncSig::EqInt => av == bv,
+                        tipb::ScalarFuncSig::NeInt => av != bv,
+                        tipb::ScalarFuncSig::LtInt => av < bv,
+                        tipb::ScalarFuncSig::LeInt => av <= bv,
+                        tipb::ScalarFuncSig::GtInt => av > bv,
+                        tipb::ScalarFuncSig::GeInt => av >= bv,
+                        _ => unreachable!(),
+                    };
+                    new_int_datum(i64::from(res))
+                }
+                tipb::ScalarFuncSig::EqString
+                | tipb::ScalarFuncSig::NeString
+                | tipb::ScalarFuncSig::LtString
+                | tipb::ScalarFuncSig::LeString
+                | tipb::ScalarFuncSig::GtString
+                | tipb::ScalarFuncSig::GeString => {
+                    let a = eval_tipb_expr(&children[0], row);
+                    let b = eval_tipb_expr(&children[1], row);
+                    if a.is_null() || b.is_null() {
+                        return Datum::default();
+                    }
+                    let (av, bv) = (a.get_bytes(), b.get_bytes());
+                    let res = match sig {
+                        tipb::ScalarFuncSig::EqString => av == bv,
+                        tipb::ScalarFuncSig::NeString => av != bv,
+                        tipb::ScalarFuncSig::LtString => av < bv,
+                        tipb::ScalarFuncSig::LeString => av <= bv,
+                        tipb::ScalarFuncSig::GtString => av > bv,
+                        tipb::ScalarFuncSig::GeString => av >= bv,
+                        _ => unreachable!(),
+                    };
+                    new_int_datum(i64::from(res))
+                }
+                tipb::ScalarFuncSig::LogicalAnd => {
+                    let a = eval_tipb_expr(&children[0], row);
+                    let b = eval_tipb_expr(&children[1], row);
+                    let av = !a.is_null() && a.get_int64() != 0;
+                    let bv = !b.is_null() && b.get_int64() != 0;
+                    new_int_datum(i64::from(av && bv))
+                }
+                tipb::ScalarFuncSig::LogicalOr => {
+                    let a = eval_tipb_expr(&children[0], row);
+                    let b = eval_tipb_expr(&children[1], row);
+                    let av = !a.is_null() && a.get_int64() != 0;
+                    let bv = !b.is_null() && b.get_int64() != 0;
+                    new_int_datum(i64::from(av || bv))
+                }
+                other => panic!("MockClient: unsupported ScalarFuncSig {other:?}"),
+            }
+        }
+        other => panic!("MockClient: unsupported ExprType {other:?}"),
+    }
+}
 
 impl Client for MockClient {
     fn send(
         &self,
         _: &tidb_kv::Context,
-        _: &tidb_kv::kv::Request,
+        req: &tidb_kv::kv::Request,
         _: Option<tidb_kv::kv::OptionValue>,
         _: &tidb_kv::kv::ClientSendOption,
     ) -> Box<dyn tidb_kv::kv::Response> {
-        unimplemented!("no test sends a coprocessor request")
+        use protobuf::Message;
+        let mut dag = tipb::DagRequest::default();
+        dag.merge_from_bytes(&req.data).expect("valid DAGRequest");
+        let execs = dag.get_executors();
+        let scan = execs[0].get_tbl_scan();
+        let cols = scan.get_columns();
+        let mut col_fts: Vec<tidb_parser::types::FieldType> =
+            cols.iter().map(tipb_col_to_field_type).collect();
+        let pk_col_ids: Vec<i64> = cols
+            .iter()
+            .filter(|c| c.get_pk_handle())
+            .map(|c| c.get_column_id())
+            .collect();
+        let decoder_cols: Vec<tidb_tablecodec::rowcodec::decoder::ColInfo> = cols
+            .iter()
+            .zip(col_fts.iter())
+            .map(|(c, ft)| tidb_tablecodec::rowcodec::decoder::ColInfo {
+                id: c.get_column_id(),
+                ft: Arc::new(ft.clone()),
+                ..Default::default()
+            })
+            .collect();
+        let decoder = tidb_tablecodec::rowcodec::decoder::new_chunk_decoder(
+            decoder_cols,
+            pk_col_ids,
+            None,
+            None,
+        );
+
+        let key_ranges = req
+            .key_ranges
+            .as_ref()
+            .map(|krs| krs.append_self_to(Vec::new()))
+            .unwrap_or_default();
+        let mut matched: Vec<(Vec<u8>, Vec<u8>)> = {
+            let store = self.0.lock();
+            store
+                .iter()
+                .filter(|(k, _)| {
+                    key_ranges.iter().any(|kr| {
+                        k.as_slice() >= kr.start_key.0.as_slice()
+                            && k.as_slice() < kr.end_key.0.as_slice()
+                    })
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        if req.desc {
+            matched.sort_by(|a, b| b.0.cmp(&a.0));
+        } else {
+            matched.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+
+        let mut rows: Vec<Vec<tidb_types::datum::Datum>> = Vec::with_capacity(matched.len());
+        let mut tmp_chk = tidb_chunk::chunk::new_chunk_with_capacity(&col_fts, 1);
+        for (k, v) in &matched {
+            let handle = tidb_tablecodec::decode_row_key(&tidb_kv::key::Key(k.clone())).unwrap();
+            tmp_chk.reset();
+            decoder
+                .decode_to_chunk(v, 0, Some(&handle), &mut tmp_chk)
+                .unwrap();
+            let row = tmp_chk.get_row(0);
+            let datums = col_fts
+                .iter()
+                .enumerate()
+                .map(|(i, ft)| row.get_datum(i, ft))
+                .collect();
+            rows.push(datums);
+        }
+
+        for exec in &execs[1..] {
+            match exec.get_tp() {
+                tipb::ExecType::TypeSelection => {
+                    let conds = exec.get_selection().get_conditions();
+                    rows.retain(|r| {
+                        conds.iter().all(|c| {
+                            let v = eval_tipb_expr(c, r);
+                            !v.is_null() && v.get_int64() != 0
+                        })
+                    });
+                }
+                tipb::ExecType::TypeProjection => {
+                    let exprs = exec.get_projection().get_exprs();
+                    rows = rows
+                        .iter()
+                        .map(|r| exprs.iter().map(|e| eval_tipb_expr(e, r)).collect())
+                        .collect();
+                    col_fts = exprs
+                        .iter()
+                        .map(|e| {
+                            if e.has_field_type() {
+                                let pft = e.get_field_type();
+                                let mut ft =
+                                    tidb_types::field_type::new_field_type(pft.get_tp() as u8);
+                                ft.set_flag(pft.get_flag() as usize);
+                                ft.set_flen(pft.get_flen() as isize);
+                                ft.set_decimal(pft.get_decimal() as isize);
+                                if matches!(
+                                    ft.get_type(),
+                                    tidb_base::mysql::TypeString
+                                        | tidb_base::mysql::TypeVarchar
+                                        | tidb_base::mysql::TypeVarString
+                                ) {
+                                    ft.set_charset("utf8mb4");
+                                    ft.set_collate("utf8mb4_bin");
+                                }
+                                ft
+                            } else if e.get_tp() == tipb::ExprType::ColumnRef {
+                                let (_, idx) = tidb_codec::number::decode_int(e.get_val()).unwrap();
+                                col_fts[idx as usize].clone()
+                            } else {
+                                tidb_types::field_type::new_field_type(
+                                    tidb_base::mysql::TypeLonglong,
+                                )
+                            }
+                        })
+                        .collect();
+                }
+                tipb::ExecType::TypeLimit => {
+                    rows.truncate(exec.get_limit().get_limit() as usize);
+                }
+                tipb::ExecType::TypeTopN => {
+                    let topn = exec.get_top_n();
+                    let order_by = topn.get_order_by();
+                    rows.sort_by(|a, b| {
+                        for item in order_by {
+                            let va = eval_tipb_expr(item.get_expr(), a);
+                            let vb = eval_tipb_expr(item.get_expr(), b);
+                            let ord = match (va.is_null(), vb.is_null()) {
+                                (true, true) => std::cmp::Ordering::Equal,
+                                (true, false) => std::cmp::Ordering::Less,
+                                (false, true) => std::cmp::Ordering::Greater,
+                                (false, false) => {
+                                    if va.kind() == tidb_types::datum::KindInt64 {
+                                        va.get_int64().cmp(&vb.get_int64())
+                                    } else {
+                                        va.get_bytes().cmp(vb.get_bytes())
+                                    }
+                                }
+                            };
+                            let ord = if item.get_desc() { ord.reverse() } else { ord };
+                            if ord != std::cmp::Ordering::Equal {
+                                return ord;
+                            }
+                        }
+                        std::cmp::Ordering::Equal
+                    });
+                    rows.truncate(topn.get_limit() as usize);
+                }
+                other => panic!("MockClient: unsupported pushed-down executor {other:?}"),
+            }
+        }
+
+        let out_offsets: Vec<usize> = dag
+            .get_output_offsets()
+            .iter()
+            .map(|&o| o as usize)
+            .collect();
+        let out_fts: Vec<tidb_parser::types::FieldType> =
+            out_offsets.iter().map(|&o| col_fts[o].clone()).collect();
+        let mut resp = tipb::SelectResponse::default();
+        resp.set_encode_type(dag.get_encode_type());
+        if !rows.is_empty() {
+            let mut pb_chunk = tipb::Chunk::default();
+            if dag.get_encode_type() == tipb::EncodeType::TypeChunk {
+                let mut chk = tidb_chunk::chunk::new_chunk_with_capacity(&out_fts, rows.len());
+                for r in &rows {
+                    for (j, &off) in out_offsets.iter().enumerate() {
+                        chk.append_datum(j, &r[off]);
+                    }
+                }
+                let codec = tidb_chunk::codec::new_codec(out_fts);
+                pb_chunk.set_rows_data(codec.encode(&chk));
+            } else {
+                let mut buf = Vec::new();
+                for r in &rows {
+                    for &off in &out_offsets {
+                        tidb_codec::codec::encode_value(
+                            &tidb_base::gostd::time::utc(),
+                            &mut buf,
+                            &[r[off].clone()],
+                        )
+                        .unwrap();
+                    }
+                }
+                pb_chunk.set_rows_data(buf);
+            }
+            resp.mut_chunks().push(pb_chunk);
+        }
+        let bytes = resp.write_to_bytes().unwrap();
+        Box::new(MockCopResponse { data: Some(bytes) })
     }
     fn is_request_type_supported(&self, _: i64, _: i64) -> bool {
         true
@@ -3245,7 +3603,7 @@ fn multi_group_table_reader_fallback_leaves_stmt_ctx_untouched() {
     );
     assert!(block_on(b.build(&mut s.core, Some(plan))).is_none());
     let err = b.err.expect("executor boundary error");
-    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
+    assert_eq!(blocked_by(&err), Some("D07.3"), "{err}");
     assert_eq!(s.vars().stmt_ctx().warning_count(), warnings_before);
     assert_eq!(s.vars().stmt_ctx().related_table_ids, table_ids_before);
     assert_eq!(
@@ -3257,7 +3615,7 @@ fn multi_group_table_reader_fallback_leaves_stmt_ctx_untouched() {
     assert!(s.is_idle(), "{}", s.state_snapshot());
 
     let err = block_on(s.execute_stmt(parse(sql), sql)).err().unwrap();
-    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
+    assert_eq!(blocked_by(&err), Some("D07.3"), "{err}");
     assert!(s.is_idle(), "{}", s.state_snapshot());
 }
 

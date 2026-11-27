@@ -28,6 +28,7 @@ pub mod selection;
 pub mod terror;
 mod terror_registry;
 pub mod tikvutil;
+pub mod timeutil;
 
 pub use errors::Error;
 pub use gofmt::Arg;
