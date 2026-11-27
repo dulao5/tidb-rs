@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::constants::{
     DEFAULT_MAX_ALLOWED_PACKET, DEFAULT_SERVER_VERSION, auth_plugin, capability,
@@ -89,13 +89,14 @@ impl<F: SessionFactory> Server<F> {
         self
     }
 
-    /// Accepts connections until `shutdown` completes, then aborts the remaining connections.
+    /// Accepts connections until `shutdown` completes, then drains and closes remaining connections.
     pub async fn serve(
         &self,
         listener: TcpListener,
         shutdown: impl Future<Output = ()>,
     ) -> io::Result<()> {
-        info!(addr = %listener.local_addr()?, "MySQL protocol server listening");
+        let local_addr = listener.local_addr()?.to_string();
+        tidb_base::log_info!("server is running MySQL protocol", "addr" => &local_addr);
         let mut conns: Vec<JoinHandle<()>> = Vec::new();
         // Finished connection tasks are reaped when the list has doubled since the last reap,
         // so accepting stays amortised O(1) however many connections are open.
@@ -136,7 +137,29 @@ impl<F: SessionFactory> Server<F> {
                 }
             }
         }
-        info!(connections = conns.len(), "shutting down");
+        tidb_base::log_info!("start drain clients");
+        conns.retain(|h| !h.is_finished());
+        if conns.is_empty() {
+            tidb_base::log_info!("all sessions quit in drain wait time");
+        } else {
+            let drain_wait = tokio::time::timeout(Duration::from_secs(5), async {
+                while !conns.is_empty() {
+                    conns.retain(|h| !h.is_finished());
+                    if conns.is_empty() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            if drain_wait.is_ok() {
+                tidb_base::log_info!("all sessions quit in drain wait time");
+            } else {
+                tidb_base::log_info!("timeout waiting all sessions quit");
+            }
+        }
+        // Go server.go:1065 unconditionally calls s.KillAllConnections().
+        tidb_base::log_info!("kill all connections.", "category" => "server");
         for h in &conns {
             h.abort();
         }

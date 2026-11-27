@@ -13,11 +13,9 @@
 //!   §2.4) are not ported.
 
 use std::any::Any;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::FutureExt;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_chunk::ColAlloc;
@@ -286,7 +284,7 @@ impl HashAggFinalWorker {
         let start = Instant::now();
         let wg_guard = DoneGuard(wait_group);
 
-        let res = AssertUnwindSafe(async {
+        let res = tidb_base::panic_guard::catch_unwind_future(async {
             partial_worker_waiter.wait().await;
 
             if self.spill_helper.is_spilled_chunks_io_empty() {
@@ -314,10 +312,10 @@ impl HashAggFinalWorker {
             }
             self.send_final_result().await;
         })
-        .catch_unwind()
         .await;
 
-        self.cleanup(start, res.err(), wg_guard).await;
+        self.cleanup(start, res.err().map(|(p, _)| p), wg_guard)
+            .await;
     }
 
     // go: HashAggFinalWorker.cleanup L2 (async panic recovery send; drops tracked map before Done)

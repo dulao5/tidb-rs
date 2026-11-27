@@ -18,7 +18,9 @@ use std::task::Context;
 use std::task::Poll;
 
 use bytes::Bytes;
+use http_body_util::BodyExt as _;
 use hyper::HeaderMap;
+use hyper::Method;
 use hyper::Request;
 use hyper::Response;
 use hyper::StatusCode;
@@ -34,7 +36,6 @@ use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tracing::debug;
-use tracing::info;
 use tracing::warn;
 
 /// What `/status` reports.
@@ -48,7 +49,13 @@ pub struct StatusInfo {
 /// Serve the status API on `listener` until `shutdown` completes.
 pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Future<Output = ()>) {
     match listener.local_addr() {
-        Ok(addr) => info!(%addr, "status server listening"),
+        Ok(addr) => {
+            let addr_str = addr.to_string();
+            tidb_base::log_info!(
+                "for status and metrics report",
+                "listening on addr" => &addr_str,
+            );
+        }
         Err(e) => warn!(error = %e, "status server address unknown"),
     }
     let info = Arc::new(info);
@@ -75,7 +82,7 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
                     let resp = if crate::rpc::is_grpc(&req) {
                         crate::rpc::serve(req).await
                     } else {
-                        handle(&req, &info)
+                        handle(req, &info).await
                     };
                     Ok::<_, Infallible>(resp)
                 }
@@ -91,20 +98,143 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
     conns.shutdown().await;
 }
 
-fn handle(req: &Request<Incoming>, info: &StatusInfo) -> Response<Body> {
-    match req.uri().path() {
-        "/metrics" => response(
+async fn handle(req: Request<Incoming>, info: &StatusInfo) -> Response<Body> {
+    match (req.method(), req.uri().path()) {
+        (_, "/metrics") => response(
             StatusCode::OK,
             tidb_metrics::encode::CONTENT_TYPE,
             tidb_metrics::gather_text(),
         ),
-        "/status" => response(StatusCode::OK, "application/json", status_json(info)),
-        "/debug/route" => route_trace(req.uri().query()),
+        (_, "/status") => response(StatusCode::OK, "application/json", status_json(info)),
+        (_, "/debug/route") => route_trace(req.uri().query()),
+        (&Method::POST, "/settings") => handle_settings(req).await,
         _ => response(
             StatusCode::NOT_FOUND,
             "text/plain; charset=utf-8",
             "404 page not found\n".to_owned(),
         ),
+    }
+}
+
+/// `POST /settings` with form fields `log_level=<lv>` and/or `tidb_general_log=<0|1|off|on>`
+/// (Go `pkg/server/handler/tikvhandler/tikv_handler.go:418-437`).
+async fn handle_settings(req: Request<Incoming>) -> Response<Body> {
+    const MAX_SETTINGS_BODY: usize = 64 * 1024;
+    let mut raw = Vec::new();
+    let mut body = req.into_body();
+    while let Some(frame) = body.frame().await {
+        match frame {
+            Ok(f) => {
+                if let Some(chunk) = f.data_ref() {
+                    if raw.len().saturating_add(chunk.len()) > MAX_SETTINGS_BODY {
+                        return response(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "text/plain; charset=utf-8",
+                            "settings body too large\n".to_owned(),
+                        );
+                    }
+                    raw.extend_from_slice(chunk);
+                }
+            }
+            Err(e) => {
+                return response(
+                    StatusCode::BAD_REQUEST,
+                    "text/plain; charset=utf-8",
+                    format!("read body failed: {e}\n"),
+                );
+            }
+        }
+    }
+    let form = String::from_utf8_lossy(&raw);
+    let mut handled = false;
+    for pair in form.split('&') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = percent_decode_form(k);
+        let val = percent_decode_form(v);
+        match key.as_str() {
+            "log_level" => {
+                if let Err(e) = tidb_log::set_level(&val) {
+                    return response(
+                        StatusCode::BAD_REQUEST,
+                        "text/plain; charset=utf-8",
+                        format!("{e}\n"),
+                    );
+                }
+                // Keep global config in sync so later `SET GLOBAL tidb_log_file_max_days`
+                // (`replace_logger`) does not revert the dynamic log level.
+                tidb_base::config::update_global_config(|c| c.log.level = val.clone());
+                handled = true;
+            }
+            "tidb_general_log" => {
+                let on = match val.to_ascii_lowercase().as_str() {
+                    "1" | "on" | "true" => true,
+                    "0" | "off" | "false" => false,
+                    _ => {
+                        return response(
+                            StatusCode::BAD_REQUEST,
+                            "text/plain; charset=utf-8",
+                            format!("invalid tidb_general_log value: {val}\n"),
+                        );
+                    }
+                };
+                tidb_sessionctx::variable::tidb_vars::ProcessGeneralLog
+                    .store(on, std::sync::atomic::Ordering::SeqCst);
+                handled = true;
+            }
+            _ => {}
+        }
+    }
+    if handled {
+        response(
+            StatusCode::OK,
+            "text/plain; charset=utf-8",
+            "success\n".to_owned(),
+        )
+    } else {
+        response(
+            StatusCode::BAD_REQUEST,
+            "text/plain; charset=utf-8",
+            "missing log_level or tidb_general_log parameter\n".to_owned(),
+        )
+    }
+}
+
+fn percent_decode_form(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                    out.push((h << 4) | l);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 

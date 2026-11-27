@@ -20,6 +20,10 @@ hyper-util = { version = "0.1", features = ["http1", "http2", "server-auto", "to
 serde_json = { workspace = true }
 # gostd::time::parse_duration for --lease (Go's duration flag syntax).
 tidb-base = { workspace = true }
+# Unified logging, startup banner, version injection, and panic hook (D00.3).
+tidb-log = { workspace = true }
+# Startup override of `version` sysvar via OVERLAY without modifying generated sysvar_data.rs.
+tidb-sessionctx = { workspace = true }
 tidb-distsql = { workspace = true }
 poc-domain = { workspace = true }
 poc-kv = { workspace = true }
@@ -39,10 +43,6 @@ tidb-runtime = { workspace = true }
 tikv-jemallocator = { workspace = true }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tracing = "0.1"
-# "tracing-log": `init()` also installs a LogTracer, so crates that log through the `log` facade
-# (tidb-base terror/config, tidb-types collate/time, tidb-parser gocharset, ...) reach this
-# subscriber. Without it their records were dropped (PR #18 review).
-tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "std", "tracing-log"] }
 
 [dev-dependencies]
 # status.rs tests: an HTTP/2 client for the gRPC routing.

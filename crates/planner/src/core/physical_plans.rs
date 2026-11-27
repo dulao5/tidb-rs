@@ -30,7 +30,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::collections::HashMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -730,7 +730,7 @@ impl PhysicalIndexLookUpReader {
             Ok(p) => p,
             Err(err) => {
                 // This should not happen, but if it happens, we just log a warning and continue to use the original plan.
-                log::warn!("try to push down index lookup failed: {err}");
+                tidb_base::log_warn!("try to push down index lookup failed", "error" => &err);
                 return;
             }
         };
@@ -2264,7 +2264,7 @@ pub fn collect_plan_stats_version(plan: &dyn PhysicalPlan, stats_infos: &mut Has
 /// Go formats the recovered value with `%v`; the panic payload's message is used.
 // go: SafeClone L1 [M-CTX]
 pub fn safe_clone(v: &dyn PhysicalPlan) -> Result<PhysicalPlanRef, Error> {
-    match catch_unwind(AssertUnwindSafe(|| v.clone_plan())) {
+    match tidb_base::panic_guard::catch_unwind_silent(AssertUnwindSafe(|| v.clone_plan())) {
         Ok(r) => r,
         Err(payload) => {
             let msg = if let Some(s) = payload.downcast_ref::<&str>() {

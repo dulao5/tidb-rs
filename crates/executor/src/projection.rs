@@ -16,12 +16,10 @@
 //! - the deferred `recover()` of each goroutine is a `catch_unwind` around the task's loop
 //!   (M-PANIC); an error of a memory tracker's action (Go: a panic) takes the same path.
 
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use async_trait::async_trait;
-use futures::FutureExt;
 use tidb_base::Error;
 use tidb_chunk::chunk::Chunk;
 use tidb_execdetails::execdetails::{
@@ -579,9 +577,9 @@ impl ProjectionInputFetcher {
     // go: projectionInputFetcher.run L2 (the deferred recover is a catch_unwind; no trace region; M-PANIC, M-WG)
     async fn run(mut self, ctx: ExecCtx) -> ProjectionInputFetcher {
         let mut output: Option<OutputRef> = None;
-        let r = AssertUnwindSafe(self.run_loop(&ctx, &mut output))
-            .catch_unwind()
-            .await;
+        let r = tidb_base::panic_guard::catch_unwind_future(self.run_loop(&ctx, &mut output))
+            .await
+            .map_err(|(p, _)| p);
         if let Some(err) = recovered(r) {
             recovery_projection(output.as_ref(), err).await;
         }
@@ -672,9 +670,9 @@ impl ProjectionWorker {
     // go: projectionWorker.run L2 (the deferred recover is a catch_unwind; no trace region; M-PANIC, M-WG)
     async fn run(mut self, _ctx: ExecCtx) -> ProjectionWorker {
         let mut output: Option<OutputRef> = None;
-        let r = AssertUnwindSafe(self.run_loop(&mut output))
-            .catch_unwind()
-            .await;
+        let r = tidb_base::panic_guard::catch_unwind_future(self.run_loop(&mut output))
+            .await
+            .map_err(|(p, _)| p);
         if let Some(err) = recovered(r) {
             recovery_projection(output.as_ref(), err).await;
         }

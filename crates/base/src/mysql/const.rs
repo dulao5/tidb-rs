@@ -47,6 +47,23 @@ pub static ServerVersion: LazyLock<RwLock<String>> = LazyLock::new(|| {
     ))
 });
 
+/// Format a MySQL-compatible server version string (`8.0.11-TiDB-<release_version>`).
+// glue: Go mysql.ServerVersion formatting
+pub fn format_server_version(release_version: &str) -> String {
+    format!(
+        "{}{}{}",
+        mysqlCompatibilityVersion, VersionSeparator, release_version
+    )
+}
+
+/// Update both [`TiDBReleaseVersion`] and [`ServerVersion`] from the resolved release version
+/// (e.g. `v8.5.8+tidb-rs.<7-char-hash>` per ruling R35).
+// glue: Go server startup overrides mysql.TiDBReleaseVersion and mysql.ServerVersion
+pub fn set_version(release_version: &str) {
+    *TiDBReleaseVersion.write() = release_version.to_owned();
+    *ServerVersion.write() = format_server_version(release_version);
+}
+
 /// HasCursorExistsFlag return true if cursor exists indicated by server status.
 // go: HasCursorExistsFlag L1
 pub fn has_cursor_exists_flag(server_status: u16) -> bool {

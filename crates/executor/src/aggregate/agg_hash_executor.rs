@@ -28,7 +28,6 @@
 //! - Failpoints and test-only hook methods (spec §2.4, §6 item 14) are not ported.
 
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::time::Instant;
@@ -36,7 +35,6 @@ use std::time::Instant;
 use allocator_api2::boxed::Box as AllocBox;
 use allocator_api2::vec::Vec as AllocVec;
 use async_trait::async_trait;
-use futures::FutureExt;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_base::mysql;
@@ -920,7 +918,7 @@ impl HashAggExec {
     ) -> (Box<dyn Executor>, mpsc::Receiver<HashAggInput>) {
         let wg_guard = DoneGuard(wait_group);
 
-        let res = AssertUnwindSafe(async {
+        let res = tidb_base::panic_guard::catch_unwind_future(async {
             loop {
                 let input = tokio::select! {
                     _ = wait_finish(&mut finish_rx) => return,
@@ -972,12 +970,11 @@ impl HashAggExec {
                 }
             }
         })
-        .catch_unwind()
         .await;
 
         // Ordered cleanup matching Go's defer (spec §4.5):
         // 1. Recover panic -> send to finalOutputCh.
-        if let Err(payload) = res {
+        if let Err((payload, _)) = res {
             recovery_hash_agg(&final_output_tx, payload).await;
         }
         // 2. Wait for all in-flight chunks to finish in partial workers.

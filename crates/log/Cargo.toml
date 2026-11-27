@@ -1,0 +1,29 @@
+[package]
+name = "tidb-log"
+version = "0.0.0"
+description = "Runtime logging, text/json encoders, file rotation, panic hook, and version banner for tidb-rs (D00.3)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Rank 0 base facade, config types, errors, and gostd float/duration formatters (N0: rank 0 < 1).
+tidb-base = { workspace = true }
+# All external dependencies are already pinned in workspace Cargo.lock (zero new lockfile deps).
+arc-swap = "1"
+base64 = "0.22"
+chrono = { workspace = true, features = ["clock"] }
+flate2 = "1.0"
+itoa = "1"
+# NOTE: enable `kv` ONLY (0 extra deps). Never enable `kv_std` (pulls un-locked `value-bag`).
+log = { version = "0.4", features = ["kv"] }
+parking_lot = "0.12"
+serde_json = { workspace = true }
+slog = { workspace = true }
+slog-global = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+
+[lints]
+workspace = true

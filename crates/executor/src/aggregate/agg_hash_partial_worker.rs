@@ -14,13 +14,11 @@
 //!   §2.4) are not ported; spill-to-disk methods (`prepareForSpill`, `spillDataToDisk`,
 //!   `spillDataToDiskImpl`, `spillRemainingDataToDisk`) belong to Part C (D01.10).
 
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::time::Instant;
 
 use allocator_api2::vec::Vec as AllocVec;
-use futures::FutureExt;
 use tidb_base::Error;
 use tidb_chunk::ColAlloc;
 use tidb_chunk::chunk::Chunk;
@@ -200,16 +198,15 @@ impl HashAggPartialWorker {
         let mut has_error = false;
         let mut need_shuffle = false;
 
-        let res = AssertUnwindSafe(async {
+        let res = tidb_base::panic_guard::catch_unwind_future(async {
             while self
                 .fetch_chunk_and_process(&ctx, &mut has_error, &mut need_shuffle)
                 .await
             {}
         })
-        .catch_unwind()
         .await;
 
-        if let Err(payload) = res {
+        if let Err((payload, _)) = res {
             recovery_hash_agg(&self.global_output_tx, payload).await;
         }
 

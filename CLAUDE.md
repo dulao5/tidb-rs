@@ -80,6 +80,16 @@ file and over any task description.
     `OnGeneralEvent`, `OnConnectionEvent`, `OnParseEvent`, `plugin.Load`/`Init`/`Shutdown`),
     leave `// TODO(audit-plugin #448): Go calls <hook> here (<go-file>:<line>).` at the exact
     spot instead of silently dropping it.
+11. **Runtime logging parity (`specs/D00.3-logging/spec.md`)**: never interpolate structured fields
+    into log message strings (`log::warn!("compile SQL failed: {err}")` is forbidden). Use
+    `tidb_base::log_{debug,info,warn,error,fatal}!` (rank 0, supports string-literal keys with
+    spaces like `"connection ID"`, `"stack trace"`, `"affected rows"`) with Go's exact message
+    literal, level, field key names, and field order. Pass `&tidb_base::Error` directly (never
+    `%err`/`{err}`), `Duration` via `gostd::time::duration_string`, `Bytes`/`Binary` for raw
+    byte/base64 payloads, and `tidb_base::redact::*` where Go redacts. Never call bare
+    `std::panic::catch_unwind` / `FutureExt::catch_unwind` or `println!`/`eprintln!` in layered
+    production code — use `tidb_base::panic_guard::catch_unwind_{silent,capture,future}` (enforced
+    by `scripts/check_log_parity.py` and `scripts/log_parity_ratchet.tsv`).
 
 ## 3. Verify before opening a PR
 

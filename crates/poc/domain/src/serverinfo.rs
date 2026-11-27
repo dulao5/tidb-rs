@@ -42,11 +42,12 @@ pub struct ServerInfo {
     pub disable_rpc: bool,
 }
 
-/// `8.0.11-TiDB-v8.5.8-tidb-rs-<short hash>`: Go parses the part after `-TiDB-` as a
-/// semantic version (pre-release ignored) and `FormatTiDBVersion` splits it at the first `-`.
+/// `8.0.11-TiDB-v8.5.8+tidb-rs.<short hash>` (ruling R35 / owner decision D1 = A1):
+/// uses SemVer build metadata with at most one hyphen so Go `br/pkg/version` and
+/// `infoschema.FormatTiDBVersion` compare it as equal to `8.5.8` (never `< 8.5.8`).
 pub fn version_string() -> String {
     let short = GIT_HASH.get(..7).unwrap_or(GIT_HASH);
-    format!("{MYSQL_VERSION}-TiDB-{TIDB_RELEASE}-tidb-rs-{short}")
+    format!("{MYSQL_VERSION}-TiDB-{TIDB_RELEASE}+tidb-rs.{short}")
 }
 
 /// A fresh DDL id: a random UUIDv4, as Go's `ownerManager` uses.
@@ -158,19 +159,22 @@ mod tests {
         );
     }
 
-    /// The version passes Go's checks: `-TiDB-` present, semver >= 8.4.0 after it (pre-release
-    /// cleared), and `FormatTiDBVersion` gives `<semver>-<rest>`.
+    /// The version passes Go's checks (ruling R35 / D1 = A1): `-TiDB-` present, semver >= 8.4.0
+    /// after it with build metadata `+tidb-rs.<short>` (never a pre-release `< 8.5.8`), and
+    /// `FormatTiDBVersion` keeps `8.5.8+tidb-rs.<short>`.
     #[test]
     fn version_string_satisfies_go_parsers() {
         let v = version_string();
         let rest = &v[v.find("-TiDB-").unwrap() + "-TiDB-".len()..];
         let rest = rest.strip_prefix('v').unwrap();
-        let (core, pre) = rest.split_once('-').unwrap();
+        let (core, meta) = rest.split_once('+').unwrap();
         let nums: Vec<u32> = core.split('.').map(|p| p.parse().unwrap()).collect();
         assert!(nums >= vec![8, 4, 0], "{v}");
-        assert!(pre.starts_with("tidb-rs-"), "{v}");
+        assert!(meta.starts_with("tidb-rs."), "{v}");
+        // At most one hyphen in metadata so FormatTiDBVersion does not truncate prematurely.
+        assert!(meta.matches('-').count() <= 1, "{v}");
         // FormatTiDBVersion: everything after "TiDB-", minus the leading 'v'.
         let formatted = &v[v.find("TiDB-").unwrap() + 5..][1..];
-        assert!(formatted.starts_with("8.5.8-tidb-rs-"), "{formatted}");
+        assert!(formatted.starts_with("8.5.8+tidb-rs."), "{formatted}");
     }
 }

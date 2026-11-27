@@ -13,6 +13,7 @@ futures = { workspace = true }
 getrandom = "0.3"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 sha1 = "0.10"
+tidb-base = { workspace = true }
 tidb-metrics = { workspace = true }
 # N3 runtime: statement admission (Q1) and the ExecPool connections run on.
 tidb-runtime = { workspace = true }

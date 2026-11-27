@@ -19,13 +19,26 @@ pub mod code {
 }
 
 /// An error reported to the client as an ERR packet: MySQL error code, SQLSTATE and message.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Optionally carries the originating [`tidb_base::Error`] so `command dispatched failed`
+/// (`err_str_for_log`) can emit the exact Go RFC code and stack trace (`ErrorStack`).
+#[derive(Clone, Debug)]
 pub struct SqlError {
     pub code: u16,
     /// Five-character SQLSTATE.
     pub state: &'static str,
     pub message: String,
+    /// Optional underlying `tidb_base::Error` preserving RFC prefix & stack trace.
+    pub source_err: Option<tidb_base::Error>,
 }
+
+impl PartialEq for SqlError {
+    fn eq(&self, other: &Self) -> bool {
+        self.code == other.code && self.state == other.state && self.message == other.message
+    }
+}
+
+impl Eq for SqlError {}
 
 impl SqlError {
     /// Builds an error with the SQLSTATE TiDB uses for `code` (`HY000` when it has no mapping).
@@ -34,7 +47,14 @@ impl SqlError {
             code,
             state: sql_state(code),
             message: message.into(),
+            source_err: None,
         }
+    }
+
+    /// Attach the originating `tidb_base::Error` for structured logging (`err_str_for_log`).
+    pub fn with_source_err(mut self, err: tidb_base::Error) -> Self {
+        self.source_err = Some(err);
+        self
     }
 
     /// Error 1105, used for errors without a specific code (e.g. TiDB's `ErrMalformPacket`).

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use tidb_base::structured_log::{LogLevel, LogRecord, LogTarget, StructuredLogger};
 use tidb_runtime::Runtime;
 use tidb_runtime::RuntimeConfig;
 use tidb_runtime::SliceConfig;
@@ -24,9 +25,34 @@ impl Write for Buf {
     }
 }
 
+struct TestStructuredLogger(Buf);
+
+impl StructuredLogger for TestStructuredLogger {
+    fn enabled(&self, _target: LogTarget, _level: LogLevel) -> bool {
+        true
+    }
+    fn level(&self) -> LogLevel {
+        LogLevel::Debug
+    }
+    fn log(&self, record: &LogRecord<'_>) {
+        let mut g = self.0.0.lock().unwrap();
+        let _ = write!(g, "[{}] [{}]", record.level.as_upper_str(), record.msg);
+        for f in record.fields {
+            let _ = write!(g, " [{}={:?}]", f.key, f.value);
+        }
+        let _ = writeln!(g);
+    }
+    fn sync(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[test]
 fn stall_and_panic_are_logged_through_tracing() {
     let buf = Buf::default();
+    let structured: &'static TestStructuredLogger =
+        Box::leak(Box::new(TestStructuredLogger(buf.clone())));
+    let _ = tidb_base::structured_log::register_logger(structured);
     let w = buf.clone();
     tracing_subscriber::fmt()
         .with_writer(move || w.clone())

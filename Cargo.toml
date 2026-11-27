@@ -15,6 +15,7 @@ members = [
   "crates/metrics",
   "crates/types",
   "crates/base",
+  "crates/log",
   "crates/runtime",
   "crates/memory",
   "crates/model",
@@ -126,6 +127,7 @@ poc-executor = { path = "crates/poc/executor" }
 poc-session = { path = "crates/poc/session" }
 tidb-types = { path = "crates/types" }
 tidb-base = { path = "crates/base" }
+tidb-log = { path = "crates/log" }
 tidb-runtime = { path = "crates/runtime" }
 tidb-memory = { path = "crates/memory" }
 tidb-model = { path = "crates/model" }
