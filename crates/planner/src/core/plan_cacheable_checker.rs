@@ -790,8 +790,7 @@ pub fn enable_plan_cache_for_generated_cols(sctx: Option<&SessionVars>) -> bool 
 
 /// checkTableCacheable checks whether a query accessing this table is cacheable.
 ///
-/// The log line of a failed lookup and the test-only `PlanCacheKeyTestIssue46760` failure are
-/// not ported (logging; a Go test hook).
+/// The test-only `PlanCacheKeyTestIssue46760` failure is not ported (a Go test hook).
 // go: checkTableCacheable L1 [M-CTX]
 pub fn check_table_cacheable(
     sctx: &SessionVars,

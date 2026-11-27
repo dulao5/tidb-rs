@@ -1150,7 +1150,7 @@ pub fn format_sql_lazy(sql: String) -> impl Fn() -> String {
 
 /// `QueryReplacer`: replaces new line and tab for grep result including query string.
 // glue: strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace
-fn query_replacer_replace(s: &str) -> String {
+pub fn query_replacer_replace(s: &str) -> String {
     s.chars()
         .map(|c| {
             if matches!(c, '\r' | '\n' | '\t') {

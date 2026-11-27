@@ -392,12 +392,37 @@ impl SessCtx {
             let err = self.do_commit().await;
             // tryReplaceWriteConflictError / retry: write conflicts (write path).
             // log-skip: session.doCommitWithRetry:819 write-conflict retry is write path
-            // log-skip: session.doCommitWithRetry:829 write-conflict retry is write path
+            if let Err(e) = &err
+                && !err_is_noisy(e)
+            {
+                let is_batch_insert = tidb_sessionctx::variable::varsutil::tidb_opt_on(
+                    &self.vars.get_system_var("tidb_batch_insert").0,
+                );
+                let retry_limit = self
+                    .vars
+                    .get_system_var("tidb_retry_limit")
+                    .0
+                    .parse::<i64>()
+                    .unwrap_or(10);
+                let disable_txn_auto_retry = tidb_sessionctx::variable::varsutil::tidb_opt_on(
+                    &self.vars.get_system_var("tidb_disable_txn_auto_retry").0,
+                );
+                tidb_base::log_warn!(
+                    "can not retry txn",
+                    "label" => self.get_sql_label(),
+                    "error" => e,
+                    "IsBatchInsert" => is_batch_insert,
+                    "IsPessimistic" => self.vars.state.txn_ctx.is_pessimistic,
+                    "InRestrictedSQL" => self.vars.in_restricted_sql,
+                    "tidb_retry_limit" => retry_limit,
+                    "tidb_disable_txn_auto_retry" => disable_txn_auto_retry,
+                );
+            }
             // recordOnTransactionExecution(err, TxnCtx.StatementCount, ...): D14.1.
             if let Err(e) = &err
                 && !err_is_noisy(e)
             {
-                let finished_txn = self.txn.string();
+                let finished_txn = self.txn.go_string();
                 tidb_base::log_warn!(
                     "commit failed",
                     "finished txn" => finished_txn.as_str(),
@@ -1149,18 +1174,17 @@ pub fn is_end_txn_stmt(stmt: &ast::Stmt, vars: &SessionVars) -> Result<bool, Err
 /// The crucial operations Go logs (DDL, user and privilege statements) are not in the Rust
 /// AST and never reach the new stack: every statement is a general query.
 // go: logStmt L2 (the crucial statements are not in the Rust AST)
-fn log_stmt(exec_stmt: &ExecStmt, s: &SessionCore) {
+fn log_stmt(exec_stmt: &ExecStmt, s: &mut SessionCore) {
     // log-skip: logStmt:4322 crucial DDL/user/privilege statements are not in the Rust AST
     // log-skip: logStmt:4328 crucial DDL/user/privilege statements are not in the Rust AST
     log_general_query(exec_stmt, s, false);
 }
 
 // go: logGeneralQuery L2 (the user's login string comes with D04.1)
-fn log_general_query(exec_stmt: &ExecStmt, s: &SessionCore, is_prepared: bool) {
-    let vars = &s.sctx.vars;
+fn log_general_query(exec_stmt: &ExecStmt, s: &mut SessionCore, is_prepared: bool) {
     if tidb_sessionctx::variable::tidb_vars::ProcessGeneralLog
         .load(std::sync::atomic::Ordering::SeqCst)
-        && !vars.in_restricted_sql
+        && !s.sctx.vars.in_restricted_sql
     {
         let mut query = if is_prepared {
             exec_stmt.origin_text().to_owned()
@@ -1171,16 +1195,18 @@ fn log_general_query(exec_stmt: &ExecStmt, s: &SessionCore, is_prepared: bool) {
             }
         };
 
-        query = tidb_executor::adapter::format_sql(&query);
+        query = tidb_executor::adapter::query_replacer_replace(&query);
+        let schema_version = tidb_sessionctx::expropt::MetaOnlyInfoSchema::schema_meta_version(
+            &*s.sctx.get_info_schema(),
+        );
+        let is_read_consistency = s.sctx.vars.is_isolation("READ-COMMITTED");
+        let vars = &s.sctx.vars;
         if vars.enable_redact_log != tidb_base::errors::RedactLogEnable {
             query.push_str(&tidb_base::redact::string(
                 &vars.enable_redact_log,
                 &String::from_utf8_lossy(&vars.state.plan_cache_params.lock().string()),
             ));
         }
-        let schema_version = tidb_sessionctx::expropt::MetaOnlyInfoSchema::schema_meta_version(
-            &*s.sctx.get_info_schema(),
-        );
         let txn_mode = vars.get_readable_txn_mode();
         tidb_base::log_general!(
             "GENERAL_LOG",
@@ -1190,7 +1216,7 @@ fn log_general_query(exec_stmt: &ExecStmt, s: &SessionCore, is_prepared: bool) {
             "schemaVersion" => schema_version,
             "txnStartTS" => vars.state.txn_ctx.start_ts,
             "forUpdateTS" => vars.state.txn_ctx.get_for_update_ts(),
-            "isReadConsistency" => vars.state.txn_ctx.isolation == "READ-COMMITTED",
+            "isReadConsistency" => is_read_consistency,
             "currentDB" => vars.current_db.as_str(),
             "isPessimistic" => vars.state.txn_ctx.is_pessimistic,
             "sessionTxnMode" => txn_mode.as_str(),
@@ -1611,7 +1637,7 @@ impl Session {
         }
 
         // Execute the physical plan.
-        log_stmt(&stmt, &self.core);
+        log_stmt(&stmt, &mut self.core);
 
         let r = if stmt.ps_stmt.is_some() {
             // point plan short path
@@ -1995,15 +2021,17 @@ pub(crate) async fn run_stmt(
 /// reports a job as done on this node only if no session still uses an older schema version
 /// of the job's tables. Ported per Go (`session.go:4936-4961`; the gaps of Go's rule are
 /// recorded in #252, `go-gap`). `job2ids` holds each job's table IDs (Go passes the
-/// comma-separated string and parses it here, `util.Str2Int64Map`). Go logs a transaction
-/// that blocks a DDL for over a minute; that log needs `TxnCtx.StartTS` and is left to the
-/// reporting hook ([`report_metadata_locks`]). Nothing calls it yet: see that hook.
-// go: RemoveLockDDLJobs L2 (the log of a long blocking transaction is left to the reporting hook)
+/// comma-separated string and parses it here, `util.Str2Int64Map`). Has no production caller
+/// yet (`mdlCheckLoop` / [`report_metadata_locks`] is `blocked-by:D06.5`); `print_log` is kept
+/// so the long-blocking-txn logs can be enabled when wired.
+// go: RemoveLockDDLJobs L2 (no production caller yet; long-blocking-txn logs blocked-by:D06.5)
 pub fn remove_lock_ddl_jobs(
     vars: &SessionVars,
     job2ver: &mut HashMap<i64, i64>,
     job2ids: &HashMap<i64, std::collections::HashSet<i64>>,
+    print_log: bool,
 ) {
+    let _ = print_log;
     if vars.in_restricted_sql {
         return;
     }
@@ -2011,8 +2039,8 @@ pub fn remove_lock_ddl_jobs(
         return;
     };
     for (tbl_id, value) in mdl.0.lock().iter() {
-        // log-skip: RemoveLockDDLJobs:4953 long blocking txn log is left to report_metadata_locks (blocked-by:D06.5)
-        // log-skip: RemoveLockDDLJobs:4955 long blocking txn log is left to report_metadata_locks (blocked-by:D06.5)
+        // log-skip: RemoveLockDDLJobs:4953 no production caller yet (mdlCheckLoop is blocked-by:D06.5)
+        // log-skip: RemoveLockDDLJobs:4955 no production caller yet (mdlCheckLoop is blocked-by:D06.5)
         job2ver.retain(|job_id, ver| {
             let holds = job2ids.get(job_id).is_some_and(|ids| ids.contains(tbl_id));
             !(holds && *value < *ver)

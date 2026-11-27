@@ -221,6 +221,17 @@ impl LazyTxn {
         "invalid transaction".to_owned()
     }
 
+    // go: LazyTxn.GoString L1
+    pub fn go_string(&self) -> String {
+        if self.pending() {
+            "Txn{state=pending}".to_owned()
+        } else if let Some(t) = &self.transaction {
+            format!("Txn{{state=valid, txnStartTS={}}}", t.start_ts())
+        } else {
+            "Txn{state=invalid}".to_owned()
+        }
+    }
+
     /// GetOption implements the GetOption
     // go: LazyTxn.GetOption L1
     pub fn get_option(&self, opt: isize) -> Option<&(dyn std::any::Any + Send + Sync)> {
