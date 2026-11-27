@@ -80,6 +80,14 @@ jobs:
       - name: crate layering
         run: python3 scripts/check_layers.py
 
+      # ADR 0007 point 3 (test-only exception, owner decision 2026-11-28): the vendored TiKV
+      # evaluator tidb_query_expr is a dev-dependency only and never reaches the production
+      # build. The script's own tests run first.
+      - name: test-only dependencies
+        run: |
+          python3 scripts/test_check_test_only_deps.py
+          python3 scripts/check_test_only_deps.py
+
       # N13 §3 rule 3: no interior mutability (Cell / Mutex / atomics ...) in the shared
       # metadata types (crates/model/src, FieldType); reviewed exceptions carry
       # `// N13-allow: <reason>`. The script's own tests run first.
