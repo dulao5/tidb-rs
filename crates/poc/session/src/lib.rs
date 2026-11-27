@@ -45,6 +45,7 @@ use tidb_meta::SchemaCache;
 use tidb_meta::SchemaCheck;
 use tidb_metrics::ExpensiveExec;
 use tidb_metrics::StmtType;
+use tidb_mysql_protocol::AccountAuth;
 use tidb_mysql_protocol::ConnectionInfo;
 use tidb_mysql_protocol::Credential;
 use tidb_mysql_protocol::OkInfo;
@@ -139,30 +140,42 @@ impl SessionFactory for Factory {
     type Session = Session;
 
     async fn lookup_user(&self, user: &str, host: &str) -> Option<Credential> {
+        self.lookup_account(user, host).await.map(|a| a.credential)
+    }
+
+    async fn lookup_account(&self, user: &str, host: &str) -> Option<AccountAuth> {
         let Some(privs) = &self.shared.privileges else {
-            return (user == self.shared.user).then(|| self.shared.credential.clone());
+            return (user == self.shared.user).then(|| AccountAuth {
+                credential: self.shared.credential.clone(),
+                auth_user: Some(self.shared.user.clone()),
+                auth_host: Some("%".to_owned()),
+                account_locked: false,
+            });
         };
-        let lookup = |snap: &tidb_privilege::MySQLPrivilege| -> Option<Credential> {
-            let rec = snap.match_user(user, host)?;
-            if rec.account_locked {
-                return None;
-            }
-            Credential::native_from_authentication_string(&rec.auth_string)
-        };
-        if let Some(cred) = lookup(&privs.handle().get()) {
-            return Some(cred);
-        }
-        // On miss (e.g. account just created on Go TiDB before etcd watch fires), reload once.
-        privs.reload_if_synced().await;
-        lookup(&privs.handle().get())
+        // Read directly from the in-memory cache (same as Go's `ConnectionVerification`).
+        // Never trigger an unauthenticated KV scan on miss; privilege updates arrive via the
+        // etcd `/tidb/privilege` watch and periodic background refresh loop.
+        let snap = privs.handle().get();
+        privilege::authenticate_user_record(&snap, user, host)
     }
 
     fn open_session(&self, info: &ConnectionInfo) -> Result<Session, SqlError> {
-        let host = info
-            .peer
-            .rsplit_once(':')
-            .map_or(info.peer.as_str(), |(h, _)| h)
-            .trim_matches(|c| c == '[' || c == ']');
+        let host = {
+            let h = info
+                .peer
+                .rsplit_once(':')
+                .map_or(info.peer.as_str(), |(h, _)| h)
+                .trim_matches(|c| c == '[' || c == ']');
+            if let Some(v4) = h
+                .strip_prefix("::ffff:")
+                .or_else(|| h.strip_prefix("::FFFF:"))
+                .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
+            {
+                v4
+            } else {
+                h
+            }
+        };
         // Go: the handshake collation sets character_set_client/connection/results and
         // collation_connection; unknown ids fall back to the server default.
         let (charset, collation) = match info.collation {
@@ -176,19 +189,20 @@ impl SessionFactory for Factory {
         };
         let (auth_user, auth_host, active_roles, privilege_manager) =
             if let Some(privs) = &self.shared.privileges {
-                let snap = privs.handle().get();
-                let (au, ah) = match snap.match_user(&info.user, host) {
-                    Some(rec) => (rec.base.user.clone(), rec.base.host.clone()),
-                    None => (info.user.clone(), "%".to_owned()),
+                // Bind the exact `(auth_user, auth_host)` matched during `authenticate` with no
+                // TOCTOU re-match and no `(user, "%")` fallback; fail closed if absent.
+                let (Some(au), Some(ah)) = (&info.auth_user, &info.auth_host) else {
+                    return Err(SqlError::access_denied(&info.user, host, false));
                 };
-                let roles = snap.get_default_roles(&au, &ah);
+                let snap = privs.handle().get();
+                let roles = snap.get_default_roles(au, ah);
                 let pm: tidb_privilege::PrivilegeManagerRef =
                     Arc::new(tidb_privilege::UserPrivileges::new(
                         au.clone(),
                         ah.clone(),
                         Arc::clone(privs.handle()),
                     ));
-                (au, ah, roles, Some(pm))
+                (au.clone(), ah.clone(), roles, Some(pm))
             } else {
                 (info.user.clone(), "%".to_owned(), Vec::new(), None)
             };

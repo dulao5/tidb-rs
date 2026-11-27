@@ -1,9 +1,10 @@
 //! Cluster-backed `mysql.*` privilege table loading and live etcd `/tidb/privilege` reload
 //! (D04.1 Part 5/5; Go: `pkg/privilege/privileges/cache.go`, `pkg/domain/domain.go`).
 //!
-//! Reads the seven MySQL privilege tables directly from TiKV at a single consistent TSO snapshot
+//! Reads the eight MySQL privilege tables directly from TiKV at a single consistent TSO snapshot
 //! using `tidb-tablecodec`:
 //! - `mysql.user` (required)
+//! - `mysql.global_priv` (TLS/SSL/X509/SAN requirements)
 //! - `mysql.db`
 //! - `mysql.tables_priv`
 //! - `mysql.columns_priv`
@@ -11,11 +12,16 @@
 //! - `mysql.default_roles`
 //! - `mysql.role_edges`
 //!
-//! Startup fails fast if the initial load fails (never silently falling back to open access).
-//! Subsequent background reloads (triggered by etcd `/tidb/privilege` notifications, a 30s
-//! periodic safety tick, or on-demand `reload_now()`) atomically swap the live
-//! [`tidb_privilege::Handle`] snapshot via `ArcSwap`; transient load errors log a warning and
-//! preserve the last known good snapshot (matching Go's `LoadPrivilegeLoop`).
+//! Startup fails fast if the initial load fails (never silently falling back to open access),
+//! and corrupted `TableInfo` JSON or missing required columns are hard errors. Subsequent
+//! background reloads mirror Go's `LoadPrivilegeLoop` (`pkg/domain/domain.go:1927, 1971-1975`):
+//! - Reload once immediately whenever the etcd `/tidb/privilege` watch is established or
+//!   reconnected (closing the startup-load-to-watch and reconnect/compaction windows).
+//! - Coalesce bursts of `/tidb/privilege` watch events for 5 ms (up to 128 events) before
+//!   running one reload.
+//! - Periodic fallback refresh every 10 minutes when etcd is configured (5 minutes without
+//!   etcd), resetting the timer after each watch-triggered reload.
+//! - Transient runtime reload errors log a warning and preserve the last known good snapshot.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,25 +29,32 @@ use std::time::Duration;
 
 use etcd_client::{Client as EtcdClient, ConnectOptions, WatchOptions};
 use poc_kv::{KeyRange, KvClient};
-use tidb_base::gostd::time::utc;
+use tidb_base::gostd::time::{Location, utc};
 use tidb_base::mysql::{PrivilegeType, new_priv_from_column, new_priv_from_set_enum};
 use tidb_meta::keys as meta_keys;
 use tidb_model::{ColumnInfo, IndexInfo, StatePublic, TableInfo};
 use tidb_parser::types::FieldType;
 use tidb_privilege::{
-    ColumnsPrivRecord, DbRecord, DynamicPrivRecord, Handle, MySQLPrivilege, TablesPrivRecord,
-    UserRecord,
+    ColumnsPrivRecord, DbRecord, DynamicPrivRecord, GlobalPrivRecord, Handle, MySQLPrivilege,
+    TablesPrivRecord, UserRecord,
 };
 use tidb_systable::session_io::MYSQL_DB_ID;
 use tidb_tablecodec::tablecodec as tc;
-use tidb_types::datum::{Datum, KindMysqlEnum, KindMysqlSet, KindString};
+use tidb_types::datum::{
+    Datum, KindInt64, KindMysqlEnum, KindMysqlJSON, KindMysqlSet, KindString, KindUint64,
+};
+use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::{Error, Result, keys};
 
-/// Periodic fallback reload interval in case an etcd notification is missed (matches Go's
-/// `LoadPrivilegeLoop` periodic refresh).
-const PRIVILEGE_REFRESH_TICK: Duration = Duration::from_secs(30);
+/// Periodic fallback reload interval with etcd watch active (Go `domain.go:1927`: 10 min).
+const PRIVILEGE_REFRESH_TICK_WITH_ETCD: Duration = Duration::from_secs(600);
+/// Periodic fallback reload interval without etcd watch (Go `domain.go:1927`: 5 min).
+const PRIVILEGE_REFRESH_TICK_NO_ETCD: Duration = Duration::from_secs(300);
+/// Watch event batching window and max batch size (Go `domain.go:1971-1975`: 5 ms, 128 events).
+const WATCH_BATCH_WINDOW: Duration = Duration::from_millis(5);
+const WATCH_BATCH_MAX: usize = 128;
 /// Timeout of one etcd get/watch request.
 const ETCD_OP_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -56,6 +69,8 @@ struct Inner {
     handle: Arc<Handle>,
     /// Serializes reloads so an older snapshot can never overwrite a newer one.
     reload_lock: tokio::sync::Mutex<()>,
+    /// Notified after each watch-triggered reload so the periodic timer resets (matching Go).
+    reset_tick: Notify,
     stop: tokio::sync::watch::Sender<bool>,
 }
 
@@ -66,33 +81,25 @@ impl PrivilegeSync {
         let initial = load_privileges_from_kv(&kv).await?;
         let handle = Arc::new(Handle::new(initial));
         let (stop, _) = tokio::sync::watch::channel(false);
+        let has_etcd = !pd_endpoints.is_empty();
         let inner = Arc::new(Inner {
             kv,
             handle,
             reload_lock: tokio::sync::Mutex::new(()),
+            reset_tick: Notify::new(),
             stop,
         });
-        if !pd_endpoints.is_empty() {
+        if has_etcd {
             tokio::spawn(inner.clone().watch_loop(pd_endpoints));
         }
-        tokio::spawn(inner.clone().periodic_refresh_loop());
+        let tick = if has_etcd {
+            PRIVILEGE_REFRESH_TICK_WITH_ETCD
+        } else {
+            PRIVILEGE_REFRESH_TICK_NO_ETCD
+        };
+        tokio::spawn(inner.clone().periodic_refresh_loop(tick));
         info!("cluster privilege cache loaded from mysql.*");
         Ok(Self { inner })
-    }
-
-    /// Creates a `PrivilegeSync` backed by an already-loaded `Handle` (for unit tests without
-    /// TiKV/etcd).
-    #[cfg(test)]
-    pub fn from_handle_for_test(kv: KvClient, handle: Arc<Handle>) -> Self {
-        let (stop, _) = tokio::sync::watch::channel(false);
-        Self {
-            inner: Arc::new(Inner {
-                kv,
-                handle,
-                reload_lock: tokio::sync::Mutex::new(()),
-                stop,
-            }),
-        }
     }
 
     /// Returns the live lock-free [`Handle`] shared by all sessions.
@@ -124,18 +131,22 @@ impl Inner {
         Ok(())
     }
 
-    async fn periodic_refresh_loop(self: Arc<Self>) {
+    async fn periodic_refresh_loop(self: Arc<Self>, tick: Duration) {
         let mut stop = self.stop.subscribe();
         while !self.stopped() {
             tokio::select! {
-                _ = tokio::time::sleep(PRIVILEGE_REFRESH_TICK) => {}
+                _ = tokio::time::sleep(tick) => {
+                    if self.stopped() {
+                        return;
+                    }
+                    if let Err(e) = self.reload().await {
+                        warn!(error = %e, "periodic privilege reload failed; keeping previous snapshot");
+                    }
+                }
+                _ = self.reset_tick.notified() => {
+                    // Watch reload succeeded; reset periodic countdown (Go `domain.go:1985`).
+                }
                 _ = stop.changed() => return,
-            }
-            if self.stopped() {
-                return;
-            }
-            if let Err(e) = self.reload().await {
-                warn!(error = %e, "periodic privilege reload failed; keeping previous snapshot");
             }
         }
     }
@@ -184,6 +195,15 @@ impl Inner {
         .await
         .map_err(|_| Error::Timeout)??;
 
+        // Reload once right after establishing/reconnecting the watch stream so any GRANT/REVOKE
+        // committed between startup (or a prior watch error/compaction) and `revision + 1` is
+        // never missed.
+        if let Err(e) = self.reload().await {
+            warn!(error = %e, "privilege reload on watch connect failed; keeping previous snapshot");
+        } else {
+            self.reset_tick.notify_one();
+        }
+
         loop {
             let msg = tokio::select! {
                 m = stream.message() => m?,
@@ -192,20 +212,50 @@ impl Inner {
             let Some(msg) = msg else {
                 return Err(Error::Other("privilege watch stream ended".to_owned()));
             };
-            if !msg.events().is_empty() {
-                debug!(
-                    events = msg.events().len(),
-                    "received /tidb/privilege notification; reloading privilege cache"
-                );
-                if let Err(e) = self.reload().await {
-                    warn!(
-                        error = %e,
-                        "privilege reload on etcd notification failed; keeping previous snapshot"
-                    );
-                }
-            }
             if msg.canceled() {
                 return Err(Error::Other("privilege watch canceled".to_owned()));
+            }
+            if msg.events().is_empty() {
+                continue;
+            }
+
+            // Coalesce burst notifications for up to 5 ms / 128 events (Go `domain.go:1971-1975`).
+            let mut batched = msg.events().len();
+            let deadline = tokio::time::Instant::now() + WATCH_BATCH_WINDOW;
+            while batched < WATCH_BATCH_MAX {
+                let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+                else {
+                    break;
+                };
+                if remaining.is_zero() {
+                    break;
+                }
+                match tokio::time::timeout(remaining, stream.message()).await {
+                    Ok(Ok(Some(more))) => {
+                        if more.canceled() {
+                            return Err(Error::Other("privilege watch canceled".to_owned()));
+                        }
+                        batched += more.events().len();
+                    }
+                    Ok(Ok(None)) => {
+                        return Err(Error::Other("privilege watch stream ended".to_owned()));
+                    }
+                    Ok(Err(e)) => return Err(e.into()),
+                    Err(_) => break, // batch window elapsed
+                }
+            }
+
+            debug!(
+                events = batched,
+                "received /tidb/privilege notification; reloading privilege cache"
+            );
+            if let Err(e) = self.reload().await {
+                warn!(
+                    error = %e,
+                    "privilege reload on etcd notification failed; keeping previous snapshot"
+                );
+            } else {
+                self.reset_tick.notify_one();
             }
         }
     }
@@ -226,12 +276,10 @@ pub async fn load_privileges_from_kv(kv: &KvClient) -> Result<MySQLPrivilege> {
     decode_mysql_user(user_tbl, &user_rows, &mut mp)?;
 
     // Remaining tables: load if present; fail the whole snapshot on decode/KV error.
+    type DecoderFn = fn(&TableInfo, &[(Vec<u8>, Vec<u8>)], &mut MySQLPrivilege) -> Result<()>;
     for (name, decoder) in [
-        (
-            "db",
-            decode_mysql_db
-                as fn(&TableInfo, &[(Vec<u8>, Vec<u8>)], &mut MySQLPrivilege) -> Result<()>,
-        ),
+        ("global_priv", decode_mysql_global_priv as DecoderFn),
+        ("db", decode_mysql_db),
         ("tables_priv", decode_mysql_tables_priv),
         ("columns_priv", decode_mysql_columns_priv),
         ("global_grants", decode_mysql_global_grants),
@@ -256,7 +304,8 @@ pub async fn load_privileges_from_kv(kv: &KvClient) -> Result<MySQLPrivilege> {
     Ok(mp)
 }
 
-/// Reads `TableInfo` entries under `mysql` DB metadata at `ts`.
+/// Reads `TableInfo` entries under `mysql` DB metadata at `ts`. Fails hard on corrupted JSON
+/// table definitions rather than silently treating the table as missing.
 async fn load_mysql_table_infos(kv: &KvClient, ts: u64) -> Result<HashMap<String, TableInfo>> {
     let prefix = meta_keys::hash_data_prefix(&meta_keys::db_key(MYSQL_DB_ID));
     let range = KeyRange::new(prefix.clone(), meta_keys::prefix_next(&prefix));
@@ -266,11 +315,16 @@ async fn load_mysql_table_infos(kv: &KvClient, ts: u64) -> Result<HashMap<String
         let Some(field) = meta_keys::decode_hash_field(&k, &prefix) else {
             continue;
         };
-        if meta_keys::parse_table_key(&field).is_none() {
+        let Some(table_id) = meta_keys::parse_table_key(&field) else {
             continue;
-        }
+        };
         let mut t = TableInfo::default();
-        if t.unmarshal_json(&v).is_ok() && t.state == StatePublic {
+        t.unmarshal_json(&v).map_err(|e| {
+            Error::Other(format!(
+                "corrupted TableInfo JSON in mysql meta (table_id={table_id}): {e}"
+            ))
+        })?;
+        if t.state == StatePublic {
             out.insert(t.name.l.clone(), t);
         }
     }
@@ -290,6 +344,53 @@ async fn scan_table_records(
         .scan_all(KeyRange::new(start.0, end.0))
         .await?;
     Ok(pairs)
+}
+
+/// Precomputed table metadata for decoding multiple rows of one `mysql.*` table without
+/// rebuilding the column type map on every row.
+struct RowDecoder<'a> {
+    table_name: &'a str,
+    col_types: HashMap<i64, &'a FieldType>,
+    handle_col_ids: Vec<i64>,
+    loc: Arc<Location>,
+}
+
+impl<'a> RowDecoder<'a> {
+    fn new(tbl: &'a TableInfo) -> Self {
+        let cols = tbl.columns.as_deref().unwrap_or(&[]);
+        let col_types = cols.iter().map(|c| (c.id, &c.field_type)).collect();
+        Self {
+            table_name: &tbl.name.l,
+            col_types,
+            handle_col_ids: handle_col_ids(tbl),
+            loc: utc(),
+        }
+    }
+
+    fn decode(&self, key: &[u8], val: &[u8]) -> Result<HashMap<i64, Datum>> {
+        let row = tc::decode_row_to_datum_map(val, &self.col_types, Some(&self.loc))
+            .map_err(|e| Error::Other(format!("decode row of mysql.{}: {e}", self.table_name)))?;
+        if self.handle_col_ids.is_empty() {
+            return Ok(row);
+        }
+        let handle = tc::decode_row_key(key).map_err(|e| {
+            Error::Other(format!("decode handle of mysql.{}: {e}", self.table_name))
+        })?;
+        let (merged, res) = tc::decode_handle_to_datum_map(
+            Some(&handle),
+            &self.handle_col_ids,
+            &self.col_types,
+            Some(&self.loc),
+            Some(row),
+        );
+        res.map_err(|e| {
+            Error::Other(format!(
+                "decode handle datums of mysql.{}: {e}",
+                self.table_name
+            ))
+        })?;
+        Ok(merged)
+    }
 }
 
 /// Returns primary-key handle column IDs for `tbl` (int-handle PK or common-handle primary index).
@@ -325,25 +426,28 @@ fn primary_index_col_ids(pk: &IndexInfo, cols: &[Arc<ColumnInfo>]) -> Vec<i64> {
         .collect()
 }
 
-/// Decodes a single TiKV `(key, value)` record into a `col_id -> Datum` map, combining row-value
-/// columns with handle columns (for clustered / common-handle tables where binary-collated PK
-/// columns live only in the key).
-fn decode_record(tbl: &TableInfo, key: &[u8], val: &[u8]) -> Result<HashMap<i64, Datum>> {
-    let cols = tbl.columns.as_deref().unwrap_or(&[]);
-    let col_types: HashMap<i64, &FieldType> = cols.iter().map(|c| (c.id, &c.field_type)).collect();
-    let loc = utc();
-    let row = tc::decode_row_to_datum_map(val, &col_types, Some(&loc))
-        .map_err(|e| Error::Other(format!("decode row of mysql.{}: {e}", tbl.name.l)))?;
-    let hcols = handle_col_ids(tbl);
-    if hcols.is_empty() {
-        return Ok(row);
-    }
-    let handle = tc::decode_row_key(key)
-        .map_err(|e| Error::Other(format!("decode handle of mysql.{}: {e}", tbl.name.l)))?;
-    let (merged, res) =
-        tc::decode_handle_to_datum_map(Some(&handle), &hcols, &col_types, Some(&loc), Some(row));
-    res.map_err(|e| Error::Other(format!("decode handle datums of mysql.{}: {e}", tbl.name.l)))?;
-    Ok(merged)
+fn require_col(tbl: &TableInfo, name_lower: &str) -> Result<i64> {
+    tbl.columns
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find(|c| c.name.l == name_lower)
+        .map(|c| c.id)
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "required column '{name_lower}' missing from mysql.{}",
+                tbl.name.l
+            ))
+        })
+}
+
+fn optional_col(tbl: &TableInfo, name_lower: &str) -> Option<i64> {
+    tbl.columns
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find(|c| c.name.l == name_lower)
+        .map(|c| c.id)
 }
 
 #[allow(non_upper_case_globals)]
@@ -355,6 +459,7 @@ fn datum_string(d: &Datum) -> String {
         KindMysqlEnum => String::from_utf8_lossy(&d.get_mysql_enum().name).into_owned(),
         KindMysqlSet => String::from_utf8_lossy(&d.get_mysql_set().name).into_owned(),
         KindString => String::from_utf8_lossy(d.get_string()).into_owned(),
+        KindMysqlJSON => String::from_utf8_lossy(&d.get_mysql_json().string()).into_owned(),
         _ => String::from_utf8_lossy(d.get_bytes()).into_owned(),
     }
 }
@@ -364,6 +469,66 @@ fn col_str(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> String {
         .and_then(|id| row.get(&id))
         .map(datum_string)
         .unwrap_or_default()
+}
+
+#[allow(non_upper_case_globals)]
+fn has_nonzero_password_lifetime(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> bool {
+    let Some(d) = col_id.and_then(|id| row.get(&id)) else {
+        return false;
+    };
+    if d.is_null() {
+        return false;
+    }
+    match d.kind() {
+        KindInt64 => d.get_int64() != 0,
+        KindUint64 => d.get_uint64() != 0,
+        // Unexpected non-null type: fail closed.
+        _ => true,
+    }
+}
+
+/// Checks whether `mysql.user.User_attributes` JSON carries a failed-login lockout policy or
+/// auto-locked state (`$.Password_locking.{failed_login_attempts,password_lock_time_days,
+/// auto_account_locked}`). Unparseable non-empty JSON fails closed (`true`).
+fn has_failed_login_policy_in_attrs(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> bool {
+    let Some(d) = col_id.and_then(|id| row.get(&id)) else {
+        return false;
+    };
+    if d.is_null() {
+        return false;
+    }
+    let raw = datum_string(d);
+    if raw.trim().is_empty() {
+        return false;
+    }
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return true; // fail closed on unparseable JSON
+    };
+    let Some(locking) = val.get("Password_locking") else {
+        return false;
+    };
+    if locking.is_null() {
+        return false;
+    }
+    let Some(obj) = locking.as_object() else {
+        return true;
+    };
+    let attempts = obj
+        .get("failed_login_attempts")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let lock_days = obj
+        .get("password_lock_time_days")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let auto_locked = match obj.get("auto_account_locked") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s.eq_ignore_ascii_case("Y") || s == "1",
+        Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) != 0,
+        Some(serde_json::Value::Null) | None => false,
+        Some(_) => true,
+    };
+    attempts > 0 || lock_days != 0 || auto_locked
 }
 
 /// Converts a MySQL `SET` column string (e.g. `"Select,Insert,Update"`) into a [`PrivilegeType`]
@@ -391,7 +556,6 @@ fn priv_from_col_name(col: &ColumnInfo) -> Option<PrivilegeType> {
     if ok {
         return Some(p);
     }
-    // Fallback: capitalize first ASCII letter if schema stored lower-case column name.
     let mut chars = col.name.l.chars();
     let first = chars.next()?.to_ascii_uppercase();
     let title: String = std::iter::once(first).chain(chars).collect();
@@ -405,38 +569,106 @@ pub fn decode_mysql_user(
     records: &[(Vec<u8>, Vec<u8>)],
     out: &mut MySQLPrivilege,
 ) -> Result<()> {
-    let cols = tbl.columns.as_deref().unwrap_or(&[]);
-    let col_id = |name: &str| cols.iter().find(|c| c.name.l == name).map(|c| c.id);
-    let host_id = col_id("host");
-    let user_id = col_id("user");
-    let auth_id = col_id("authentication_string");
-    let locked_id = col_id("account_locked");
-    let priv_cols: Vec<(i64, PrivilegeType)> = cols
+    let host_id = require_col(tbl, "host")?;
+    let user_id = require_col(tbl, "user")?;
+    let auth_id = require_col(tbl, "authentication_string")?;
+    let locked_id = optional_col(tbl, "account_locked");
+    let plugin_id = optional_col(tbl, "plugin");
+    let pwd_expired_id = optional_col(tbl, "password_expired");
+    let pwd_lifetime_id = optional_col(tbl, "password_lifetime");
+    let user_attrs_id = optional_col(tbl, "user_attributes");
+    let priv_cols: Vec<(i64, PrivilegeType)> = tbl
+        .columns
+        .as_deref()
+        .unwrap_or(&[])
         .iter()
         .filter(|c| c.field_type.get_type() == tidb_base::mysql::TypeEnum)
         .filter_map(|c| priv_from_col_name(c).map(|p| (c.id, p)))
         .collect();
+    let decoder = RowDecoder::new(tbl);
 
     for (k, v) in records {
         if !tc::is_record_key(k) {
             continue;
         }
-        let row = decode_record(tbl, k, v)?;
-        let host = col_str(&row, host_id).to_lowercase();
-        let user = col_str(&row, user_id);
-        let auth_string = col_str(&row, auth_id);
+        let row = decoder.decode(k, v)?;
+        let host = col_str(&row, Some(host_id)).to_lowercase();
+        let user = col_str(&row, Some(user_id));
+        let auth_string = col_str(&row, Some(auth_id));
+        let plugin = col_str(&row, plugin_id);
         let account_locked = col_str(&row, locked_id).eq_ignore_ascii_case("Y");
+        let password_expired = col_str(&row, pwd_expired_id).eq_ignore_ascii_case("Y");
+        let has_password_lifetime = has_nonzero_password_lifetime(&row, pwd_lifetime_id);
+        let has_failed_login_policy = has_failed_login_policy_in_attrs(&row, user_attrs_id);
         let mut privs = 0u64;
         for &(cid, p) in &priv_cols {
             if col_str(&row, Some(cid)).eq_ignore_ascii_case("Y") {
                 privs |= p.0;
             }
         }
-        out.add_user(
+        out.push_user(
             UserRecord::new(host, user, PrivilegeType(privs))
                 .with_auth_string(auth_string)
-                .with_account_locked(account_locked),
+                .with_auth_plugin(plugin)
+                .with_account_locked(account_locked)
+                .with_password_expired(password_expired)
+                .with_password_lifetime(has_password_lifetime)
+                .with_failed_login_policy(has_failed_login_policy),
         );
+    }
+    Ok(())
+}
+
+/// Decodes scanned TiKV records of `mysql.global_priv` into `out` (Go `decodeGlobalPrivTableRow`).
+pub fn decode_mysql_global_priv(
+    tbl: &TableInfo,
+    records: &[(Vec<u8>, Vec<u8>)],
+    out: &mut MySQLPrivilege,
+) -> Result<()> {
+    let host_id = require_col(tbl, "host")?;
+    let user_id = require_col(tbl, "user")?;
+    let priv_id = require_col(tbl, "priv")?;
+    let decoder = RowDecoder::new(tbl);
+
+    for (k, v) in records {
+        if !tc::is_record_key(k) {
+            continue;
+        }
+        let row = decoder.decode(k, v)?;
+        let host = col_str(&row, Some(host_id)).to_lowercase();
+        let user = col_str(&row, Some(user_id));
+        let priv_data = col_str(&row, Some(priv_id));
+        let (require_ssl, broken) = if priv_data.is_empty() {
+            (false, false)
+        } else {
+            match serde_json::from_str::<serde_json::Value>(&priv_data) {
+                Ok(serde_json::Value::Object(map)) => {
+                    // Go `SSLType`: -1 = NotSpecified, 0 = None, 1 = Any (SSL), 2 = X509,
+                    // 3 = Specified (CIPHER/ISSUER/SUBJECT/SAN).
+                    let ssl_type = map.get("ssl_type").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let non_empty_str = |key: &str| {
+                        map.get(key)
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| !s.is_empty())
+                    };
+                    let req = ssl_type > 0
+                        || non_empty_str("ssl_cipher")
+                        || non_empty_str("x509_issuer")
+                        || non_empty_str("x509_subject")
+                        || non_empty_str("san");
+                    (req, false)
+                }
+                _ => {
+                    warn!(
+                        user = %user,
+                        host = %host,
+                        "mysql.global_priv JSON is broken; forbidding login until fixed"
+                    );
+                    (true, true)
+                }
+            }
+        };
+        out.push_global_priv(GlobalPrivRecord::new(user, host, require_ssl, broken));
     }
     Ok(())
 }
@@ -447,32 +679,34 @@ pub fn decode_mysql_db(
     records: &[(Vec<u8>, Vec<u8>)],
     out: &mut MySQLPrivilege,
 ) -> Result<()> {
-    let cols = tbl.columns.as_deref().unwrap_or(&[]);
-    let col_id = |name: &str| cols.iter().find(|c| c.name.l == name).map(|c| c.id);
-    let host_id = col_id("host");
-    let db_id = col_id("db");
-    let user_id = col_id("user");
-    let priv_cols: Vec<(i64, PrivilegeType)> = cols
+    let host_id = require_col(tbl, "host")?;
+    let db_id = require_col(tbl, "db")?;
+    let user_id = require_col(tbl, "user")?;
+    let priv_cols: Vec<(i64, PrivilegeType)> = tbl
+        .columns
+        .as_deref()
+        .unwrap_or(&[])
         .iter()
         .filter(|c| c.field_type.get_type() == tidb_base::mysql::TypeEnum)
         .filter_map(|c| priv_from_col_name(c).map(|p| (c.id, p)))
         .collect();
+    let decoder = RowDecoder::new(tbl);
 
     for (k, v) in records {
         if !tc::is_record_key(k) {
             continue;
         }
-        let row = decode_record(tbl, k, v)?;
-        let host = col_str(&row, host_id).to_lowercase();
-        let db = col_str(&row, db_id);
-        let user = col_str(&row, user_id);
+        let row = decoder.decode(k, v)?;
+        let host = col_str(&row, Some(host_id)).to_lowercase();
+        let db = col_str(&row, Some(db_id));
+        let user = col_str(&row, Some(user_id));
         let mut privs = 0u64;
         for &(cid, p) in &priv_cols {
             if col_str(&row, Some(cid)).eq_ignore_ascii_case("Y") {
                 privs |= p.0;
             }
         }
-        out.add_db(DbRecord::new(user, host, db, PrivilegeType(privs)));
+        out.push_db(DbRecord::new(user, host, db, PrivilegeType(privs)));
     }
     Ok(())
 }
@@ -483,27 +717,26 @@ pub fn decode_mysql_tables_priv(
     records: &[(Vec<u8>, Vec<u8>)],
     out: &mut MySQLPrivilege,
 ) -> Result<()> {
-    let cols = tbl.columns.as_deref().unwrap_or(&[]);
-    let col_id = |name: &str| cols.iter().find(|c| c.name.l == name).map(|c| c.id);
-    let host_id = col_id("host");
-    let db_id = col_id("db");
-    let user_id = col_id("user");
-    let table_name_id = col_id("table_name");
-    let table_priv_id = col_id("table_priv");
-    let column_priv_id = col_id("column_priv");
+    let host_id = require_col(tbl, "host")?;
+    let db_id = require_col(tbl, "db")?;
+    let user_id = require_col(tbl, "user")?;
+    let table_name_id = require_col(tbl, "table_name")?;
+    let table_priv_id = require_col(tbl, "table_priv")?;
+    let column_priv_id = require_col(tbl, "column_priv")?;
+    let decoder = RowDecoder::new(tbl);
 
     for (k, v) in records {
         if !tc::is_record_key(k) {
             continue;
         }
-        let row = decode_record(tbl, k, v)?;
-        let host = col_str(&row, host_id).to_lowercase();
-        let db = col_str(&row, db_id);
-        let user = col_str(&row, user_id);
-        let table_name = col_str(&row, table_name_id);
-        let table_priv = decode_set_to_privilege(&col_str(&row, table_priv_id));
-        let column_priv = decode_set_to_privilege(&col_str(&row, column_priv_id));
-        out.add_table_priv(
+        let row = decoder.decode(k, v)?;
+        let host = col_str(&row, Some(host_id)).to_lowercase();
+        let db = col_str(&row, Some(db_id));
+        let user = col_str(&row, Some(user_id));
+        let table_name = col_str(&row, Some(table_name_id));
+        let table_priv = decode_set_to_privilege(&col_str(&row, Some(table_priv_id)));
+        let column_priv = decode_set_to_privilege(&col_str(&row, Some(column_priv_id)));
+        out.push_table_priv(
             TablesPrivRecord::new(user, host, db, table_name, table_priv)
                 .with_column_priv(column_priv),
         );
@@ -517,27 +750,26 @@ pub fn decode_mysql_columns_priv(
     records: &[(Vec<u8>, Vec<u8>)],
     out: &mut MySQLPrivilege,
 ) -> Result<()> {
-    let cols = tbl.columns.as_deref().unwrap_or(&[]);
-    let col_id = |name: &str| cols.iter().find(|c| c.name.l == name).map(|c| c.id);
-    let host_id = col_id("host");
-    let db_id = col_id("db");
-    let user_id = col_id("user");
-    let table_name_id = col_id("table_name");
-    let column_name_id = col_id("column_name");
-    let column_priv_id = col_id("column_priv");
+    let host_id = require_col(tbl, "host")?;
+    let db_id = require_col(tbl, "db")?;
+    let user_id = require_col(tbl, "user")?;
+    let table_name_id = require_col(tbl, "table_name")?;
+    let column_name_id = require_col(tbl, "column_name")?;
+    let column_priv_id = require_col(tbl, "column_priv")?;
+    let decoder = RowDecoder::new(tbl);
 
     for (k, v) in records {
         if !tc::is_record_key(k) {
             continue;
         }
-        let row = decode_record(tbl, k, v)?;
-        let host = col_str(&row, host_id).to_lowercase();
-        let db = col_str(&row, db_id);
-        let user = col_str(&row, user_id);
-        let table_name = col_str(&row, table_name_id);
-        let column_name = col_str(&row, column_name_id);
-        let column_priv = decode_set_to_privilege(&col_str(&row, column_priv_id));
-        out.add_column_priv(ColumnsPrivRecord::new(
+        let row = decoder.decode(k, v)?;
+        let host = col_str(&row, Some(host_id)).to_lowercase();
+        let db = col_str(&row, Some(db_id));
+        let user = col_str(&row, Some(user_id));
+        let table_name = col_str(&row, Some(table_name_id));
+        let column_name = col_str(&row, Some(column_name_id));
+        let column_priv = decode_set_to_privilege(&col_str(&row, Some(column_priv_id)));
+        out.push_column_priv(ColumnsPrivRecord::new(
             user,
             host,
             db,
@@ -555,23 +787,22 @@ pub fn decode_mysql_global_grants(
     records: &[(Vec<u8>, Vec<u8>)],
     out: &mut MySQLPrivilege,
 ) -> Result<()> {
-    let cols = tbl.columns.as_deref().unwrap_or(&[]);
-    let col_id = |name: &str| cols.iter().find(|c| c.name.l == name).map(|c| c.id);
-    let host_id = col_id("host");
-    let user_id = col_id("user");
-    let priv_id = col_id("priv");
-    let grant_opt_id = col_id("with_grant_option");
+    let host_id = require_col(tbl, "host")?;
+    let user_id = require_col(tbl, "user")?;
+    let priv_id = require_col(tbl, "priv")?;
+    let grant_opt_id = require_col(tbl, "with_grant_option")?;
+    let decoder = RowDecoder::new(tbl);
 
     for (k, v) in records {
         if !tc::is_record_key(k) {
             continue;
         }
-        let row = decode_record(tbl, k, v)?;
-        let host = col_str(&row, host_id).to_lowercase();
-        let user = col_str(&row, user_id);
-        let priv_name = col_str(&row, priv_id);
-        let grant_option = col_str(&row, grant_opt_id).eq_ignore_ascii_case("Y");
-        out.add_dynamic_priv(DynamicPrivRecord::new(user, host, priv_name, grant_option));
+        let row = decoder.decode(k, v)?;
+        let host = col_str(&row, Some(host_id)).to_lowercase();
+        let user = col_str(&row, Some(user_id));
+        let priv_name = col_str(&row, Some(priv_id));
+        let grant_option = col_str(&row, Some(grant_opt_id)).eq_ignore_ascii_case("Y");
+        out.push_dynamic_priv(DynamicPrivRecord::new(user, host, priv_name, grant_option));
     }
     Ok(())
 }
@@ -582,23 +813,22 @@ pub fn decode_mysql_default_roles(
     records: &[(Vec<u8>, Vec<u8>)],
     out: &mut MySQLPrivilege,
 ) -> Result<()> {
-    let cols = tbl.columns.as_deref().unwrap_or(&[]);
-    let col_id = |name: &str| cols.iter().find(|c| c.name.l == name).map(|c| c.id);
-    let host_id = col_id("host");
-    let user_id = col_id("user");
-    let role_host_id = col_id("default_role_host");
-    let role_user_id = col_id("default_role_user");
+    let host_id = require_col(tbl, "host")?;
+    let user_id = require_col(tbl, "user")?;
+    let role_host_id = require_col(tbl, "default_role_host")?;
+    let role_user_id = require_col(tbl, "default_role_user")?;
+    let decoder = RowDecoder::new(tbl);
 
     for (k, v) in records {
         if !tc::is_record_key(k) {
             continue;
         }
-        let row = decode_record(tbl, k, v)?;
-        let host = col_str(&row, host_id).to_lowercase();
-        let user = col_str(&row, user_id);
-        let role_host = col_str(&row, role_host_id);
-        let role_user = col_str(&row, role_user_id);
-        out.add_default_role(user, host, role_user, role_host);
+        let row = decoder.decode(k, v)?;
+        let host = col_str(&row, Some(host_id)).to_lowercase();
+        let user = col_str(&row, Some(user_id));
+        let role_host = col_str(&row, Some(role_host_id)).to_lowercase();
+        let role_user = col_str(&row, Some(role_user_id));
+        out.push_default_role(user, host, role_user, role_host);
     }
     Ok(())
 }
@@ -609,22 +839,21 @@ pub fn decode_mysql_role_edges(
     records: &[(Vec<u8>, Vec<u8>)],
     out: &mut MySQLPrivilege,
 ) -> Result<()> {
-    let cols = tbl.columns.as_deref().unwrap_or(&[]);
-    let col_id = |name: &str| cols.iter().find(|c| c.name.l == name).map(|c| c.id);
-    let from_host_id = col_id("from_host");
-    let from_user_id = col_id("from_user");
-    let to_host_id = col_id("to_host");
-    let to_user_id = col_id("to_user");
+    let from_host_id = require_col(tbl, "from_host")?;
+    let from_user_id = require_col(tbl, "from_user")?;
+    let to_host_id = require_col(tbl, "to_host")?;
+    let to_user_id = require_col(tbl, "to_user")?;
+    let decoder = RowDecoder::new(tbl);
 
     for (k, v) in records {
         if !tc::is_record_key(k) {
             continue;
         }
-        let row = decode_record(tbl, k, v)?;
-        let from_host = col_str(&row, from_host_id);
-        let from_user = col_str(&row, from_user_id);
-        let to_host = col_str(&row, to_host_id);
-        let to_user = col_str(&row, to_user_id);
+        let row = decoder.decode(k, v)?;
+        let from_host = col_str(&row, Some(from_host_id)).to_lowercase();
+        let from_user = col_str(&row, Some(from_user_id));
+        let to_host = col_str(&row, Some(to_host_id)).to_lowercase();
+        let to_user = col_str(&row, Some(to_user_id));
         out.add_role_edge(from_user, from_host, to_user, to_host);
     }
     Ok(())
@@ -634,15 +863,19 @@ pub fn decode_mysql_role_edges(
 mod tests {
     use super::*;
     use tidb_base::mysql::{
-        InsertPriv, SelectPriv, SuperPriv, TypeEnum, TypeSet, TypeString, TypeVarchar, UpdatePriv,
+        InsertPriv, SelectPriv, SuperPriv, TypeEnum, TypeJSON, TypeSet, TypeShort, TypeString,
+        TypeVarchar, UnsignedFlag, UpdatePriv,
     };
     use tidb_kv::key::{Handle as KvHandle, IntHandle, new_common_handle};
     use tidb_model::{IndexColumn, IndexInfo};
     use tidb_parser::model::CIStr;
     use tidb_privilege::{PrivilegeManager, UserPrivileges};
     use tidb_tablecodec::rowcodec::encoder::Encoder as RowEncoder;
-    use tidb_types::datum::{new_mysql_enum_datum, new_mysql_set_datum, new_string_datum};
+    use tidb_types::datum::{
+        new_mysql_enum_datum, new_mysql_set_datum, new_string_datum, new_uint_datum,
+    };
     use tidb_types::enum_type::parse_enum_name;
+    use tidb_types::json::parse_binary_json_from_string;
     use tidb_types::set_type::parse_set_name;
 
     fn char_col(id: i64, offset: isize, name: &str) -> Arc<ColumnInfo> {
@@ -686,6 +919,30 @@ mod tests {
         })
     }
 
+    fn smallint_unsigned_col(id: i64, offset: isize, name: &str) -> Arc<ColumnInfo> {
+        let mut ft = FieldType::new(TypeShort);
+        ft.set_flag(UnsignedFlag);
+        Arc::new(ColumnInfo {
+            id,
+            name: CIStr::new(name),
+            offset,
+            field_type: ft,
+            state: StatePublic,
+            ..Default::default()
+        })
+    }
+
+    fn json_col(id: i64, offset: isize, name: &str) -> Arc<ColumnInfo> {
+        Arc::new(ColumnInfo {
+            id,
+            name: CIStr::new(name),
+            offset,
+            field_type: FieldType::new(TypeJSON),
+            state: StatePublic,
+            ..Default::default()
+        })
+    }
+
     fn set_priv_col(id: i64, offset: isize, name: &str, elems: &[&str]) -> Arc<ColumnInfo> {
         let mut ft = FieldType::new(TypeSet);
         ft.set_elems(Some(elems.iter().map(|s| s.as_bytes().to_vec()).collect()));
@@ -714,6 +971,19 @@ mod tests {
         (key, buf)
     }
 
+    fn encode_v1_record(
+        table_id: i64,
+        row_id: i64,
+        col_ids: &[i64],
+        datums: &[Datum],
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut enc = RowEncoder::default();
+        enc.enable = false;
+        let buf = tc::encode_row(Some(&utc()), datums, col_ids, None, Some(&mut enc)).unwrap();
+        let key = tc::encode_row_key_with_handle(table_id, &KvHandle::Int(IntHandle(row_id))).0;
+        (key, buf)
+    }
+
     fn encode_common_handle_record(
         table_id: i64,
         pk_datums: &[Datum],
@@ -736,20 +1006,25 @@ mod tests {
     }
 
     #[test]
-    fn decode_all_seven_mysql_privilege_tables_and_common_handle() {
+    fn decode_all_eight_mysql_privilege_tables_v1_v2_and_common_handle() {
         let mut mp = MySQLPrivilege::new();
 
-        // 1. mysql.user (non-clustered v2 row, plus locked role row).
+        // 1. mysql.user (bootstrap-style columns, mixing row format v1 and v2, plus plugin,
+        // password_expired, password_lifetime, and User_attributes failed-login policy).
         let user_tbl = TableInfo {
             id: 5,
             name: CIStr::new("user"),
             columns: Some(vec![
-                varchar_col(1, 0, "Host"),
-                varchar_col(2, 1, "User"),
+                char_col(1, 0, "Host"),
+                char_col(2, 1, "User"),
                 varchar_col(3, 2, "authentication_string"),
                 enum_yn_col(4, 3, "Select_priv"),
                 enum_yn_col(5, 4, "Super_priv"),
                 enum_yn_col(6, 5, "Account_locked"),
+                char_col(7, 6, "Plugin"),
+                enum_yn_col(8, 7, "password_expired"),
+                smallint_unsigned_col(9, 8, "password_lifetime"),
+                json_col(10, 9, "User_attributes"),
             ]),
             state: StatePublic,
             ..Default::default()
@@ -757,12 +1032,20 @@ mod tests {
         let yn = &[b"N".to_vec(), b"Y".to_vec()];
         let e_y = new_mysql_enum_datum(parse_enum_name(yn, b"Y", "").unwrap());
         let e_n = new_mysql_enum_datum(parse_enum_name(yn, b"N", "").unwrap());
+        let mut lock_policy_json = Datum::default();
+        lock_policy_json.set_mysql_json(
+            parse_binary_json_from_string(
+                br#"{"Password_locking":{"failed_login_attempts":3,"password_lock_time_days":2}}"#,
+            )
+            .unwrap(),
+        );
 
         let user_rows = vec![
-            encode_v2_record(
+            // v1-encoded root row (empty Plugin normalizes to mysql_native_password).
+            encode_v1_record(
                 5,
                 1,
-                &[1, 2, 3, 4, 5, 6],
+                &[1, 2, 3, 4, 5, 6, 7, 8],
                 &[
                     new_string_datum("%".to_owned()),
                     new_string_datum("root".to_owned()),
@@ -770,12 +1053,15 @@ mod tests {
                     e_y.clone(),
                     e_y.clone(),
                     e_n.clone(),
+                    new_string_datum(String::new()),
+                    e_n.clone(),
                 ],
             ),
+            // v2-encoded normal account.
             encode_v2_record(
                 5,
                 2,
-                &[1, 2, 3, 4, 5, 6],
+                &[1, 2, 3, 4, 5, 6, 7],
                 &[
                     new_string_datum("%".to_owned()),
                     new_string_datum("u_app".to_owned()),
@@ -783,8 +1069,10 @@ mod tests {
                     e_n.clone(),
                     e_n.clone(),
                     e_n.clone(),
+                    new_string_datum("mysql_native_password".to_owned()),
                 ],
             ),
+            // v2-encoded locked role row.
             encode_v2_record(
                 5,
                 3,
@@ -798,10 +1086,89 @@ mod tests {
                     e_y.clone(),
                 ],
             ),
+            // v2-encoded non-native plugin (`tidb_auth_token`) with empty authentication_string.
+            encode_v2_record(
+                5,
+                4,
+                &[1, 2, 3, 4, 5, 6, 7],
+                &[
+                    new_string_datum("%".to_owned()),
+                    new_string_datum("u_token".to_owned()),
+                    new_string_datum(String::new()),
+                    e_y.clone(),
+                    e_n.clone(),
+                    e_n.clone(),
+                    new_string_datum("tidb_auth_token".to_owned()),
+                ],
+            ),
+            // v2-encoded expired password + password_lifetime + Password_locking JSON.
+            encode_v2_record(
+                5,
+                5,
+                &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                &[
+                    new_string_datum("%".to_owned()),
+                    new_string_datum("u_restricted".to_owned()),
+                    new_string_datum(String::new()),
+                    e_y.clone(),
+                    e_n.clone(),
+                    e_n.clone(),
+                    new_string_datum("mysql_native_password".to_owned()),
+                    e_y.clone(),
+                    new_uint_datum(30),
+                    lock_policy_json,
+                ],
+            ),
         ];
         decode_mysql_user(&user_tbl, &user_rows, &mut mp).unwrap();
 
-        // 2. mysql.db (clustered common-handle CHAR PK on (Host, DB, User) where PK columns are ONLY in key!).
+        // 1b. mysql.global_priv (REQUIRE SSL, NONE, and broken JSON).
+        let gp_tbl = TableInfo {
+            id: 12,
+            name: CIStr::new("global_priv"),
+            columns: Some(vec![
+                char_col(1, 0, "Host"),
+                char_col(2, 1, "User"),
+                varchar_col(3, 2, "Priv"),
+            ]),
+            state: StatePublic,
+            ..Default::default()
+        };
+        let gp_rows = vec![
+            encode_v2_record(
+                12,
+                1,
+                &[1, 2, 3],
+                &[
+                    new_string_datum("%".to_owned()),
+                    new_string_datum("u_ssl".to_owned()),
+                    new_string_datum(r#"{"ssl_type":1}"#.to_owned()),
+                ],
+            ),
+            encode_v2_record(
+                12,
+                2,
+                &[1, 2, 3],
+                &[
+                    new_string_datum("%".to_owned()),
+                    new_string_datum("u_broken_gp".to_owned()),
+                    new_string_datum("{not-json".to_owned()),
+                ],
+            ),
+            encode_v2_record(
+                12,
+                3,
+                &[1, 2, 3],
+                &[
+                    new_string_datum("%".to_owned()),
+                    new_string_datum("root".to_owned()),
+                    new_string_datum(r#"{"ssl_type":0}"#.to_owned()),
+                ],
+            ),
+        ];
+        decode_mysql_global_priv(&gp_tbl, &gp_rows, &mut mp).unwrap();
+
+        // 2. mysql.db (clustered common-handle CHAR PK on (Host, DB, User)).
         let db_tbl = TableInfo {
             id: 6,
             name: CIStr::new("db"),
@@ -862,10 +1229,10 @@ mod tests {
             id: 7,
             name: CIStr::new("tables_priv"),
             columns: Some(vec![
-                varchar_col(1, 0, "Host"),
-                varchar_col(2, 1, "DB"),
-                varchar_col(3, 2, "User"),
-                varchar_col(4, 3, "Table_name"),
+                char_col(1, 0, "Host"),
+                char_col(2, 1, "DB"),
+                char_col(3, 2, "User"),
+                char_col(4, 3, "Table_name"),
                 set_priv_col(5, 4, "Table_priv", &tbl_priv_elems),
                 set_priv_col(6, 5, "Column_priv", &col_priv_elems),
             ]),
@@ -908,11 +1275,11 @@ mod tests {
             id: 8,
             name: CIStr::new("columns_priv"),
             columns: Some(vec![
-                varchar_col(1, 0, "Host"),
-                varchar_col(2, 1, "DB"),
-                varchar_col(3, 2, "User"),
-                varchar_col(4, 3, "Table_name"),
-                varchar_col(5, 4, "Column_name"),
+                char_col(1, 0, "Host"),
+                char_col(2, 1, "DB"),
+                char_col(3, 2, "User"),
+                char_col(4, 3, "Table_name"),
+                char_col(5, 4, "Column_name"),
                 set_priv_col(6, 5, "Column_priv", &col_priv_elems),
             ]),
             state: StatePublic,
@@ -941,9 +1308,9 @@ mod tests {
             id: 9,
             name: CIStr::new("global_grants"),
             columns: Some(vec![
-                varchar_col(1, 0, "Host"),
-                varchar_col(2, 1, "User"),
-                varchar_col(3, 2, "Priv"),
+                char_col(1, 0, "Host"),
+                char_col(2, 1, "User"),
+                char_col(3, 2, "Priv"),
                 enum_yn_col(4, 3, "With_Grant_Option"),
             ]),
             state: StatePublic,
@@ -967,10 +1334,10 @@ mod tests {
             id: 10,
             name: CIStr::new("role_edges"),
             columns: Some(vec![
-                varchar_col(1, 0, "FROM_HOST"),
-                varchar_col(2, 1, "FROM_USER"),
-                varchar_col(3, 2, "TO_HOST"),
-                varchar_col(4, 3, "TO_USER"),
+                char_col(1, 0, "FROM_HOST"),
+                char_col(2, 1, "FROM_USER"),
+                char_col(3, 2, "TO_HOST"),
+                char_col(4, 3, "TO_USER"),
             ]),
             state: StatePublic,
             ..Default::default()
@@ -992,10 +1359,10 @@ mod tests {
             id: 11,
             name: CIStr::new("default_roles"),
             columns: Some(vec![
-                varchar_col(1, 0, "HOST"),
-                varchar_col(2, 1, "USER"),
-                varchar_col(3, 2, "DEFAULT_ROLE_HOST"),
-                varchar_col(4, 3, "DEFAULT_ROLE_USER"),
+                char_col(1, 0, "HOST"),
+                char_col(2, 1, "USER"),
+                char_col(3, 2, "DEFAULT_ROLE_HOST"),
+                char_col(4, 3, "DEFAULT_ROLE_USER"),
             ]),
             state: StatePublic,
             ..Default::default()
@@ -1016,20 +1383,37 @@ mod tests {
         let handle = Arc::new(Handle::new(mp));
         let snap = handle.get();
 
-        // Verify mysql.user auth_string, privileges, and Account_locked.
+        // Verify v1-encoded root row, auth_plugin normalization, and privileges.
         let root_rec = snap.match_user("root", "127.0.0.1").unwrap();
         assert_eq!(
             root_rec.auth_string,
             "*23AE809DDACAF96AF0FD78ED04B6A265E05AA257"
         );
+        assert_eq!(root_rec.auth_plugin, "mysql_native_password");
         assert!(!root_rec.account_locked);
+        assert!(!root_rec.password_expired);
+        assert!(!root_rec.has_password_lifetime);
+        assert!(!root_rec.has_failed_login_policy);
         assert_eq!(
             root_rec.privileges.0 & (SelectPriv.0 | SuperPriv.0),
             SelectPriv.0 | SuperPriv.0
         );
 
-        let role_rec = snap.match_user("r_reader", "127.0.0.1").unwrap();
-        assert!(role_rec.account_locked);
+        let token_rec = snap.match_user("u_token", "127.0.0.1").unwrap();
+        assert_eq!(token_rec.auth_plugin, "tidb_auth_token");
+
+        let restricted_rec = snap.match_user("u_restricted", "127.0.0.1").unwrap();
+        assert!(restricted_rec.password_expired);
+        assert!(restricted_rec.has_password_lifetime);
+        assert!(restricted_rec.has_failed_login_policy);
+
+        // Verify mysql.global_priv SSL & broken JSON decoding.
+        let gp_ssl = snap.match_global_priv("u_ssl", "127.0.0.1").unwrap();
+        assert!(gp_ssl.require_ssl && !gp_ssl.broken);
+        let gp_broken = snap.match_global_priv("u_broken_gp", "127.0.0.1").unwrap();
+        assert!(gp_broken.broken && gp_broken.require_ssl);
+        let gp_root = snap.match_global_priv("root", "127.0.0.1").unwrap();
+        assert!(!gp_root.require_ssl && !gp_root.broken);
 
         // Verify common-handle mysql.db decoding.
         let u_app = UserPrivileges::new("u_app", "%", Arc::clone(&handle));
@@ -1041,17 +1425,24 @@ mod tests {
         assert!(!u_app.request_verification(&[], "appdb", "x", "*", SelectPriv));
         assert!(u_app.db_is_visible(&[], "appdb"));
 
-        // Verify mysql.columns_priv decoding.
+        // Verify mysql.columns_priv, tables_priv via role edge, and global_grants.
         assert!(u_app.request_verification(&[], "test", "t", "*", SelectPriv));
         assert!(u_app.request_verification(&[], "test", "t", "a", SelectPriv));
         assert!(!u_app.request_verification(&[], "test", "t", "b", SelectPriv));
-
-        // Verify mysql.tables_priv via default role edge r_reader -> u_app.
         assert!(!u_app.request_verification(&[], "test", "t_role", "*", SelectPriv));
         assert!(u_app.request_verification(&default_roles, "test", "t_role", "*", SelectPriv));
         assert!(u_app.request_verification(&default_roles, "test", "t_role", "", UpdatePriv));
-
-        // Verify mysql.global_grants.
         assert!(u_app.request_dynamic_verification(&[], "BACKUP_ADMIN", true));
+
+        // Verify missing required column fails hard instead of silently defaulting to "".
+        let bad_user_tbl = TableInfo {
+            id: 99,
+            name: CIStr::new("user"),
+            columns: Some(vec![char_col(1, 0, "Host")]),
+            state: StatePublic,
+            ..Default::default()
+        };
+        let mut mp_bad = MySQLPrivilege::new();
+        assert!(decode_mysql_user(&bad_user_tbl, &[], &mut mp_bad).is_err());
     }
 }

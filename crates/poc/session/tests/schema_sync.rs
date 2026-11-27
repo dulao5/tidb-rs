@@ -140,6 +140,8 @@ impl Env {
                 connection_id: 1,
                 user: "root".to_owned(),
                 peer: "127.0.0.1:1".to_owned(),
+                auth_user: None,
+                auth_host: None,
                 database: Some(DB.to_owned()),
                 collation: 255,
                 capability: 0,

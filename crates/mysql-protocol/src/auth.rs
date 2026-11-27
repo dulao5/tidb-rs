@@ -14,6 +14,29 @@ pub enum Credential {
     NativePassword(Option<[u8; 20]>),
 }
 
+/// Account metadata resolved during handshake authentication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountAuth {
+    pub credential: Credential,
+    /// Exact `mysql.user.User` matched during authentication (bound verbatim in `open_session`).
+    pub auth_user: Option<String>,
+    /// Exact `mysql.user.Host` matched during authentication (bound verbatim in `open_session`).
+    pub auth_host: Option<String>,
+    /// True when `mysql.user.Account_locked == 'Y'` (checked after password verification -> 3118).
+    pub account_locked: bool,
+}
+
+impl From<Credential> for AccountAuth {
+    fn from(credential: Credential) -> Self {
+        Self {
+            credential,
+            auth_user: None,
+            auth_host: None,
+            account_locked: false,
+        }
+    }
+}
+
 impl Credential {
     /// Credential for a plain-text password (empty = no password).
     pub fn native_from_password(password: &str) -> Self {

@@ -16,6 +16,7 @@ pub mod code {
     pub const ER_NOT_SUPPORTED_YET: u16 = 1235;
     pub const ER_UNKNOWN_STMT_HANDLER: u16 = 1243;
     pub const ER_NOT_SUPPORTED_AUTH_MODE: u16 = 1251;
+    pub const ER_ACCOUNT_HAS_BEEN_LOCKED: u16 = 3118;
     pub const ER_INVALID_SEQUENCE: u16 = 8052;
     pub const ER_UNKNOWN_FIELD_TYPE: u16 = 8051;
     pub const ER_INVALID_TYPE: u16 = 8057;
@@ -64,6 +65,15 @@ impl SqlError {
         Self::new(
             code::ER_ACCESS_DENIED,
             format!("Access denied for user '{user}'@'{host}' (using password: {yes_no})"),
+        )
+    }
+
+    /// Error 3118 (`ER_ACCOUNT_HAS_BEEN_LOCKED`, SQLSTATE `HY000`) with TiDB's exact message format
+    /// (`pkg/privilege/privileges/privileges.go`: `errAccountHasBeenLocked`).
+    pub fn account_locked(user: &str, host: &str) -> Self {
+        Self::new(
+            code::ER_ACCOUNT_HAS_BEEN_LOCKED,
+            format!("Access denied for user '{user}'@'{host}'. Account is locked."),
         )
     }
 

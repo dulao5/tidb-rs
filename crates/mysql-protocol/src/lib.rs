@@ -28,7 +28,7 @@ mod server;
 pub mod tls;
 pub mod value;
 
-pub use auth::Credential;
+pub use auth::{AccountAuth, Credential};
 pub use error::SqlError;
 pub use handler::{
     ConnectionInfo, EncodedResultSet, OkInfo, PreparedInfo, RawParams, Response, ResultSet,

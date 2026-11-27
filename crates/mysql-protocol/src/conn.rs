@@ -303,12 +303,21 @@ where
     }
 
     let host = peer_host(peer);
-    let verified = match factory.lookup_user(&resp.user, host).await {
-        Some(cred @ Credential::NativePassword(_)) => cred.verify_native(salt, &auth),
+    let account = factory.lookup_account(&resp.user, &host).await;
+    let verified = match &account {
+        Some(acc) => match &acc.credential {
+            cred @ Credential::NativePassword(_) => cred.verify_native(salt, &auth),
+        },
         None => false,
     };
     if !verified {
-        let e = SqlError::access_denied(&resp.user, host, !auth.is_empty());
+        let e = SqlError::access_denied(&resp.user, &host, !auth.is_empty());
+        write_err(io, capability, &e).await.map_err(io_err)?;
+        return Ok(None);
+    }
+    let account = account.expect("verified implies Some");
+    if account.account_locked {
+        let e = SqlError::account_locked(&resp.user, &host);
         write_err(io, capability, &e).await.map_err(io_err)?;
         return Ok(None);
     }
@@ -317,6 +326,8 @@ where
         connection_id,
         user: resp.user.clone(),
         peer: peer.to_string(),
+        auth_user: account.auth_user,
+        auth_host: account.auth_host,
         database: resp.database.clone(),
         collation: resp.collation,
         capability,
@@ -344,12 +355,19 @@ where
     Ok(Some((handler, capability)))
 }
 
-/// Host part of an `ip:port` peer address.
-fn peer_host(peer: &str) -> &str {
-    match peer.rsplit_once(':') {
+/// Host part of an `ip:port` peer address, normalizing IPv4-mapped IPv6 (`::ffff:a.b.c.d`)
+/// to dotted IPv4 so dual-stack `::` listeners match IPv4 host grants like `'10.%'`.
+fn peer_host(peer: &str) -> std::borrow::Cow<'_, str> {
+    let raw = match peer.rsplit_once(':') {
         Some((host, _)) => host.trim_start_matches('[').trim_end_matches(']'),
         None => peer,
+    };
+    if let Ok(std::net::IpAddr::V6(v6)) = raw.parse::<std::net::IpAddr>()
+        && let Some(v4) = v6.to_ipv4_mapped()
+    {
+        return std::borrow::Cow::Owned(v4.to_string());
     }
+    std::borrow::Cow::Borrowed(raw)
 }
 
 struct Conn<S, H> {
@@ -854,6 +872,8 @@ mod tests {
     fn peer_host_strips_port() {
         assert_eq!(peer_host("127.0.0.1:5000"), "127.0.0.1");
         assert_eq!(peer_host("[::1]:5000"), "::1");
+        assert_eq!(peer_host("[::ffff:10.0.0.5]:5000"), "10.0.0.5");
+        assert_eq!(peer_host("[::FFFF:127.0.0.1]:5000"), "127.0.0.1");
         assert_eq!(peer_host("local"), "local");
     }
 

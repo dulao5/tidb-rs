@@ -33,7 +33,7 @@ fn eq_fold(a: &str, b: &str) -> bool {
 
 /// Host specificity rank matching Go `compareHost` (`pkg/privilege/privileges/cache.go`):
 /// exact non-empty host < `prefix%` (longer first) < `""` < `"%"`.
-// go: compareHost L1
+// go: compareHost L2 (adds deterministic lexicographical tie-break between equal-length `prefix%` hosts for Rust's strict weak ordering requirement)
 fn compare_host(x: &str, y: &str) -> Ordering {
     let rank = |h: &str| -> u8 {
         if h == "%" {
@@ -198,10 +198,21 @@ impl BaseRecord {
         net.contains(ip)
     }
 
-    // go: baseRecord.match L1
+    // go: baseRecord.match L2 (also normalizes IPv4-mapped IPv6 `::ffff:a.b.c.d` to IPv4)
     pub fn matches(&self, user: &str, host: &str) -> bool {
-        self.user == user
-            && (pattern_match(host, &self.pat_chars, &self.pat_types) || self.host_match(host))
+        if self.user != user {
+            return false;
+        }
+        let normalized;
+        let host = if let Ok(IpAddr::V6(v6)) = host.parse::<IpAddr>()
+            && let Some(v4) = v6.to_ipv4_mapped()
+        {
+            normalized = v4.to_string();
+            normalized.as_str()
+        } else {
+            host
+        };
+        pattern_match(host, &self.pat_chars, &self.pat_types) || self.host_match(host)
     }
 
     // go: baseRecord.fullyMatch L1
@@ -216,7 +227,11 @@ pub struct UserRecord {
     pub base: BaseRecord,
     pub privileges: PrivilegeType,
     pub auth_string: String,
+    pub auth_plugin: String,
     pub account_locked: bool,
+    pub password_expired: bool,
+    pub has_password_lifetime: bool,
+    pub has_failed_login_policy: bool,
 }
 
 impl UserRecord {
@@ -230,7 +245,11 @@ impl UserRecord {
             base: BaseRecord::new(user, host),
             privileges,
             auth_string: String::new(),
+            auth_plugin: "mysql_native_password".to_owned(),
             account_locked: false,
+            password_expired: false,
+            has_password_lifetime: false,
+            has_failed_login_policy: false,
         }
     }
 
@@ -241,11 +260,68 @@ impl UserRecord {
         self
     }
 
+    /// Sets `mysql.user.plugin` (empty plugin normalizes to `mysql_native_password`, matching Go).
+    // glue: builder helper for plugin
+    pub fn with_auth_plugin(mut self, plugin: impl Into<String>) -> Self {
+        let p = plugin.into();
+        self.auth_plugin = if p.is_empty() {
+            "mysql_native_password".to_owned()
+        } else {
+            p
+        };
+        self
+    }
+
     /// Sets `mysql.user.Account_locked` (roles and locked accounts cannot log in).
     // glue: builder helper for account_locked
     pub fn with_account_locked(mut self, locked: bool) -> Self {
         self.account_locked = locked;
         self
+    }
+
+    /// Sets `mysql.user.password_expired` (`Y` = expired).
+    // glue: builder helper for password_expired
+    pub fn with_password_expired(mut self, expired: bool) -> Self {
+        self.password_expired = expired;
+        self
+    }
+
+    /// Sets whether `mysql.user.password_lifetime` configures a non-zero expiration window.
+    // glue: builder helper for password_lifetime
+    pub fn with_password_lifetime(mut self, has_lifetime: bool) -> Self {
+        self.has_password_lifetime = has_lifetime;
+        self
+    }
+
+    /// Sets whether `mysql.user.User_attributes` configures failed-login locking or auto-lock.
+    // glue: builder helper for failed-login policy
+    pub fn with_failed_login_policy(mut self, has_policy: bool) -> Self {
+        self.has_failed_login_policy = has_policy;
+        self
+    }
+}
+
+/// GlobalPrivRecord represents a row in `mysql.global_priv` (TLS/SSL/X509/SAN requirements).
+#[derive(Clone, Debug)]
+pub struct GlobalPrivRecord {
+    pub base: BaseRecord,
+    pub require_ssl: bool,
+    pub broken: bool,
+}
+
+impl GlobalPrivRecord {
+    // glue: constructor
+    pub fn new(
+        user: impl Into<String>,
+        host: impl Into<String>,
+        require_ssl: bool,
+        broken: bool,
+    ) -> Self {
+        Self {
+            base: BaseRecord::new(user, host),
+            require_ssl,
+            broken,
+        }
     }
 }
 
@@ -448,6 +524,7 @@ impl RoleGraphEdgesTable {
 #[derive(Clone, Debug, Default)]
 pub struct MySQLPrivilege {
     user: HashMap<String, Vec<UserRecord>>,
+    global_priv: HashMap<String, Vec<GlobalPrivRecord>>,
     db: HashMap<String, Vec<DbRecord>>,
     tables_priv: HashMap<String, Vec<TablesPrivRecord>>,
     columns_priv: HashMap<String, Vec<ColumnsPrivRecord>>,
@@ -463,6 +540,15 @@ impl MySQLPrivilege {
         Self::default()
     }
 
+    /// Appends a `mysql.user` record without sorting; caller must invoke [`Self::sort_all`].
+    // glue: bulk-load helper
+    pub fn push_user(&mut self, record: UserRecord) {
+        self.user
+            .entry(record.base.user.clone())
+            .or_default()
+            .push(record);
+    }
+
     /// Registers a `mysql.user` record and maintains Go's host-specificity sort order.
     // glue: builder helper for tests and loaders
     pub fn add_user(&mut self, record: UserRecord) {
@@ -471,12 +557,30 @@ impl MySQLPrivilege {
         recs.sort_by(compare_user_record);
     }
 
+    /// Appends a `mysql.db` record without sorting; caller must invoke [`Self::sort_all`].
+    // glue: bulk-load helper
+    pub fn push_db(&mut self, record: DbRecord) {
+        self.db
+            .entry(record.base.user.clone())
+            .or_default()
+            .push(record);
+    }
+
     /// Registers a `mysql.db` record and maintains Go's host-specificity sort order.
     // glue: builder helper for tests and loaders
     pub fn add_db(&mut self, record: DbRecord) {
         let recs = self.db.entry(record.base.user.clone()).or_default();
         recs.push(record);
         recs.sort_by(compare_db_record);
+    }
+
+    /// Appends a `mysql.tables_priv` record without sorting; caller must invoke [`Self::sort_all`].
+    // glue: bulk-load helper
+    pub fn push_table_priv(&mut self, record: TablesPrivRecord) {
+        self.tables_priv
+            .entry(record.base.user.clone())
+            .or_default()
+            .push(record);
     }
 
     /// Registers a `mysql.tables_priv` record and maintains Go's host-specificity sort order.
@@ -490,6 +594,15 @@ impl MySQLPrivilege {
         recs.sort_by(compare_tables_priv_record);
     }
 
+    /// Appends a `mysql.columns_priv` record without sorting; caller must invoke [`Self::sort_all`].
+    // glue: bulk-load helper
+    pub fn push_column_priv(&mut self, record: ColumnsPrivRecord) {
+        self.columns_priv
+            .entry(record.base.user.clone())
+            .or_default()
+            .push(record);
+    }
+
     /// Registers a `mysql.columns_priv` record and maintains Go's host-specificity sort order.
     // glue: builder helper for tests and loaders
     pub fn add_column_priv(&mut self, record: ColumnsPrivRecord) {
@@ -501,6 +614,15 @@ impl MySQLPrivilege {
         recs.sort_by(compare_columns_priv_record);
     }
 
+    /// Appends a `mysql.global_grants` record without sorting; caller must invoke [`Self::sort_all`].
+    // glue: bulk-load helper
+    pub fn push_dynamic_priv(&mut self, record: DynamicPrivRecord) {
+        self.dynamic_priv
+            .entry(record.base.user.clone())
+            .or_default()
+            .push(record);
+    }
+
     /// Registers a `mysql.global_grants` dynamic privilege record and maintains Go's sort order.
     // glue: builder helper for tests and loaders
     pub fn add_dynamic_priv(&mut self, record: DynamicPrivRecord) {
@@ -510,6 +632,26 @@ impl MySQLPrivilege {
             .or_default();
         recs.push(record);
         recs.sort_by(compare_dynamic_priv_record);
+    }
+
+    /// Appends a `mysql.default_roles` record without sorting; caller must invoke [`Self::sort_all`].
+    // glue: bulk-load helper
+    pub fn push_default_role(
+        &mut self,
+        user: impl Into<String>,
+        host: impl Into<String>,
+        role_user: impl Into<String>,
+        role_host: impl Into<String>,
+    ) {
+        let rec = DefaultRoleRecord {
+            base: BaseRecord::new(user, host),
+            default_role_user: role_user.into(),
+            default_role_host: role_host.into(),
+        };
+        self.default_roles
+            .entry(rec.base.user.clone())
+            .or_default()
+            .push(rec);
     }
 
     /// Registers a `mysql.default_roles` record and maintains Go's sort order.
@@ -531,12 +673,35 @@ impl MySQLPrivilege {
         recs.sort_by(compare_default_role_record);
     }
 
+    /// Appends a `mysql.global_priv` record without sorting; caller must invoke [`Self::sort_all`].
+    // glue: bulk-load helper
+    pub fn push_global_priv(&mut self, record: GlobalPrivRecord) {
+        self.global_priv
+            .entry(record.base.user.clone())
+            .or_default()
+            .push(record);
+    }
+
+    /// Registers a `mysql.global_priv` record and maintains Go's host-specificity sort order.
+    // glue: builder helper for tests and loaders
+    pub fn add_global_priv(&mut self, record: GlobalPrivRecord) {
+        let recs = self
+            .global_priv
+            .entry(record.base.user.clone())
+            .or_default();
+        recs.push(record);
+        recs.sort_by(|x, y| compare_base_record(&x.base, &y.base));
+    }
+
     /// Sorts every privilege bucket using Go's host-specificity order (`SortUserTable`,
     /// `LoadDBTable`, `LoadTablesPrivTable`, `LoadColumnsPrivTable`, `LoadGlobalGrantsTable`).
     // go: MySQLPrivilege.SortUserTable L1
     pub fn sort_all(&mut self) {
         for recs in self.user.values_mut() {
             recs.sort_by(compare_user_record);
+        }
+        for recs in self.global_priv.values_mut() {
+            recs.sort_by(|x, y| compare_base_record(&x.base, &y.base));
         }
         for recs in self.db.values_mut() {
             recs.sort_by(compare_db_record);
@@ -597,6 +762,14 @@ impl MySQLPrivilege {
     // go: MySQLPrivilege.matchUser L1
     pub fn match_user(&self, user: &str, host: &str) -> Option<&UserRecord> {
         self.user
+            .get(user)?
+            .iter()
+            .find(|r| r.base.matches(user, host))
+    }
+
+    // go: MySQLPrivilege.matchGlobalPriv L1
+    pub fn match_global_priv(&self, user: &str, host: &str) -> Option<&GlobalPrivRecord> {
+        self.global_priv
             .get(user)?
             .iter()
             .find(|r| r.base.matches(user, host))

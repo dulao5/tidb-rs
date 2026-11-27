@@ -7,7 +7,7 @@
 
 use std::future::Future;
 
-use crate::auth::Credential;
+use crate::auth::{AccountAuth, Credential};
 use crate::constants::status;
 use crate::error::SqlError;
 use crate::params::Param;
@@ -94,6 +94,10 @@ pub struct ConnectionInfo {
     pub user: String,
     /// Client address (`ip:port`).
     pub peer: String,
+    /// Matched `mysql.user.User` from authentication (`None` when using legacy `lookup_user`).
+    pub auth_user: Option<String>,
+    /// Matched `mysql.user.Host` from authentication (`None` when using legacy `lookup_user`).
+    pub auth_host: Option<String>,
     /// Default database from the handshake, if any.
     pub database: Option<String>,
     /// Collation id the client asked for in the handshake.
@@ -176,6 +180,16 @@ pub trait SessionFactory: Send + Sync + 'static {
         user: &str,
         host: &str,
     ) -> impl Future<Output = Option<Credential>> + Send;
+
+    /// Returns full account authentication metadata (credential, matched `auth_user`/`auth_host`,
+    /// and `account_locked` status). Defaults to wrapping [`Self::lookup_user`].
+    fn lookup_account(
+        &self,
+        user: &str,
+        host: &str,
+    ) -> impl Future<Output = Option<AccountAuth>> + Send {
+        async move { self.lookup_user(user, host).await.map(AccountAuth::from) }
+    }
 
     /// Opens a session for an authenticated connection. The default database, if any, is then
     /// applied with [`SessionHandler::use_db`].

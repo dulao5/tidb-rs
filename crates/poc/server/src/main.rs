@@ -40,10 +40,12 @@ struct Args {
     /// Port to listen on (4001 avoids clashing with a Go TiDB on 4000).
     #[arg(short = 'P', long, default_value_t = 4001)]
     port: u16,
-    /// The single account accepted until users are read from the cluster.
+    /// Legacy single-account username flag (kept for CLI compatibility; authentication reads
+    /// `mysql.user` from the cluster).
     #[arg(long, default_value = "root")]
     user: String,
-    /// Password of `--user` (empty = no password).
+    /// Legacy password flag for `--user` (kept for CLI compatibility; authentication reads
+    /// `mysql.user` from the cluster).
     #[arg(long, default_value = "")]
     password: String,
     /// Auth plugin advertised in the handshake (TiDB's default_authentication_plugin).
