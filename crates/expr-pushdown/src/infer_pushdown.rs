@@ -115,6 +115,7 @@ fn can_scalar_func_push_down(
         }
     }
 
+    // log-skip: pkg/expression/infer_pushdown.go:115 InUnionMetadata proto marshal cannot fail here (real marshal error is logged in expr_to_pb.rs)
     true
 }
 

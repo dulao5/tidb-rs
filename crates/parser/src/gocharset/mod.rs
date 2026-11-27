@@ -364,8 +364,11 @@ pub fn get_charset_info_by_id(co_id: isize) -> (String, String, Result<(), Error
         );
     }
 
-    log::warn!(
-        "unable to get collation name from collation ID, return default charset and collation instead ID={co_id}"
+    let stack = errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture());
+    tidb_base::log_warn!(
+        "unable to get collation name from collation ID, return default charset and collation instead",
+        "ID" => co_id,
+        "stack" => &stack,
     );
     (
         mysql::DefaultCharset.to_owned(),

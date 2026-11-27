@@ -230,12 +230,12 @@ impl<F: Future> Future for Instrumented<F> {
             STALLS.fetch_add(1, Ordering::Relaxed);
             crate::stall::count(cause);
             self.metrics.stall(d, cause);
-            tracing::warn!(
-                cause = cause.as_str(),
-                task = self.metrics.name,
-                elapsed = ?d,
-                threshold = ?cfg.stall_threshold,
-                "poll stall: a task ran without yielding"
+            tidb_base::log_warn!(
+                "poll stall: a task ran without yielding",
+                "cause" => cause.as_str(),
+                "task" => self.metrics.name,
+                "elapsed" => d,
+                "threshold" => cfg.stall_threshold,
             );
         }
         out

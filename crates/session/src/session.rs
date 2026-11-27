@@ -1567,7 +1567,15 @@ impl Session {
                 if !self.core.sctx.vars.in_restricted_sql
                     && !tidb_sessionctx::variable::error::ErrUnknownSystemVar.equal(&err)
                 {
-                    log::warn!("compile SQL failed: {err}, SQL={}", sql_for_log(&text));
+                    let sql_log =
+                        tidb_parser::normalize(&text, &self.core.sctx.vars.enable_redact_log);
+                    tidb_base::log_warn!(
+                        "compile SQL failed",
+                        "conn" => self.core.sctx.vars.connection_id,
+                        "session_alias" => &self.core.sctx.vars.session_alias,
+                        "error" => &err,
+                        "SQL" => &sql_log,
+                    );
                 }
                 return Err(err);
             }
@@ -1615,12 +1623,17 @@ impl Session {
         if let Err(err) = &r
             && !err_is_noisy(err)
         {
-            log::warn!(
-                "run statement failed: schemaVersion={} {err} session={}",
-                tidb_sessionctx::expropt::MetaOnlyInfoSchema::schema_meta_version(
-                    &*self.core.sctx.get_info_schema()
-                ),
-                self.string()
+            let schema_version = tidb_sessionctx::expropt::MetaOnlyInfoSchema::schema_meta_version(
+                &*self.core.sctx.get_info_schema(),
+            );
+            let sess_str = self.string();
+            tidb_base::log_warn!(
+                "run statement failed",
+                "conn" => self.core.sctx.vars.connection_id,
+                "session_alias" => &self.core.sctx.vars.session_alias,
+                "schemaVersion" => schema_version,
+                "error" => err,
+                "session" => &sess_str,
             );
         }
         // Telemetry: not ported.

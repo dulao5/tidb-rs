@@ -167,7 +167,10 @@ pub fn rewrite_new_collation_id_if_needed(id: i32) -> i32 {
         if id >= 0 {
             return id.wrapping_neg();
         }
-        log::warn!("Unexpected negative collation ID for rewrite. ID={id}");
+        tidb_base::log_warn!(
+            "Unexpected negative collation ID for rewrite.",
+            "ID" => id,
+        );
     }
     id
 }
@@ -179,7 +182,10 @@ pub fn restore_collation_id_if_needed(id: i32) -> i32 {
         if id <= 0 {
             return id.wrapping_neg();
         }
-        log::warn!("Unexpected positive collation ID for restore. ID={id}");
+        tidb_base::log_warn!(
+            "Unexpected positive collation ID for restore.",
+            "ID" => id,
+        );
     }
     id
 }
@@ -193,8 +199,13 @@ pub fn get_collator(collate: &str) -> &'static dyn Collator {
             Some(ctor) => ctor.as_ref(),
             None => {
                 if !collate.is_empty() {
-                    log::warn!(
-                        "Unable to get collator by name, use binCollator instead. name={collate}"
+                    let stack = tidb_base::errors::format_backtrace_string(
+                        &std::backtrace::Backtrace::force_capture(),
+                    );
+                    tidb_base::log_warn!(
+                        "Unable to get collator by name, use binCollator instead.",
+                        "name" => collate,
+                        "stack" => &stack,
                     );
                 }
                 m[gocharset::CollationUTF8MB4].as_ref()
@@ -232,7 +243,14 @@ pub fn get_collator_by_id(id: isize) -> &'static dyn Collator {
         return match newCollators.1.get(&id) {
             Some(ctor) => ctor.as_ref(),
             None => {
-                log::warn!("Unable to get collator by ID, use binCollator instead. ID={id}");
+                let stack = tidb_base::errors::format_backtrace_string(
+                    &std::backtrace::Backtrace::force_capture(),
+                );
+                tidb_base::log_warn!(
+                    "Unable to get collator by ID, use binCollator instead.",
+                    "ID" => id,
+                    "stack" => &stack,
+                );
                 newCollators.0["utf8mb4_bin"].as_ref()
             }
         };
@@ -272,14 +290,17 @@ pub fn substitute_missing_collation_to_default(co: &str) -> String {
     if get_collation_by_name(co).is_ok() {
         return co.to_owned();
     }
-    log::warn!(
+    let msg = format!(
         "The collation {co} specified on connection is not supported when new collation is enabled, switch to the default collation: {}",
         mysql::DefaultCollationName
     );
+    tidb_base::log_warn!(&msg);
     match get_collation_by_name(gocharset::CollationUTF8MB4) {
         Ok(coll) => coll.name.clone(),
         Err(err) => {
-            log::warn!("{err}");
+            let err_bytes = err.error();
+            let err_msg = String::from_utf8_lossy(&err_bytes);
+            tidb_base::log_warn!(err_msg.as_ref());
             // Go dereferences the nil *Collation.
             panic!("runtime error: invalid memory address or nil pointer dereference")
         }
@@ -428,9 +449,11 @@ pub fn collation_to_proto(c: &str) -> i32 {
         return rewrite_new_collation_id_if_needed(coll.id as i32);
     }
     let v = rewrite_new_collation_id_if_needed(mysql::DefaultCollationID as i32);
-    log::warn!(
-        "Unable to get collation ID by name, use ID of the default collation instead name={c} default collation ID={v} default collation={}",
-        mysql::DefaultCollationName
+    tidb_base::log_warn!(
+        "Unable to get collation ID by name, use ID of the default collation instead",
+        "name" => c,
+        "default collation ID" => v,
+        "default collation" => mysql::DefaultCollationName,
     );
     v
 }
@@ -487,10 +510,11 @@ pub fn proto_to_collation(c: i32) -> String {
     if let Ok(coll) = gocharset::get_collation_by_id(restore_collation_id_if_needed(c) as isize) {
         return coll.name.clone();
     }
-    log::warn!(
-        "Unable to get collation name from ID, use name of the default collation instead id={c} default collation ID={} default collation={}",
-        mysql::DefaultCollationID,
-        mysql::DefaultCollationName
+    tidb_base::log_warn!(
+        "Unable to get collation name from ID, use name of the default collation instead",
+        "id" => c,
+        "default collation ID" => mysql::DefaultCollationID,
+        "default collation" => mysql::DefaultCollationName,
     );
     mysql::DefaultCollationName.to_owned()
 }

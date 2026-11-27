@@ -657,14 +657,18 @@ fn is_bin_collation(collate: &str) -> bool {
 
 /// getBinCollation get binary collation by charset. Go logs "unexpected charset" for other
 /// charsets (unreachable) and returns utf8mb4_bin.
-// go: getBinCollation L2 (the unreachable error log is not written)
+// go: getBinCollation L1
 fn get_bin_collation(cs: &str) -> &'static str {
     match cs {
         CharsetUTF8 => CollationUTF8,
         CharsetUTF8MB4 => CollationUTF8MB4,
         CharsetGBK => CollationGBKBin,
         // it must return something, never reachable
-        _ => CollationUTF8MB4,
+        _ => {
+            let msg = format!("unexpected charset {cs}");
+            tidb_base::log_error!(&msg);
+            CollationUTF8MB4
+        }
     }
 }
 

@@ -156,10 +156,11 @@ impl FinishCh {
 /// error Go panics with where the Rust code returns it instead (the kill check of a
 /// comparison, a memory quota), boxed. The send waits for room in the channel, as Go's does;
 /// it returns at once when the receiver is gone (the executor was dropped).
-// go: processPanicAndLog L2 (the payload of a caught unwind or a boxed error; the send is awaited [M-PANIC, M-CH])
+// go: processPanicAndLog L2 (the payload of a caught unwind or a boxed error + captured stack; the send is awaited [M-PANIC, M-CH])
 pub async fn process_panic_and_log<R: Send>(
     err_output_chan: &mpsc::Sender<RowWithError<R>>,
     r: Box<dyn Any + Send>,
+    bt: Option<String>,
 ) {
     let err = get_recover_error(r);
     let _ = err_output_chan
@@ -168,7 +169,10 @@ pub async fn process_panic_and_log<R: Send>(
             err: Some(err.clone()),
         })
         .await;
-    log::warn!("executor panicked, error: {err}");
+    let stack = bt.unwrap_or_else(|| {
+        tidb_base::errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture())
+    });
+    tidb_base::log_warn!("executor panicked", "error" => &err, "stack" => &stack);
 }
 
 /// `util.GetRecoverError(r)`: an error panic value is the error, another value is formatted
@@ -477,11 +481,11 @@ mod tests {
     #[tokio::test]
     async fn recovered_panic_goes_to_the_channel() {
         let (tx, mut rx) = mpsc::channel::<RowWithError<RowHandle>>(1);
-        process_panic_and_log(&tx, Box::new(Error::plain("boom"))).await;
+        process_panic_and_log(&tx, Box::new(Error::plain("boom")), None).await;
         let r = rx.recv().await.unwrap();
         assert!(r.row.is_none());
         assert_eq!(r.err.unwrap().to_string(), "boom");
-        process_panic_and_log(&tx, Box::new("index out of range")).await;
+        process_panic_and_log(&tx, Box::new("index out of range"), None).await;
         let r = rx.recv().await.unwrap();
         assert_eq!(r.err.unwrap().to_string(), "index out of range");
     }

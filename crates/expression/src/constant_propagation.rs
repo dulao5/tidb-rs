@@ -144,13 +144,18 @@ impl BasePropConstSolver {
             };
             let con = match d.kind() {
                 KindInt64 => match parse_enum_value(elems, d.get_int64() as u64) {
-                    // Go logs "Invalid Enum parsed during constant propagation" at debug level.
                     Ok(e) => enum_con(e),
-                    Err(_) => return (None, false),
+                    Err(_) => {
+                        tidb_base::log_debug!("Invalid Enum parsed during constant propagation");
+                        return (None, false);
+                    }
                 },
                 KindString => match parse_enum_name(elems, d.get_string(), d.collation()) {
                     Ok(e) => enum_con(e),
-                    Err(_) => return (None, false),
+                    Err(_) => {
+                        tidb_base::log_debug!("Invalid Enum parsed during constant propagation");
+                        return (None, false);
+                    }
                 },
                 // It's already a hybrid type. Just use it.
                 KindMysqlEnum | KindMysqlSet => con,
@@ -494,7 +499,11 @@ impl PropConstSolver {
             self.base.insert_col(col);
         }
         if self.base.columns.len() > MaxPropagateColsCnt {
-            // Go logs "too many columns in a single CNF" at warn level.
+            tidb_base::log_warn!(
+                "too many columns in a single CNF",
+                "numCols" => self.base.columns.len(),
+                "maxNumCols" => MaxPropagateColsCnt,
+            );
             return conditions.to_vec();
         }
         self.propagate_constant_eq();
@@ -820,7 +829,11 @@ impl PropOuterJoinConstSolver<'_> {
             self.base.insert_col(col);
         }
         if self.base.columns.len() > MaxPropagateColsCnt {
-            // Go logs "too many columns" at warn level.
+            tidb_base::log_warn!(
+                "too many columns",
+                "numCols" => self.base.columns.len(),
+                "maxNumCols" => MaxPropagateColsCnt,
+            );
             return (join_conds.to_vec(), filter_conds.to_vec());
         }
         self.propagate_constant_eq();

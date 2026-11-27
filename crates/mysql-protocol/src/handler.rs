@@ -163,6 +163,31 @@ pub trait SessionHandler: Send + 'static {
     fn status_flags(&self) -> u16 {
         status::AUTOCOMMIT
     }
+
+    /// Session alias (`tidb_session_alias`, empty by default).
+    fn session_alias(&self) -> &str {
+        ""
+    }
+
+    /// Readable transaction mode for `command dispatched failed` (Go `GetReadableTxnMode`).
+    fn txn_mode(&self) -> &str {
+        "PESSIMISTIC"
+    }
+
+    /// Active transaction start TS (or stale read TS, or 0) for `command dispatched failed`.
+    fn txn_timestamp(&self) -> u64 {
+        0
+    }
+
+    /// Active `tidb_redact_log` mode (`"OFF"`, `"ON"`, or `"MARKER"`).
+    fn redact_mode(&self) -> &str {
+        tidb_base::errors::redact_log_enabled_load()
+    }
+
+    /// Connection collation name for `connInfo` (`utf8mb4_0900_ai_ci` / `utf8mb4_bin`).
+    fn collation_name(&self) -> &str {
+        "utf8mb4_bin"
+    }
 }
 
 /// Creates sessions and looks up accounts. Shared by all connections.

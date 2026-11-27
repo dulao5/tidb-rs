@@ -141,7 +141,7 @@ impl InfoCache {
         h.first_known_schema_version = version;
         move || {
             drop(old);
-            log::info!(
+            tidb_base::log_info!(
                 "reset the old infoschema after v1 v2 switch, using the stale object will panic"
             );
         }
@@ -174,7 +174,7 @@ impl InfoCache {
 
     // go: InfoCache.getSchemaByTimestampNoLock L1
     fn get_schema_by_timestamp_no_lock(h: &Inner, ts: u64) -> Option<Arc<InfoSchemaV2>> {
-        log::debug!("SCHEMA CACHE get schema, timestamp: {ts}");
+        tidb_base::log_debug!("SCHEMA CACHE get schema", "timestamp" => ts);
         // search one by one instead of binary search, because the timestamp of a schema could be 0
         // this is ok because the size of h.cache is small (currently set to 16)
         // moreover, the most likely hit element in the array is the first one in steady mode
@@ -215,7 +215,7 @@ impl InfoCache {
             break;
         }
 
-        log::debug!("SCHEMA CACHE no schema found");
+        tidb_base::log_debug!("SCHEMA CACHE no schema found");
         None
     }
 
@@ -273,7 +273,11 @@ impl InfoCache {
     // go: InfoCache.Insert L1
     pub fn insert(&self, is: Arc<InfoSchemaV2>, schema_ts: u64) -> bool {
         let version = is.schema_meta_version();
-        log::debug!("INSERT SCHEMA, schema ts: {schema_ts}, schema version: {version}");
+        tidb_base::log_debug!(
+            "INSERT SCHEMA",
+            "schema ts" => schema_ts,
+            "schema version" => version,
+        );
         let mut h = self.mu.write();
 
         if h.last_check_version == 0 {
@@ -351,8 +355,9 @@ impl InfoCache {
     // glue: stub of InfoCache.gcOldVersion, blocked-by:D06.2 (meta.GetOldestSchemaVersion needs store/helper's MVCC API)
     fn gc_old_version(&self, current_version: i64) {
         let _ = &self.r;
-        log::debug!(
-            "GC compact old schema version skipped: meta.GetOldestSchemaVersion is not ported, current version: {current_version}"
+        tidb_base::log_debug!(
+            "GC compact old schema version skipped: meta.GetOldestSchemaVersion is not ported",
+            "current version" => current_version,
         );
     }
 }

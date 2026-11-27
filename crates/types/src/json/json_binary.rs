@@ -519,7 +519,7 @@ impl<'a> BinaryJSON<'a> {
             }
             _ => {}
         }
-        log::error!("unreachable JSON type type={}", self.type_code);
+        tidb_base::log_error!("unreachable JSON type", "type" => self.type_code);
         None
     }
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::constants::{
     DEFAULT_MAX_ALLOWED_PACKET, DEFAULT_SERVER_VERSION, auth_plugin, capability,
@@ -30,6 +30,12 @@ pub struct ServerConfig {
     pub max_allowed_packet: usize,
     /// TLS configuration; when set, `CLIENT_SSL` is advertised and clients may upgrade.
     pub tls: Option<TlsConfig>,
+    /// Maximum time to wait for active (in-flight or in-transaction) sessions to finish during
+    /// graceful shutdown (Go `DefaultDrainWait` = 15s, `server.go:1012`).
+    pub drain_wait: Duration,
+    /// Maximum time to wait for killed connections to exit after `kill all connections.`
+    /// (Go `DefaultCancelWait` = 1s, `server.go:1069`).
+    pub cancel_wait: Duration,
 }
 
 impl ServerConfig {
@@ -51,6 +57,8 @@ impl Default for ServerConfig {
             capability: capability::SERVER_DEFAULT,
             max_allowed_packet: DEFAULT_MAX_ALLOWED_PACKET,
             tls: None,
+            drain_wait: Duration::from_secs(15),
+            cancel_wait: Duration::from_secs(1),
         }
     }
 }
@@ -89,14 +97,15 @@ impl<F: SessionFactory> Server<F> {
         self
     }
 
-    /// Accepts connections until `shutdown` completes, then aborts the remaining connections.
+    /// Accepts connections until `shutdown` completes, then drains and closes remaining connections.
     pub async fn serve(
         &self,
         listener: TcpListener,
         shutdown: impl Future<Output = ()>,
     ) -> io::Result<()> {
-        info!(addr = %listener.local_addr()?, "MySQL protocol server listening");
-        let mut conns: Vec<JoinHandle<()>> = Vec::new();
+        let local_addr = listener.local_addr()?.to_string();
+        tidb_base::log_info!("server is running MySQL protocol", "addr" => &local_addr);
+        let mut conns: Vec<(JoinHandle<()>, Arc<crate::conn::ConnStatus>)> = Vec::new();
         // Finished connection tasks are reaped when the list has doubled since the last reap,
         // so accepting stays amortised O(1) however many connections are open.
         let mut reap_at = 64;
@@ -104,7 +113,7 @@ impl<F: SessionFactory> Server<F> {
         tokio::pin!(shutdown);
         loop {
             if conns.len() >= reap_at {
-                conns.retain(|h| !h.is_finished());
+                conns.retain(|(h, _)| !h.is_finished());
                 reap_at = (conns.len() * 2).max(64);
             }
             tokio::select! {
@@ -126,22 +135,59 @@ impl<F: SessionFactory> Server<F> {
                     let config = Arc::clone(&self.config);
                     let factory = Arc::clone(&self.factory);
                     let admission = self.admission.clone();
+                    let status = Arc::new(crate::conn::ConnStatus::new());
+                    let conn_status = Arc::clone(&status);
                     let fut = async move {
-                        crate::conn::run(stream, peer.to_string(), id, started, &config, &*factory, admission).await;
+                        crate::conn::run(stream, peer.to_string(), id, started, &config, &*factory, admission, conn_status).await;
                     };
-                    conns.push(match &self.pool {
+                    let handle = match &self.pool {
                         Some(pool) => pool.spawn_connection("connection", fut),
                         None => tokio::spawn(fut),
-                    });
+                    };
+                    conns.push((handle, status));
                 }
             }
         }
-        info!(connections = conns.len(), "shutting down");
-        for h in &conns {
+        // Match Go Server.DrainClients (pkg/server/server.go:1012-1072):
+        // skip idle connections that are reading and not in a transaction; wait up to
+        // `drain_wait` (default 15s) for active/in-txn connections only.
+        tidb_base::log_info!("start drain clients");
+        conns.retain(|(h, _)| !h.is_finished());
+        let has_active = |list: &[(JoinHandle<()>, Arc<crate::conn::ConnStatus>)]| {
+            list.iter()
+                .any(|(h, st)| !h.is_finished() && st.needs_drain_wait())
+        };
+        if !has_active(&conns) {
+            tidb_base::log_info!("all sessions quit in drain wait time");
+        } else {
+            let drain_wait = tokio::time::timeout(self.config.drain_wait, async {
+                while has_active(&conns) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            if drain_wait.is_ok() {
+                tidb_base::log_info!("all sessions quit in drain wait time");
+            } else {
+                tidb_base::log_info!("timeout waiting all sessions quit");
+            }
+        }
+        // Go server.go:1065 unconditionally calls s.KillAllConnections().
+        tidb_base::log_info!("kill all connections.", "category" => "server");
+        conns.retain(|(h, _)| !h.is_finished());
+        for (h, _) in &conns {
             h.abort();
         }
-        for h in conns {
-            let _ = h.await;
+        if !conns.is_empty() {
+            let cancel_res = tokio::time::timeout(self.config.cancel_wait, async {
+                for (h, _) in conns {
+                    let _ = h.await;
+                }
+            })
+            .await;
+            if cancel_res.is_err() {
+                tidb_base::log_warn!("some sessions do not quit in cancel wait time");
+            }
         }
         Ok(())
     }

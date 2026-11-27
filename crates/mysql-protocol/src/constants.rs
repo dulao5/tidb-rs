@@ -157,5 +157,5 @@ pub const DEFAULT_MAX_ALLOWED_PACKET: usize = 64 << 20;
 pub const MYSQL_COMPATIBILITY_VERSION: &str = "8.0.11";
 
 /// Server version string, in TiDB's `<mysql version>-TiDB-<release>` format so that tools which
-/// parse TiDB's version keep working. The release part identifies this implementation.
-pub const DEFAULT_SERVER_VERSION: &str = "8.0.11-TiDB-v8.4.0-tidb-rs";
+/// parse TiDB's version keep working. The release part follows ruling R35 (`+tidb-rs`).
+pub const DEFAULT_SERVER_VERSION: &str = "8.0.11-TiDB-v8.5.8+tidb-rs";
