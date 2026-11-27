@@ -552,9 +552,7 @@ pub fn try_fast_plan(
         .plan_column_id
         .0
         .store(0, std::sync::atomic::Ordering::SeqCst);
-    // The session user (`SessionVars.User`, D05.2) is not kept on the Rust session vars: it
-    // only goes into the privilege errors, which the privilege manager raises (none, D04.1).
-    let (user_name, host_name) = get_user_and_host_name(None);
+    let (user_name, host_name) = get_user_and_host_name(ctx.vars.user.as_ref());
     match &*node.node {
         Stmt::Select(x) => {
             if x.select_into_opt.is_some() {
@@ -690,11 +688,13 @@ const ReadCommitted: &str = "READ-COMMITTED";
 /// `tikvstore.LockNoWait` (client-go `kv`).
 const LockNoWait: i64 = -1;
 
-/// getVisitInfo collects 2 source of visitInfos:
+/// getVisitInfo collects 3 sources of visitInfos for SELECT PointGet plans:
+///  0. table-read `SELECT` (`column = "*"`, error `1142`, specs/D04.1-privilege/spec.md §5.2 item 5,
+///     rulings R29 and R30), checked before column-level entries;
 ///  1. output names. To distinguish between table-level and column-level privilege error report, unfoldFromWildCard is needed.
 ///     If the PointPlan is inside UPDATE or DELETE statements, the checking of output names should be ignored.
 ///  2. columns in WHERE clause.
-// go: getVisitInfo L2 (the intest panic of a length mismatch is the logged branch)
+// go: getVisitInfo L2 (the intest panic of a length mismatch is the logged branch; R29/R30 prepends table-read SelectPriv)
 pub fn get_visit_info(
     user: &str,
     host: &str,
@@ -712,7 +712,19 @@ pub fn get_visit_info(
         );
         return None;
     }
-    let mut res = Vec::new();
+    let mut res = Vec::with_capacity(1 + output_names.len() + cols_in_where.len());
+    // Single-point table-read SELECT privilege (R29/R30): must precede column entries so users
+    // with zero privilege on the table receive 1142 consistently instead of 1143.
+    let tbl_err =
+        ErrTableaccessDenied.fast_gen_by_args(vec![gs("SELECT"), gs(user), gs(host), gs(tbl)]);
+    res.push(VisitInfo {
+        db: db.to_owned(),
+        table: tbl.to_owned(),
+        column: "*".to_owned(),
+        privilege: SelectPriv.0,
+        err: Some(tbl_err),
+        ..Default::default()
+    });
     for (i, name) in output_names.iter().enumerate() {
         let auth_err = if !unfold[i] {
             ErrColumnaccessDenied.fast_gen_by_args(vec![
@@ -959,8 +971,28 @@ pub fn try_point_get_plan(
         return Ok(None);
     };
     // The deferred function of Go: colsInWhereClause and unfoldFromWildCard of the result.
+    // When `is_table_dual` is triggered by an overflow inside `LogicAnd`, Go's `getNameValuePairs`
+    // drops `pairs` (returning `nil, true`), which would skip privilege checks on WHERE columns
+    // (specs/D04.1-privilege/spec.md §2.2 item 9, §5.2 item 5, R29). Collect all column names
+    // referenced in `sel_stmt.where_` when `is_table_dual` is true; if the WHERE clause contains
+    // an expression shape we cannot exhaustively inspect (e.g. a subquery), fall back to the
+    // regular planner (`None`) rather than risking an unchecked column.
+    let mut table_dual_where_cols: Option<Vec<String>> = None;
+    if is_table_dual {
+        let mut cols = Vec::new();
+        if let Some(where_expr) = sel_stmt.where_.as_ref()
+            && !collect_where_col_names(where_expr, &tbl_alias, &mut cols)
+        {
+            return Ok(None);
+        }
+        table_dual_where_cols = Some(cols);
+    }
     let finish = |mut p: PointGetPlan| {
-        p.cols_in_where_clause = pairs_to_column_names(&pairs);
+        p.cols_in_where_clause = if p.is_table_dual {
+            table_dual_where_cols.clone().unwrap_or_default()
+        } else {
+            pairs_to_column_names(&pairs)
+        };
         p.unfold_from_wild_card = unfold.clone();
         Some(p)
     };
@@ -978,7 +1010,8 @@ pub fn try_point_get_plan(
         )?
     {
         if is_table_dual {
-            let mut p = new_point_get_plan(ctx, &tbl_name_schema.o, schema, &tbl, names);
+            // R29 (spec §5.2 item 5): use resolved lowercase `db_name` rather than possibly empty `tbl_name_schema.o`.
+            let mut p = new_point_get_plan(ctx, &db_name, schema, &tbl, names);
             p.is_table_dual = true;
             return Ok(finish(p));
         }
@@ -1016,6 +1049,78 @@ pub fn try_point_get_plan(
 // go: pairsToColumnNames L1
 fn pairs_to_column_names(pairs: &[NameValuePair]) -> Vec<String> {
     pairs.iter().map(|pair| pair.col_name.clone()).collect()
+}
+
+/// Collects lower-case column names referenced in a PointGet `WHERE` expression for privilege
+/// checking when `is_table_dual` short-circuits `get_name_value_pairs` (R29, spec §5.2 item 5).
+/// Returns `false` if an expression shape cannot be exhaustively inspected (e.g. a subquery),
+/// signaling the caller to fall back to the regular planner.
+// glue: R29 WHERE column collector for PointGet IsTableDual overflow
+fn collect_where_col_names(expr: &Expr, tbl_alias: &CIStr, out: &mut Vec<String>) -> bool {
+    match expr {
+        Expr::Column(c) => {
+            if !c.table.o.is_empty() && c.table.l() != tbl_alias.l {
+                return false;
+            }
+            let col = c.name.l();
+            if !out.contains(&col) {
+                out.push(col);
+            }
+            true
+        }
+        Expr::Value(_) | Expr::ParamMarker(_) | Expr::TimeUnit(_) => true,
+        Expr::Binary(b) => {
+            collect_where_col_names(&b.l, tbl_alias, out)
+                && collect_where_col_names(&b.r, tbl_alias, out)
+        }
+        Expr::Paren(inner) => collect_where_col_names(inner, tbl_alias, out),
+        Expr::Unary(u) => collect_where_col_names(&u.v, tbl_alias, out),
+        Expr::FuncCall(f) => f
+            .args
+            .iter()
+            .all(|a| collect_where_col_names(a, tbl_alias, out)),
+        Expr::FuncCast(c) => collect_where_col_names(&c.expr, tbl_alias, out),
+        Expr::Between(b) => {
+            collect_where_col_names(&b.expr, tbl_alias, out)
+                && collect_where_col_names(&b.left, tbl_alias, out)
+                && collect_where_col_names(&b.right, tbl_alias, out)
+        }
+        Expr::IsNull(n) => collect_where_col_names(&n.expr, tbl_alias, out),
+        Expr::IsTruth(t) => collect_where_col_names(&t.expr, tbl_alias, out),
+        Expr::PatternIn(p) => {
+            p.sel.is_none()
+                && collect_where_col_names(&p.expr, tbl_alias, out)
+                && p.list
+                    .iter()
+                    .all(|e| collect_where_col_names(e, tbl_alias, out))
+        }
+        Expr::PatternLike(p) => {
+            collect_where_col_names(&p.expr, tbl_alias, out)
+                && collect_where_col_names(&p.pattern, tbl_alias, out)
+        }
+        Expr::PatternRegexp(p) => {
+            collect_where_col_names(&p.expr, tbl_alias, out)
+                && collect_where_col_names(&p.pattern, tbl_alias, out)
+        }
+        Expr::Case(c) => {
+            c.value
+                .as_ref()
+                .is_none_or(|v| collect_where_col_names(v, tbl_alias, out))
+                && c.when_clauses.iter().all(|w| {
+                    collect_where_col_names(&w.expr, tbl_alias, out)
+                        && collect_where_col_names(&w.result, tbl_alias, out)
+                })
+                && c.else_clause
+                    .as_ref()
+                    .is_none_or(|e| collect_where_col_names(e, tbl_alias, out))
+        }
+        Expr::Row(r) => r
+            .values
+            .iter()
+            .all(|v| collect_where_col_names(v, tbl_alias, out)),
+        Expr::SetCollation(s) => collect_where_col_names(&s.expr, tbl_alias, out),
+        _ => false,
+    }
 }
 
 /// `tblName *resolve.TableNameW` of Go is the resolved name plus the AST fields Go reads
@@ -1081,7 +1186,8 @@ fn check_tbl_index_for_point_plan<T>(
                     "GetLatestIndexInfo (the latest schema of a point get in FOR UPDATE / READ COMMITTED)",
                 ));
             }
-            let mut p = new_point_get_plan(ctx, &tbl_name_schema.o, schema, tbl, names);
+            // R29 (spec §5.2 item 5): use resolved lowercase `db_name` rather than possibly empty `tbl_name_schema.o`.
+            let mut p = new_point_get_plan(ctx, &db_name, schema, tbl, names);
             p.is_table_dual = true;
             return Ok(Some(p));
         }

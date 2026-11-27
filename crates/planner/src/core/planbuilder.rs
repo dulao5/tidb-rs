@@ -192,6 +192,10 @@ pub struct PlanBuilder<'ast> {
     pub sql_text: &'ast str,
     /// visitInfo is used for privilege check.
     pub visit_info: Vec<VisitInfo>,
+    /// Session user and host from `SessionVars.user` (populated in `init`), used when
+    /// formatting privilege-denied errors (`1142` / `1143`).
+    pub user_name: String,
+    pub host_name: String,
     /// optFlag.
     pub opt_flag: u64,
     /// isForUpdateRead should be true in either of the following situations
@@ -317,6 +321,8 @@ impl<'ast> PlanBuilder<'ast> {
         self.hint_processor = processor;
         self.is_for_update_read = vars.is_pessimistic_read_consistency();
         self.no_decorrelate = vars.enable_no_decorrelate_in_select;
+        (self.user_name, self.host_name) =
+            tidb_parser::auth::get_user_and_host_name(vars.user.as_ref());
         Vec::new()
     }
 

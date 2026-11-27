@@ -26,20 +26,20 @@ use tidb_base::dbterror::plannererrors::{
     ErrAggregateInOrderNotSelect, ErrAggregateOrderNonAggQuery, ErrAmbiguous, ErrBadTable,
     ErrDupFieldName, ErrFieldInGroupingNotGroupBy, ErrFieldInOrderNotSelect, ErrFieldNotInGroupBy,
     ErrIllegalReference, ErrInvalidWildCard, ErrMixOfGroupFuncAndFields, ErrNotSupportedYet,
-    ErrPartitionClauseOnNonpartitioned, ErrUnknown, ErrUnknownColumn, ErrUnsupportedType,
-    ErrWindowCircularityInWindowGraph, ErrWindowDuplicateName, ErrWindowFrameEndIllegal,
-    ErrWindowFrameIllegal, ErrWindowFrameStartIllegal, ErrWindowFunctionIgnoresFrame,
-    ErrWindowInvalidWindowFuncAliasUse, ErrWindowInvalidWindowFuncUse,
-    ErrWindowNoChildPartitioning, ErrWindowNoInherentFrame, ErrWindowNoRedefineOrderBy,
-    ErrWindowNoSuchWindow, ErrWindowRangeBoundNotConstant, ErrWindowRangeFrameNumericType,
-    ErrWindowRangeFrameOrderType, ErrWindowRangeFrameTemporalType, ErrWindowRowsIntervalUse,
-    ErrWrongArguments, ErrWrongGroupField,
+    ErrPartitionClauseOnNonpartitioned, ErrTableaccessDenied, ErrUnknown, ErrUnknownColumn,
+    ErrUnsupportedType, ErrWindowCircularityInWindowGraph, ErrWindowDuplicateName,
+    ErrWindowFrameEndIllegal, ErrWindowFrameIllegal, ErrWindowFrameStartIllegal,
+    ErrWindowFunctionIgnoresFrame, ErrWindowInvalidWindowFuncAliasUse,
+    ErrWindowInvalidWindowFuncUse, ErrWindowNoChildPartitioning, ErrWindowNoInherentFrame,
+    ErrWindowNoRedefineOrderBy, ErrWindowNoSuchWindow, ErrWindowRangeBoundNotConstant,
+    ErrWindowRangeFrameNumericType, ErrWindowRangeFrameOrderType, ErrWindowRangeFrameTemporalType,
+    ErrWindowRowsIntervalUse, ErrWrongArguments, ErrWrongGroupField,
 };
 use tidb_base::go_args;
 use tidb_base::gostd::is_one_of;
 use tidb_base::mysql::{
     DefaultCharset, DefaultCollationName, ExtendedPriv, MaxRealWidth, NotNullFlag, RangeGraph,
-    SQLMode, TypeDouble, TypeNull, TypeVarchar, has_not_null_flag, has_pri_key_flag,
+    SQLMode, SelectPriv, TypeDouble, TypeNull, TypeVarchar, has_not_null_flag, has_pri_key_flag,
 };
 use tidb_chunk::Row;
 use tidb_expression::aggregation::{
@@ -224,6 +224,31 @@ pub fn append_visit_info(
         err,
         ..Default::default()
     });
+}
+
+impl PlanBuilder<'_> {
+    /// Registers the table-read `SELECT` privilege entry (`column = "*"`, error `1142`) at a
+    /// data-source boundary so queries without column references (e.g. `SELECT 1 FROM t`,
+    /// `SELECT COUNT(*) FROM t`, `SUM(1)`, `EXISTS(SELECT 1 FROM t)`) cannot bypass table
+    /// privilege checks (specs/D04.1-privilege/spec.md §5.2 item 1, ruling R29).
+    // glue: R29 table-read SelectPriv single-point registration
+    pub fn append_table_select_visit_info(&mut self, db: &str, table: &str) {
+        let gs = |s: &str| tidb_base::gofmt::Arg::from(s.to_owned());
+        let err = ErrTableaccessDenied.fast_gen_by_args(vec![
+            gs("SELECT"),
+            gs(&self.user_name),
+            gs(&self.host_name),
+            gs(table),
+        ]);
+        append_visit_info(
+            &mut self.visit_info,
+            SelectPriv.0,
+            db,
+            table,
+            "*",
+            Some(err),
+        );
+    }
 }
 
 // ---------------------------------------------------------------- select fields
@@ -5752,9 +5777,17 @@ impl<'ast> PlanBuilder<'ast> {
 
         if table_info.is_view() {
             // Get the hints belong to the current view, then b.BuildDataSourceFromView.
+            // Note (R29/R30, specs/D04.1-privilege/spec.md §5.2 item 3): BuildDataSourceFromView
+            // must register and enforce caller SelectPriv on the view itself before inner expansion.
             // glue: blocked-by:D09.1 (views: BuildDataSourceFromView, part 2 of this block)
             return Err(blocked("D09.1", "a view (BuildDataSourceFromView)"));
         }
+
+        // Single-point table-read SELECT privilege registration (R29, specs/D04.1-privilege/spec.md
+        // §5.2 items 1–2): registered unconditionally for base tables and sequences (before
+        // sequence -> TableDual conversion and before any expression rewrite / pruning).
+        // Future D10.11 (buildMemTable) and D09.12 (partitioned tables) branches must reuse this.
+        self.append_table_select_visit_info(&db_name.l, &table_info.name.l);
 
         if table_info.is_sequence() {
             if tn.table_sample.is_some() {
