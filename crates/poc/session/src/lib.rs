@@ -1432,5 +1432,10 @@ mod fence_tests {
         let (changes, result) = run("SET autocommit = 'abc', NAMES latin1");
         assert_eq!(result.unwrap_err().code, 1231);
         assert!(changes.is_empty());
+        // `time_zone` is applied (the prototype keeps nothing of it, the router syncs it),
+        // then `max_execution_time` fails.
+        let (changes, result) = run("SET time_zone = '+01:00', max_execution_time = 'abc'");
+        assert_eq!(result.unwrap_err().code, 1232);
+        assert_eq!(changes, [SetChange::default()]);
     }
 }

@@ -839,6 +839,10 @@ fn failing_set_keeps_the_earlier_assignments_in_the_new_session() {
     let res = block_on(r.query(&mut p, "SET sql_select_limit = 5, NAMES ascii"));
     assert_eq!(res.unwrap_err().code, 1235);
     assert_eq!(get(&mut r, "character_set_client"), "latin1");
+    // A variable only the new session models keeps its value too.
+    let res = block_on(r.query(&mut p, "SET time_zone = '+01:00', sql_select_limit = 5"));
+    assert_eq!(res.unwrap_err().code, 1235);
+    assert_eq!(get(&mut r, "time_zone"), "+01:00");
 }
 
 /// The route trace (#260): every routing decision of the connection, with its engine and
