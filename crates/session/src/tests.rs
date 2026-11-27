@@ -2249,6 +2249,61 @@ fn execute_of_a_prepared_stmt_reaches_the_planner() {
     assert!(e.to_string().contains("invalid PlanCacheStmt type"), "{e}");
 }
 
+/// A BIGINT overflow inside a coprocessor request: `id + 9223372036854775807 > 0` is pushed
+/// down, TiKV answers with `SelectResponse.error` (1690 and TiKV's message), and the
+/// statement fails with the error distsql's select result makes of it
+/// (`ClassTiKV.Synthesize`). Go's `terror.ToSQLError`, which `clientConn.writeError` sends,
+/// gives the client code 1690, SQLSTATE `22003` and TiKV's message (#486: tidb-rs sent
+/// `HY000`; the router's conversion is tested in poc-session).
+#[test]
+fn pushed_down_overflow_is_tikv_error_with_sqlstate_22003() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _enter = rt.enter();
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    for id in 1..=3 {
+        put_row(&store, 110, id, 2, &format!("c{id:02}"));
+    }
+    let mut s = sbtest_session(&store);
+    let sql = "SELECT c FROM sbtest1 WHERE id + 9223372036854775807 > 0";
+    let err = match block_on(s.execute_stmt(parse(sql), sql)) {
+        Err(e) => e,
+        Ok(rs) => {
+            let mut rs = rs.expect("a result set");
+            let mut chk = rs.new_chunk().unwrap();
+            let err = loop {
+                match block_on(rs.next(&mut s, &mut chk)) {
+                    Err(e) => break e,
+                    Ok(()) if chk.num_rows() == 0 => panic!("{sql}: no error"),
+                    Ok(()) => {}
+                }
+            };
+            let _ = block_on(rs.close(&mut s));
+            err
+        }
+    };
+    let msg = "BIGINT value is out of range in '(1 + 9223372036854775807)'";
+    assert!(err.is_normalized(), "{err}");
+    assert_eq!(err.code(), 1690, "{err}");
+    // From the coprocessor (TiKV's message, class tikv), not evaluated by TiDB (whose
+    // message names the column: `(test.sbtest1.id + 9223372036854775807)`).
+    assert_eq!(err.rfc_code(), "tikv:1690");
+    assert_eq!(String::from_utf8(err.get_msg()).unwrap(), msg);
+    let m = tidb_base::terror::to_sql_error(&err);
+    assert_eq!(
+        (
+            m.code,
+            m.state.as_str(),
+            String::from_utf8(m.message).unwrap()
+        ),
+        (1690, "22003", msg.to_owned())
+    );
+}
+
 /// The coprocessor client of [`MockStore`]: the planner keeps it in the planning context;
 /// no test sends a request.
 /// In-memory coprocessor client over [`MockRows`]: decodes `tipb::DagRequest`, scans matching
@@ -2310,6 +2365,14 @@ fn tipb_col_to_field_type(col: &tipb::ColumnInfo) -> tidb_parser::types::FieldTy
         ft.set_collate("utf8mb4_bin");
     }
     ft
+}
+
+thread_local! {
+    /// The first evaluation error of the coprocessor request [`MockClient::send`] is running:
+    /// TiKV's `EvaluateError::Custom { code, msg }`, which ends the request with
+    /// `SelectResponse.error` set (TiKV `handle_qe_response`).
+    static COP_EVAL_ERROR: std::cell::RefCell<Option<(i32, String)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn eval_tipb_expr(expr: &tipb::Expr, row: &[tidb_types::datum::Datum]) -> tidb_types::datum::Datum {
@@ -2379,6 +2442,30 @@ fn eval_tipb_expr(expr: &tipb::Expr, row: &[tidb_types::datum::Datum]) -> tidb_t
                     };
                     new_int_datum(i64::from(res))
                 }
+                tipb::ScalarFuncSig::PlusInt => {
+                    let a = eval_tipb_expr(&children[0], row);
+                    let b = eval_tipb_expr(&children[1], row);
+                    if a.is_null() || b.is_null() {
+                        return Datum::default();
+                    }
+                    let (av, bv) = (a.get_int64(), b.get_int64());
+                    match av.checked_add(bv) {
+                        Some(v) => new_int_datum(v),
+                        None => {
+                            // TiKV `IntIntPlus::calc`: `Error::overflow("BIGINT", "(a + b)")`,
+                            // code `ERR_DATA_OUT_OF_RANGE` (1690).
+                            COP_EVAL_ERROR.with_borrow_mut(|e| {
+                                e.get_or_insert_with(|| {
+                                    (
+                                        1690,
+                                        format!("BIGINT value is out of range in '({av} + {bv})'"),
+                                    )
+                                });
+                            });
+                            Datum::default()
+                        }
+                    }
+                }
                 tipb::ScalarFuncSig::LogicalAnd => {
                     let a = eval_tipb_expr(&children[0], row);
                     let b = eval_tipb_expr(&children[1], row);
@@ -2409,6 +2496,7 @@ impl Client for MockClient {
         _: &tidb_kv::kv::ClientSendOption,
     ) -> Box<dyn tidb_kv::kv::Response> {
         use protobuf::Message;
+        COP_EVAL_ERROR.with_borrow_mut(|e| *e = None);
         let mut dag = tipb::DagRequest::default();
         dag.merge_from_bytes(&req.data).expect("valid DAGRequest");
         let execs = dag.get_executors();
@@ -2583,6 +2671,14 @@ impl Client for MockClient {
                 }
                 other => panic!("MockClient: unsupported pushed-down executor {other:?}"),
             }
+        }
+
+        if let Some((code, msg)) = COP_EVAL_ERROR.with_borrow_mut(Option::take) {
+            let mut resp = tipb::SelectResponse::default();
+            resp.mut_error().set_code(code);
+            resp.mut_error().set_msg(msg);
+            let bytes = resp.write_to_bytes().unwrap();
+            return Box::new(MockCopResponse { data: Some(bytes) });
         }
 
         let out_offsets: Vec<usize> = dag
