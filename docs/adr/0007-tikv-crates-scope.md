@@ -58,8 +58,18 @@ replace them.
    as a reference but not its code: the evaluator and builder only work on TiKV's
    `VectorValue` / `LazyBatchColumnVec`, TiKV's `EvalContext` and `tipb::Expr`, and the
    `#[rpn_fn]` macro lacks lazy arguments, access to argument types and expressions, and the
-   row-mode fallback on warnings that Go's control functions use. The vendored crate is removed
-   together with the PoC `query-smoke` test. Function bodies are not reused in any case (point 2).
+   row-mode fallback on warnings that Go's control functions use. Function bodies are not reused
+   in any case (point 2).
+
+   **Test-only exception** (owner decision, zhigang-du, 2026-11-28; this replaces the earlier plan
+   to remove the vendored crate together with the PoC `query-smoke` test). `tidb_query_expr` stays
+   vendored as a **dev-dependency only**, for the coprocessor evaluation oracle
+   (`crates/query-smoke/tests/copr_eval_oracle.rs`, #476). The oracle evaluates every pushed-down
+   scalar function both in tidb-rs and in TiKV's evaluator. It is the only automatic check that a
+   go-bug-fixed ruling (`docs/testing/rulings.toml`) does not make tidb-rs answer differently from
+   TiKV for a function that is still pushed down. The crate never enters the production binary:
+   `scripts/check_test_only_deps.py` (run in CI) fails if any workspace crate lists it outside
+   `[dev-dependencies]`.
 
 4. **`tidb_query_aggr`: removed** once D12.4 (aggregate functions) lands.
 
@@ -73,6 +83,7 @@ replace them.
    | `crates/executor/src/agg.rs` | `mysql::Decimal`, `RoundMode` | D01.2, D12.4 |
    | `crates/executor/src/compare.rs` | `Collator` comparison | D01.9 |
    | `crates/query-smoke/tests/smoke.rs` | `RpnExpressionBuilder` (spike test only) | removed with the crate (point 3) |
+   | `crates/query-smoke/tests/copr_eval_oracle.rs` | `RpnExpressionBuilder`, `EvalConfig`, chunk encoder (test only) | kept, dev-dependency only (point 3, test-only exception) |
 
 6. **Branch policy is unchanged.** Changes to the vendored crates are made on the TiKV branch
    `rust-tidb/stable-rpn-fn` and re-synced. Differences between TiKV and Go found while porting

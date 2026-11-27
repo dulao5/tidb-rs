@@ -126,6 +126,7 @@ pub struct BuiltinFunc {
 1. 求值循环和构建器都以 `VectorValue`/`LazyBatchColumnVec`、TiKV `EvalContext`、`tipb::Expr` 为输入；N5a 若选 Go Chunk，这些代码没有一行能原样用。
 2. 宏缺三样 Go 函数体需要的能力：惰性参数、访问参数类型与参数表达式、整列求值后按 warning 回退逐行。补齐等于重写 `rpn_function.rs` 的大部分。
 3. 宏和求值器总共约 3,100 行非测试代码，自写成本可控；不依赖它就不需要 L3 ADR，`third_party/tikv/tidb_query_expr` 可以在 PoC 的 `query-smoke` 冒烟测试移除后删掉（ADR 0007 第 3 条据此定稿）。
+   **已改变（项目负责人 zhigang-du，2026-11-28）**：生产代码仍不依赖 `tidb_query_expr`，但不再删除它。它作为**仅测试用依赖**（只出现在 `[dev-dependencies]`）保留，供协处理器求值对照测试（`crates/query-smoke/tests/copr_eval_oracle.rs`，#476）使用。理由：这是唯一自动检查"已修复 Go 缺陷的裁定（`docs/testing/rulings.toml`）在仍下推到 TiKV 的函数上是否与 TiKV 求值结果一致"的手段。`scripts/check_test_only_deps.py`（CI 运行）保证它进不了生产构建。
 
 ### 3.7 上下文、错误与 warning
 
@@ -219,7 +220,7 @@ fn cast_string_as_int(ctx: &mut EvalCtx, sig: &BuiltinFunc, args: &mut Args) -> 
 ## 6. 待定项（需要项目负责人决定）
 
 1. **"Go 内部不一致"的默认处理**：修订后建议两种驱动各自与 Go 一致，分歧签名保留第二份函数体（3.3 第 3 条）。
-2. **是否依赖 TiKV RPN 框架**：建议不依赖（3.6），ADR 0007 第 3 条据此定稿为"不使用，删除 vendored `tidb_query_expr`"。
+2. **是否依赖 TiKV RPN 框架**：建议不依赖（3.6），ADR 0007 第 3 条据此定稿为"不使用，删除 vendored `tidb_query_expr`"。 **已决定（项目负责人 zhigang-du，2026-11-28）**：生产代码不依赖；vendored `tidb_query_expr` 不删除，只作为仅测试用依赖保留给协处理器求值对照测试（理由和检查见 3.6 第 3 条）。
 3. **阻塞型函数**：放阻塞池（建议），还是把逐行驱动做成 async（会让所有函数体沾上 async，不建议）。 **已决定（D43，2026-11-07）**：都不采用。`SLEEP` 用 async 定时器，只给含 `SLEEP` 的程序配一个异步驱动，其余函数体不受影响；不进阻塞池（见 3.9）。
 4. **SIMD**：本 spec 只保证单态化循环；某个签名需要手写 SIMD 时按 A5 单独申请，并用本 spec 的 govec 向量做等价性门禁。
 
