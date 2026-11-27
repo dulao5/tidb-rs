@@ -53,17 +53,22 @@ fn set(vars: &mut SessionVars, diverged: &mut BTreeSet<String>, name: &str, valu
     }
 }
 
-/// The text Go's `SET` would store for a literal value; `None` when the router cannot tell
-/// (an expression): the variable diverges.
-fn value_text(name: &str, v: &SetValue) -> Option<String> {
+/// The text Go's `SetExecutor.getVarValue` (pkg/executor/set.go:304) makes of a session
+/// `SET` value: the literal's `Datum.ToString()` (`TRUE` is the integer 1; a bare identifier is
+/// its original text, `PlanBuilder.buildSet`), the empty string for `NULL`, and for `DEFAULT`
+/// the global value (here the compiled default). `None` when the prototype cannot tell (an
+/// expression, a float or decimal literal): the PoC does not validate it, and the variable
+/// diverges. Used for the PoC's validation of `SET` (`crate::validated_session_value`) and for
+/// the sync.
+// glue: getVarValue of the literal values the prototype's SET lowers (the SET executor is D12.12)
+pub(crate) fn value_text(name: &str, v: &SetValue) -> Option<String> {
     match v {
         SetValue::Literal(Literal::Int(i)) => Some(i.to_string()),
         SetValue::Literal(Literal::UInt(u)) => Some(u.to_string()),
         SetValue::Literal(Literal::Bool(b)) => Some(if *b { "1" } else { "0" }.to_owned()),
         SetValue::Literal(Literal::Str(s)) | SetValue::Ident(s) => Some(s.clone()),
-        // `SET character_set_results = NULL`: Go stores the empty string.
-        SetValue::Literal(Literal::Null) if name == "character_set_results" => Some(String::new()),
-        // `SET x = DEFAULT`: the global value (here the compiled default).
+        // `if err != nil || nativeVal.IsNull() { return "", err }`.
+        SetValue::Literal(Literal::Null) => Some(String::new()),
         SetValue::Default => {
             tidb_sessionctx::variable::get_sys_var(name).map(|sv| sv.value.clone())
         }

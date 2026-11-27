@@ -352,7 +352,7 @@ pub struct Router {
 /// `22003`. A boundary stub's error ([`tidb_base::blocked::blocked`]) is tidb-rs's own: it
 /// keeps its 1235 (Go has no such error; its class is not in Go's registry).
 // glue: the error-to-packet-fields step of clientConn.writeError (the function itself is the server block's part 2, D03.1, with the connection loop)
-fn sql_error(e: &Error) -> SqlError {
+pub(crate) fn sql_error(e: &Error) -> SqlError {
     if blocked_by(e).is_some() {
         return SqlError::new(
             tidb_base::mysql::ErrNotSupportedYet,

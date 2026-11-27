@@ -95,8 +95,6 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D09.5", 4),
     // Subqueries.
     ("D09.6", 2),
-    // Index hints (USE / FORCE / IGNORE INDEX).
-    ("D13.3", 2),
 ];
 
 fn vectors() -> String {

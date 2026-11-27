@@ -170,6 +170,9 @@ pub enum Expr {
     SysVar {
         name: String,
         global: bool,
+        /// A scope was written (`@@global.` / `@@session.` / `@@local.`): Go's
+        /// `VariableExpr.ExplicitScope`.
+        explicit_scope: bool,
     },
     /// A function call without arguments (`DATABASE()`, `USER()`, ...); name lower-cased.
     Func {
@@ -576,6 +579,7 @@ impl Lowerer<'_> {
                 Expr::SysVar {
                     name: v.name.to_ascii_lowercase(),
                     global: v.is_global,
+                    explicit_scope: v.explicit_scope,
                 }
             }
             A::FuncCall(f) => {

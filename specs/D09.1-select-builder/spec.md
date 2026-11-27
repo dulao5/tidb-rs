@@ -78,7 +78,7 @@ SELECT 构建器开始往这些结构里写之前，先处理了表达式改写�
 
 `buildDataSource` 照 Go 的顺序：表名解析（不带库名时用当前库；Go 先试 CTE，CTE 是桩所以总找不到）→ 取表 → 元数据锁 → 内存表、分区表的检查 → 访问路径 → 视图、序列 → 隔离读引擎过滤 → 生成列替换标志 → 建 DataSource：列、输出列名、列 id、句柄列、句柄列栈 → 虚拟生成列 → 聚簇主键的完整列 → 每条访问路径的完整索引列（含 `tidb_shard()` 前缀唯一索引的标记）→ 未提交写入 / 本地临时表 / 缓存表的 UnionScan。
 
-`getPossibleAccessPaths`：表路径（整数句柄或聚簇主键），TiFlash 副本可用时加 TiFlash 路径，再加每个可用的公开索引（不可见索引在 `tidb_opt_use_invisible_indexes` 关闭时跳过，聚簇主键已是表路径）。默认的 `tidb_index_lookup_pushdown_policy`（`hint-only`）下不自动下推索引回表。全部路径都"待定"（多值索引、部分索引）时再加一次表路径。`filterPathByIsolationRead` 按 `tidb_isolation_read_engines` 去掉不允许的存储，一条不剩时报 Go 的错误。
+`getPossibleAccessPaths`：表路径（整数句柄或聚簇主键），TiFlash 副本可用时加 TiFlash 路径，再加每个可用的公开索引（不可见索引在 `tidb_opt_use_invisible_indexes` 关闭时跳过，聚簇主键已是表路径）。默认的 `tidb_index_lookup_pushdown_policy`（`hint-only`）下不自动下推索引回表。全部路径都"待定"（多值索引、部分索引）时再加一次表路径。表名上的索引 hint（`USE / FORCE / IGNORE INDEX`，#489 起）照 Go 处理：只看作用于扫描的 hint（`FOR JOIN / ORDER BY / GROUP BY` 跳过）；`USE INDEX ()` 选表路径；每个索引名按 `getPathByIndexName` 找路径（全名，或唯一的前缀），找不到时报 `ErrKeyDoesNotExist`（1176，`Key 'x' doesn't exist in table 't'`）；`IGNORE` 的路径之后去掉；`USE` / `FORCE` 把路径标为 `Forced`（Go 不区分两者），只保留被选的路径；`tidb_isolation_read_engines` 不含 tikv 时，TiKV 索引报 Go 的 `fmt.Errorf` 错误（1105）。Go 的 `available` / `ignored` 存的是指向 `publicPaths` 中同一对象的指针，Rust 存下标，循环结束后再取出路径（hint 设的标志都在），结果相同。注释形式的 hint（`/*+ USE_INDEX(...) */`、`INDEX_LOOKUP_PUSHDOWN` 等，`tableHints`）属于 hint 框架（D13.3），这里还没有，所以 Go 中"注释形式的 hint 只给 warning"的分支走不到。`filterPathByIsolationRead` 按 `tidb_isolation_read_engines` 去掉不允许的存储，一条不剩时报 Go 的错误。
 
 ## 5. 边界桩
 
@@ -103,7 +103,7 @@ SELECT 构建器开始往这些结构里写之前，先处理了表达式改写�
 | `buildDataSource` | 事务写过的表、本地临时表、缓存表（LogicalUnionScan） | D09.14 |
 | `buildDataSource` | `TABLESAMPLE` | D02.2 |
 | `buildDataSource` | 构建器没有 InfoSchema | D05.4 |
-| `getPossibleAccessPaths` | `USE / FORCE / IGNORE INDEX`、`HYPO_INDEX` hint | D13.3 |
+| `getPossibleAccessPaths` | `HYPO_INDEX` hint | D13.3 |
 | `getPossibleAccessPaths` | EXPLAIN 的假设索引 / 假设 TiFlash 副本；加锁读或 READ COMMITTED 下读域中最新的索引状态（`GetLatestIndexInfo`） | D10.2 |
 | `checkAutoForceIndexLookUpPushDown` | `tidb_index_lookup_pushdown_policy` 为 `force` / `affinity-force` | D10.2 |
 | `tableHasDirtyContent` | 规划上下文没有会话的未提交写入检查 | D09.13 |
@@ -122,6 +122,7 @@ SELECT 构建器开始往这些结构里写之前，先处理了表达式改写�
 
 - **govec 领域 `selectbuild`**（tracker `govec/domains/selectbuild.go`，1,743 条；回放 `crates/planner/tests/govec_selectbuild.rs`）。表来自 7 条 CREATE TABLE：sysbench 表（整数主键）、无主键表（隐藏句柄）、非聚簇字符串主键、聚簇复合主键（含前缀索引）、不可见索引和 ENUM 列、分区表、虚拟生成列表。Go 照 `BuildLogicalPlanForTest` 预处理并构建（SQL mode 有 / 无 `ONLY_FULL_GROUP_BY`，`tidb_remove_orderby_in_subquery` 开 / 关），记录整棵计划（算子、id、schema、每个算子的输出列名、表达式和类型、DataSource 的表、句柄列、聚簇主键列、两组访问路径及其完整索引列）、计划 id 和列 id 计数器、`optFlag`、权限检查项（含错误码）和 warning，或者错误。Rust 用同一份表的元数据建 InfoSchema，解析、预处理、构建后比较。
   - 结果：**1,472 个计划、174 个错误与 Go 相同**，0 处不同；96 条停在边界桩，按块钉在测试中（`EXPECTED_BLOCKED`）：D08.9 53（IN、`ANY_VALUE` 等函数族未移植）、D09.4 15、D09.3 6、D09.12 4（分区表）、D09.5 4、D13.3 4、D04.1 2（预处理器的缺表检查）、D09.1 2（虚拟生成列）、D09.14 2、D09.2 2、D09.6 2。
+  - #489 移植表名上的索引 hint 之后：`selectbuild`、`findbest`、`optdriver` 三个领域中原来停在 `blocked-by:D13.3` 的 2 条（`SELECT a FROM t2 USE INDEX (ia)`，两种 SQL mode）现在与 Go 比较且相同，三个测试的 `EXPECTED_BLOCKED` 去掉 D13.3；`plancache` 领域的 D13.3 是注释形式的优化器 hint，不受影响。会话层测试 `index_hints_pick_access_paths_and_unknown_index_is_1176`（`crates/session/src/tests.rs`）在 sbtest1 上检查 `USE / FORCE / IGNORE INDEX` 选出的读取算子、返回的行，以及不存在的索引名给客户端的 1176 / 42000 / 完整消息。
   - 查询：sysbench 只读语句中不含聚合的那些，手工挑选的形状（通配符的各种写法和错误、字面量和表达式的列名、`/*! */` 注释、恒真 / 恒假条件、字符串条件、没有聚合的 HAVING、ORDER BY 辅助列 / 别名 / 位置 / 歧义、派生表的别名和重名列、`LIMIT 0` 和极大的 LIMIT、子查询块中 ORDER BY 的保留、各种边界），以及 1,500 条随机单表查询（可带派生表、别名、HAVING、ORDER BY 位置）。
   - tracker 中领域声明 D09.1、D09.4、D10.2、D09.0、D09.2 五个块；未覆盖的函数在 `selectbuild_exempt.go` 中写明理由（本部分的桩、D09.4 / D10.2 不在本部分的函数）。原来豁免的 `PlanBuilder.Build`、`detectSelectWindow`、`isForUpdateReadSelectLock`（预处理领域）和 `positionToScalarFunc`（改写领域）现在由本领域覆盖，豁免删除。
 - **单元测试**（`logical_plan_builder.rs`）：`ByAddr` 按节点身份做键；`/*! */` 标记的去除；没有 SELECT 用到的 `appendDynamicVisitInfo`、`appendMultiColumns2VisitInfo`、`popVisitInfo`；句柄列栈。
@@ -129,7 +130,7 @@ SELECT 构建器开始往这些结构里写之前，先处理了表达式改写�
 ## 7. 与 Go 的其他差异
 
 1. **`TblInfo2UnionScan`。** Go 在 `buildDataSource` 末尾记录 `StmtCtx.TblInfo2UnionScan[tableInfo] = dirty`。走到这里时 `dirty` 一定为假（为真时已停在 UnionScan 的桩），读这张表的 UnionScan 执行器也没有移植，Rust 的语句上下文没有这个字段，不记录。
-2. **`DataSource` 中与 hint、统计有关的字段**（`AstIndexHints`、`IndexHints`、`IndexMergeHints`、`PreferPartitions`、`SampleInfo`、`IS`）不在 Rust 的 DataSource 中：有 hint 的语句已经停在桩，这些字段在 Go 中也是空的；`IS` 等读取它的阶段（D10.2）移植时再加。
+2. **`DataSource` 中与 hint、统计有关的字段**（`AstIndexHints`、`IndexHints`、`IndexMergeHints`、`PreferPartitions`、`SampleInfo`、`IS`）不在 Rust 的 DataSource 中：`AstIndexHints` 只有分区处理（D09.12，分区表停在桩）读；其余几个来自注释形式的 hint（D13.3），在 Go 中也是空的；`IS` 等读取它的阶段（D10.2）移植时再加。
 3. **`setPreferredStoreType`**：没有表 hint 时，Go 的两次查找都找不到，什么也不做；Rust 照此写成空操作（L2）。
 4. **向量索引**：`getPossibleAccessPaths` 对向量索引读 `tblInfo.TiFlashReplica.Available`，副本信息为空时 Go 会空指针退出；Rust 当作不可用（跳过）。向量索引要求表有 TiFlash 副本，正常情况下走不到。
 5. **`buildProjectionFieldNameFromColumns`**：Go 判断的是一个刚声明的零值变量（`tblName.L == ""` 总为真），表名总取 `name.TblName`；照抄。
@@ -139,7 +140,7 @@ SELECT 构建器开始往这些结构里写之前，先处理了表达式改写�
 ## 8. 第 2 部分（未做）
 
 - 视图（`BuildDataSourceFromView`、`buildProjUponView`、`checkRecursiveView`）、虚拟生成列（列的生成表达式要从表定义解析）、UPDATE / DELETE 用的 `updatableTableListResolver`。
-- §5 中其他块的桩随各自的块解除；`getPossibleAccessPaths` 中 hint 的分支随 hint 框架（D13.3）解除，`GetLatestIndexInfo` 和 index lookup 下推的检查随访问路径（VS1-28）解除。
+- §5 中其他块的桩随各自的块解除；`getPossibleAccessPaths` 中注释形式 hint 和 `HYPO_INDEX` 的分支随 hint 框架（D13.3）解除，`GetLatestIndexInfo` 和 index lookup 下推的检查随访问路径（VS1-28）解除。
 
 ## 本文所用 ID
 

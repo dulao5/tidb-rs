@@ -377,35 +377,50 @@ fn txn_fence(stmt: &Statement) -> Option<SqlError> {
     }
 }
 
-/// `SET autocommit = value`: on is accepted, off is the explicit-transaction fence (1235), a
-/// value that is not a boolean is 1231.
-fn autocommit_fence(value: &SetValue) -> Result<(), SqlError> {
-    match bool_value(value) {
-        Some(true) => Ok(()),
-        Some(false) => Err(not_in_txn("autocommit=0")),
-        None => Err(SqlError::new(
-            1231,
-            "Variable 'autocommit' can't be set to the value given",
-        )),
+/// `SET autocommit = value`, after Go's validation turned the value into `ON` / `OFF`
+/// ([`validated_session_value`]): on is accepted, off is the explicit-transaction fence
+/// (1235). A value the prototype cannot evaluate (an expression, a float or decimal literal)
+/// is not supported (1235).
+fn autocommit_fence(normalized: Option<&str>) -> Result<(), SqlError> {
+    match normalized {
+        Some(v) if v == tidb_sessionctx::variable::Off => Err(not_in_txn("autocommit=0")),
+        Some(_) => Ok(()),
+        None => Err(SqlError::not_supported("this SET value")),
     }
 }
 
-/// Whether `SET var = value` turns autocommit on (`Some(true)`), off, or is not a boolean.
-fn bool_value(v: &SetValue) -> Option<bool> {
-    match v {
-        SetValue::Literal(Literal::Int(i)) => Some(*i != 0),
-        SetValue::Literal(Literal::UInt(u)) => Some(*u != 0),
-        SetValue::Literal(Literal::Bool(b)) => Some(*b),
-        SetValue::Literal(Literal::Str(s)) | SetValue::Ident(s) => {
-            match s.to_ascii_lowercase().as_str() {
-                "on" | "1" | "true" => Some(true),
-                "off" | "0" | "false" => Some(false),
-                _ => None,
-            }
-        }
-        SetValue::Default => Some(true),
-        _ => None,
-    }
+/// `SET name = value` of a session variable as Go's `SessionVars.SetSystemVar` checks it before
+/// storing it: `SysVar.Validate` with the session scope (the ported sysvar layer, D05.1), on
+/// the text Go's `SetExecutor.getVarValue` makes of the value ([`router::sync::value_text`]).
+/// Returns the normalized value (`ON` / `OFF` for a boolean, the formatted `sql_mode`, ...),
+/// or the validation error as Go's `writeError` sends it: for example `SET autocommit = 'abc'`
+/// is `1231 (42000) Variable 'autocommit' can't be set to the value of 'abc'`, and
+/// `SET sql_mode = 'NOSUCHMODE'` is `1105 (HY000)` with the text of the parser's
+/// `ErrWrongValueForVar` (`mysql.NewErr` is not a TiDB error). `None` when the prototype
+/// cannot make the text (an expression, a float or decimal literal).
+///
+/// The SET executor (`SetExecutor.setSysVariable`) is D12.12 and not ported: the prototype
+/// runs SET, so the validation runs here, against a session with the compiled defaults
+/// (the prototype keeps no `SessionVars`; the variables it accepts validate the same in any
+/// session). Warnings a validation appends (a truncated number) are dropped: the prototype
+/// keeps no warnings.
+// glue: the validation step of SetExecutor.setSysVariable → SessionVars.SetSystemVar (D12.12) on the prototype's SET
+fn validated_session_value(name: &str, value: &SetValue) -> Result<Option<String>, SqlError> {
+    use tidb_sessionctx::variable::session::SessionVars;
+    let Some(text) = router::sync::value_text(name, value) else {
+        return Ok(None);
+    };
+    let Some(sys_var) = tidb_sessionctx::variable::get_sys_var(name) else {
+        return Err(router::sql_error(
+            &tidb_sessionctx::variable::error::ErrUnknownSystemVar
+                .gen_with_stack_by_args(tidb_base::go_args![name.to_owned()]),
+        ));
+    };
+    let mut vars = SessionVars::new(Box::new(router::newstack::DefaultGlobals));
+    let (normalized, validated) =
+        sys_var.validate(&mut vars, &text, tidb_sessionctx::variable::ScopeSession);
+    validated.map_err(|e| router::sql_error(&e))?;
+    Ok(Some(normalized))
 }
 
 fn set_string(v: &SetValue) -> Option<Option<String>> {
@@ -697,101 +712,123 @@ impl Session {
 
     fn set(&mut self, assignments: &[SetAssignment]) -> Result<(), SqlError> {
         // Validate everything first, then apply (a failing SET changes nothing).
-        let mut names = None;
-        let mut results = None;
-        for a in assignments {
-            match a {
-                SetAssignment::Names { charset, collation } => {
-                    let cs = charset.clone().unwrap_or_else(|| "utf8mb4".to_owned());
-                    let cs = cs.to_lowercase();
-                    if !matches!(
-                        cs.as_str(),
-                        "utf8mb4" | "utf8" | "binary" | "latin1" | "ascii"
-                    ) {
-                        return Err(SqlError::not_supported(format!("SET NAMES {cs}")));
-                    }
-                    let coll = collation
-                        .clone()
-                        .map(|c| c.to_lowercase())
-                        .unwrap_or_else(|| {
-                            match cs.as_str() {
-                                "utf8mb4" => "utf8mb4_bin",
-                                "utf8" => "utf8_bin",
-                                "latin1" => "latin1_bin",
-                                "ascii" => "ascii_bin",
-                                _ => "binary",
-                            }
-                            .to_owned()
-                        });
-                    names = Some((cs.clone(), coll));
-                    results = Some(Some(cs));
-                }
-                SetAssignment::Charset { charset } => {
-                    let cs = charset
-                        .clone()
-                        .unwrap_or_else(|| "utf8mb4".to_owned())
-                        .to_lowercase();
-                    if !matches!(
-                        cs.as_str(),
-                        "utf8mb4" | "utf8" | "binary" | "latin1" | "ascii"
-                    ) {
-                        return Err(SqlError::not_supported(format!("SET CHARACTER SET {cs}")));
-                    }
-                    results = Some(Some(cs));
-                }
-                SetAssignment::UserVar { .. } => {
-                    return Err(SqlError::not_supported("user variables"));
-                }
-                SetAssignment::SysVar {
-                    name,
-                    global,
-                    value,
-                } => {
-                    if *global {
-                        return Err(SqlError::not_supported("SET GLOBAL"));
-                    }
-                    match name.as_str() {
-                        "autocommit" => autocommit_fence(value)?,
-                        "character_set_results" => match set_string(value) {
-                            Some(v) => results = Some(v),
-                            None => return Err(SqlError::not_supported("this SET value")),
-                        },
-                        "character_set_client"
-                        | "character_set_connection"
-                        | "collation_connection" => {
-                            if set_string(value).is_none() && *value != SetValue::Default {
-                                return Err(SqlError::not_supported("this SET value"));
-                            }
-                        }
-                        "sql_mode" => match value {
-                            SetValue::Literal(Literal::Str(s))
-                                if !s.to_ascii_uppercase().contains("PAD_CHAR_TO_FULL_LENGTH") => {}
-                            SetValue::Default => {}
-                            _ => {
-                                return Err(SqlError::not_supported(
-                                    "this sql_mode (PAD_CHAR_TO_FULL_LENGTH changes CHAR results)",
-                                ));
-                            }
-                        },
-                        n if IGNORED_SYSVARS.contains(&n) => {}
-                        n => {
-                            return Err(SqlError::not_supported(format!(
-                                "setting system variable '{n}'"
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-        if let Some((cs, coll)) = names {
+        let change = check_set(assignments)?;
+        if let Some((cs, coll)) = change.names {
             self.charset = cs;
             self.collation = coll;
         }
-        if let Some(r) = results {
+        if let Some(r) = change.results {
             self.results_charset = r;
         }
         Ok(())
     }
+}
+
+/// What a `SET` statement the prototype accepted changes in its session.
+#[derive(Debug, Default, PartialEq)]
+struct SetChange {
+    /// `SET NAMES`: the charset and collation.
+    names: Option<(String, String)>,
+    /// `@@character_set_results` (`Some(None)`: NULL).
+    results: Option<Option<String>>,
+}
+
+/// The checks of `SET assignments` on the prototype, in order, before anything is applied:
+/// the change to apply, or the first assignment's error.
+fn check_set(assignments: &[SetAssignment]) -> Result<SetChange, SqlError> {
+    let mut names = None;
+    let mut results = None;
+    for a in assignments {
+        match a {
+            SetAssignment::Names { charset, collation } => {
+                let cs = charset.clone().unwrap_or_else(|| "utf8mb4".to_owned());
+                let cs = cs.to_lowercase();
+                if !matches!(
+                    cs.as_str(),
+                    "utf8mb4" | "utf8" | "binary" | "latin1" | "ascii"
+                ) {
+                    return Err(SqlError::not_supported(format!("SET NAMES {cs}")));
+                }
+                let coll = collation
+                    .clone()
+                    .map(|c| c.to_lowercase())
+                    .unwrap_or_else(|| {
+                        match cs.as_str() {
+                            "utf8mb4" => "utf8mb4_bin",
+                            "utf8" => "utf8_bin",
+                            "latin1" => "latin1_bin",
+                            "ascii" => "ascii_bin",
+                            _ => "binary",
+                        }
+                        .to_owned()
+                    });
+                names = Some((cs.clone(), coll));
+                results = Some(Some(cs));
+            }
+            SetAssignment::Charset { charset } => {
+                let cs = charset
+                    .clone()
+                    .unwrap_or_else(|| "utf8mb4".to_owned())
+                    .to_lowercase();
+                if !matches!(
+                    cs.as_str(),
+                    "utf8mb4" | "utf8" | "binary" | "latin1" | "ascii"
+                ) {
+                    return Err(SqlError::not_supported(format!("SET CHARACTER SET {cs}")));
+                }
+                results = Some(Some(cs));
+            }
+            SetAssignment::UserVar { .. } => {
+                return Err(SqlError::not_supported("user variables"));
+            }
+            SetAssignment::SysVar {
+                name,
+                global,
+                value,
+            } => {
+                if *global {
+                    return Err(SqlError::not_supported("SET GLOBAL"));
+                }
+                // Go validates the value before anything uses it (`SetSystemVar`).
+                let normalized = if router::sync::is_synced(name) {
+                    validated_session_value(name, value)?
+                } else {
+                    None
+                };
+                match name.as_str() {
+                    "autocommit" => autocommit_fence(normalized.as_deref())?,
+                    "character_set_results" => match set_string(value) {
+                        Some(v) => results = Some(v),
+                        None => return Err(SqlError::not_supported("this SET value")),
+                    },
+                    "character_set_client"
+                    | "character_set_connection"
+                    | "collation_connection" => {
+                        if set_string(value).is_none() && *value != SetValue::Default {
+                            return Err(SqlError::not_supported("this SET value"));
+                        }
+                    }
+                    // The validated value is upper case (`FormatSQLModeStr`).
+                    "sql_mode" => match (value, normalized.as_deref()) {
+                        (SetValue::Literal(Literal::Str(_)) | SetValue::Default, Some(mode))
+                            if !mode.contains("PAD_CHAR_TO_FULL_LENGTH") => {}
+                        _ => {
+                            return Err(SqlError::not_supported(
+                                "this sql_mode (PAD_CHAR_TO_FULL_LENGTH changes CHAR results)",
+                            ));
+                        }
+                    },
+                    n if IGNORED_SYSVARS.contains(&n) => {}
+                    n => {
+                        return Err(SqlError::not_supported(format!(
+                            "setting system variable '{n}'"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(SetChange { names, results })
 }
 
 /// `SHOW WARNINGS`: statements here never leave warnings.
@@ -1134,7 +1171,6 @@ pub async fn detect_new_collation(kv: &KvClient, schema: &SchemaCache) -> Result
 
 #[cfg(test)]
 mod fence_tests {
-    use tidb_sql::ir::SetAssignment;
 
     use super::*;
 
@@ -1163,30 +1199,159 @@ mod fence_tests {
         assert!(txn_fence(&select.stmt).is_none());
     }
 
+    /// `SET` of one assignment on the prototype (the checks before anything is applied).
+    fn set(sql: &str) -> Result<SetChange, SqlError> {
+        match tidb_sql::parse_and_lower(sql).unwrap().stmt {
+            Statement::Set(a) => check_set(&a),
+            other => panic!("{sql}: {other:?}"),
+        }
+    }
+
+    /// The whole client error: code, SQLSTATE and message.
+    fn err(sql: &str) -> (u16, String, String) {
+        let e = set(sql).unwrap_err();
+        (e.code, e.state.to_string(), e.message)
+    }
+
     #[test]
     fn autocommit_off_answers_1235() {
-        let value = |sql: &str| match tidb_sql::parse_and_lower(sql).unwrap().stmt {
-            Statement::Set(a) => match a.into_iter().next() {
-                Some(SetAssignment::SysVar { value, .. }) => value,
-                other => panic!("{other:?}"),
-            },
-            other => panic!("{other:?}"),
-        };
         for sql in [
             "SET autocommit = 0",
             "SET autocommit = OFF",
-            "SET @@autocommit = 'false'",
+            "SET @@autocommit = 'off'",
         ] {
-            let e = autocommit_fence(&value(sql)).unwrap_err();
+            let e = set(sql).unwrap_err();
             assert_eq!(e.code, 1235, "{sql}");
             assert_eq!(
                 e.message,
                 format!("This version of TiDB doesn't yet support 'autocommit=0{NOT_IN_TXN}")
             );
         }
-        assert!(autocommit_fence(&value("SET autocommit = 1")).is_ok());
+        for sql in [
+            "SET autocommit = 1",
+            "SET autocommit = ON",
+            "SET autocommit = 'on'",
+            "SET autocommit = TRUE",
+            "SET autocommit = DEFAULT",
+        ] {
+            assert_eq!(set(sql), Ok(SetChange::default()), "{sql}");
+        }
+    }
+
+    /// A value Go's `SysVar.Validate` rejects is Go's error, with the value in the message
+    /// (#489): `checkBoolSystemVar` accepts only ON / OFF / 0 / 1 for autocommit.
+    #[test]
+    fn autocommit_value_is_validated_as_go_does() {
+        for (sql, value) in [
+            ("SET autocommit = 'abc'", "abc"),
+            ("SET @@session.autocommit = 'false'", "false"),
+            ("SET autocommit = 2", "2"),
+            ("SET autocommit = NULL", ""),
+        ] {
+            assert_eq!(
+                err(sql),
+                (
+                    1231,
+                    "42000".to_owned(),
+                    format!("Variable 'autocommit' can't be set to the value of '{value}'")
+                ),
+                "{sql}"
+            );
+        }
+        // A value the prototype cannot evaluate is not supported (it was 1231 without a value).
+        assert_eq!(set("SET autocommit = 1 + 1").unwrap_err().code, 1235);
+    }
+
+    /// An unknown sql_mode is the parser's `ErrWrongValueForVar` (`mysql.NewErr`, not a TiDB
+    /// error), which Go's `writeError` sends as `ErrUnknown` with its text (#489). The mode is
+    /// named upper case (`FormatSQLModeStr` runs first).
+    #[test]
+    fn sql_mode_is_validated_as_go_does() {
+        for (sql, mode) in [
+            ("SET sql_mode = 'NOSUCHMODE'", "NOSUCHMODE"),
+            (
+                "SET sql_mode = 'strict_trans_tables,nosuchmode'",
+                "NOSUCHMODE",
+            ),
+            // Validation comes before the prototype's PAD_CHAR_TO_FULL_LENGTH fence.
+            ("SET sql_mode = 'PAD_CHAR_TO_FULL_LENGTH,x'", "X"),
+        ] {
+            assert_eq!(
+                err(sql),
+                (
+                    1105,
+                    "HY000".to_owned(),
+                    format!(
+                        "ERROR 1231 (42000): Variable 'sql_mode' can't be set to the value of \
+                         '{mode}'"
+                    )
+                ),
+                "{sql}"
+            );
+        }
+        for sql in [
+            "SET sql_mode = ''",
+            "SET sql_mode = 'strict_trans_tables'",
+            "SET sql_mode = 'ANSI'",
+            "SET @@sql_mode = 'ONLY_FULL_GROUP_BY,NO_ZERO_DATE'",
+            "SET sql_mode = DEFAULT",
+        ] {
+            assert_eq!(set(sql), Ok(SetChange::default()), "{sql}");
+        }
         assert_eq!(
-            autocommit_fence(&value("SET autocommit = 'x'"))
+            set("SET sql_mode = 'pad_char_to_full_length'")
+                .unwrap_err()
+                .code,
+            1235
+        );
+    }
+
+    /// The other variables the prototype accepts are validated too: Go's errors for an
+    /// unknown charset or collation, a value that is not a number.
+    #[test]
+    fn accepted_variables_are_validated_as_go_does() {
+        // `charset.GetCharsetInfo`: an `errors.Errorf`, so `ErrUnknown`.
+        assert_eq!(
+            err("SET character_set_client = 'nosuch'"),
+            (
+                1105,
+                "HY000".to_owned(),
+                "Unknown charset nosuch".to_owned()
+            )
+        );
+        assert_eq!(
+            err("SET collation_connection = 'nosuch'"),
+            (
+                1273,
+                "HY000".to_owned(),
+                "Unknown collation: 'nosuch'".to_owned()
+            )
+        );
+        assert_eq!(
+            err("SET max_execution_time = 'abc'"),
+            (
+                1232,
+                "42000".to_owned(),
+                "Incorrect argument type to variable 'max_execution_time'".to_owned()
+            )
+        );
+        assert_eq!(
+            set("SET character_set_results = NULL"),
+            Ok(SetChange {
+                names: None,
+                results: Some(None)
+            })
+        );
+        assert_eq!(
+            set("SET NAMES latin1, autocommit = 1, character_set_results = 'utf8mb4'"),
+            Ok(SetChange {
+                names: Some(("latin1".to_owned(), "latin1_bin".to_owned())),
+                results: Some(Some("utf8mb4".to_owned()))
+            })
+        );
+        // A failing assignment fails the statement; nothing is applied.
+        assert_eq!(
+            set("SET NAMES latin1, autocommit = 'abc'")
                 .unwrap_err()
                 .code,
             1231

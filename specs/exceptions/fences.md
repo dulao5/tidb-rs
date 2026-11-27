@@ -66,4 +66,4 @@ tidb-rs 现在是只读计算节点：写路径、DDL、ANALYZE、导入、备�
 | B5 代价模型 v1 | `tidb_cost_model_version = 1` 在使用时报错 | 新栈照 Go 接受，没有围栏 |
 | D1 TiFlash / MPP | 只读阶段不做，边界桩隔开 | 读 TiFlash 副本的路径由 `blocked-by` 桩和原型的通用"不支持"挡住 |
 | N11 D8 / D10 | 显式只读事务的语法与错误码；`tidb_replica_read` 非 leader 值报错 | 草案；现状见 F2 和 `docs/compatibility.md` "TiKV client gaps" |
-| X：`SET GLOBAL`（原型会话） | 原型会话不支持 | 临时缺口（D05.3 之前），不是永久围栏：`crates/poc/session/src/lib.rs:728` |
+| X：`SET GLOBAL`（原型会话） | 原型会话不支持 | 临时缺口（D05.3 之前），不是永久围栏：`crates/poc/session/src/lib.rs:790` |

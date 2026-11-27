@@ -71,10 +71,15 @@ rejected with `ER_NOT_SUPPORTED_YET` (1235) before any data is read. Unsupported
 - Session statements: `USE db` (1049 for unknown databases), `SET NAMES`, `SET CHARACTER SET`,
   `SET [SESSION] autocommit = 1/ON`, `SET character_set_*`/`collation_connection`, `SET
   sql_mode` (unless it contains PAD_CHAR_TO_FULL_LENGTH), a few timeouts/isolation variables
-  that cannot affect results; `SHOW WARNINGS`/`SHOW ERRORS` (always empty).
+  that cannot affect results; `SHOW WARNINGS`/`SHOW ERRORS` (always empty). Since #489 the
+  value of each of these variables is first checked by the ported `SysVar.Validate` (D05.1),
+  so a value Go rejects gets Go's error (`SET autocommit = 'abc'`: 1231 with the value;
+  `SET sql_mode = 'NOSUCHMODE'`: 1105).
 - Errors that match Go: 1146 unknown table, 1054 unknown column (with Go's clause names), 1046
   no database selected, 1051 unknown table in `t.*`, 1064 syntax errors, 1193 unknown system
-  variable, 1210 bad LIMIT arguments.
+  variable (8136 for a removed one), 1238 `@@global.` / `@@session.` of a variable without
+  that scope (#489), 1210 bad LIMIT arguments. A system variable Go knows but the prototype
+  does not answer is 1235.
 
 ### Rejected with 1235
 
