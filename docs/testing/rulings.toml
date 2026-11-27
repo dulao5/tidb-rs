@@ -419,3 +419,57 @@ rationale = "Owner decision (2026-11-26, option A on #413): eliminates silent wr
 approver = "zhigang-du"
 approved = "2026-11-26"
 reopen = "Baseline upgraded to a Go TiDB version that derives Constant.RetType from the evaluated Datum for compound decimal INTERVAL bounds in buildWindowFunctionFrameBound, or owner changes the decision; add layer/unit/stmt if ab tests hit it once D08.7 date arithmetic and window execution are wired."
+
+# ---- D04.1 privilege checks (owner decisions 2026-11-26, #438 / #441; docs/compatibility.md "Privilege checks (D04.1)", decided, not yet implemented) ----
+
+[[ruling]]
+id = "R29"
+name = "select-table-privilege-at-datasource"
+class = "divergence"
+plane = "error"
+layer = "none"
+source = "Constitution Article 1 item 2 (security exception) and Article 9.1 (owner decision 2026-11-26, D1 option A); specs/D04.1-privilege/spec.md §5 and §6.1 D1; docs/compatibility.md Privilege checks row 1; #438"
+evidence = "In Go TiDB v8.5.8, buildDataSource (pkg/planner/core/logical_plan_builder.go:5072-5457) and buildMemTable (:5492-5604) register no SelectPriv; BuildDataSourceFromView (:5740-5750) registers no caller SelectPriv on the view itself; expressionRewriter.Leave (:1517) only matches lowercase \"count\"; and secondary-unique-index PointGet IsTableDual overflow skips WHERE column checks. Live-reproduced on v8.5.8: users without SELECT on test.t (u_none with db=None, u_ins, u_other) succeed on SELECT 1, uppercase COUNT(*), SUM(1), EXISTS(SELECT 1 ...), unreferenced-column JOIN/CTE/UNION, EXPLAIN / EXPLAIN ANALYZE SELECT 1, INSERT ... SELECT 1, CREATE VIEW ... AS SELECT 1, DEFINER/INVOKER views without view grant, and PREPARE -> REVOKE -> EXECUTE on empty VisitInfos. tidb-rs registers table-read SelectPriv (column = \"*\", satisfied by global/db/table SELECT or SELECT(col) on at least one column) unconditionally at every data-source, memtable, view, and PointGet SELECT boundary, rejecting unauthorized queries with error 1142, with no compatibility switch. In a mixed cluster with unpatched Go v8.5.8 nodes behind a shared load balancer, an under-privileged account gets 1142 on tidb-rs while Go allows it; this mixed-cluster difference is explicitly accepted by the owner."
+rationale = "Constitution Article 1 item 2 (security exception) and owner decision (2026-11-26, D1 option A, always-on with no compatibility switch): closes cross-table/cross-database unauthorized table-read, row-count, and EXPLAIN ANALYZE leaks."
+approver = "zhigang-du"
+approved = "2026-11-26"
+reopen = "Baseline upgraded to a Go TiDB version that registers table-read SelectPriv at all data-source/view/PointGet boundaries, or owner changes the decision; wire test (and layer/unit/stmt if hit by ab) once D04.1 is implemented."
+
+[[ruling]]
+id = "R30"
+name = "select-table-denied-before-column-denied"
+class = "divergence"
+plane = "error"
+layer = "none"
+source = "Constitution Article 1 item 2 and Article 9.1 (owner decision 2026-11-26, D3 option A); specs/D04.1-privilege/spec.md §5.3 item 1 and §6.1 D3; docs/compatibility.md Privilege checks row 2; #438"
+evidence = "In Go TiDB v8.5.8, a user with zero SELECT privilege on test.t receives error 1143 (SELECT command denied for column 'a' in table 't') on SELECT a FROM test.t, versus error 1142 (for table 'nosuch') on SELECT a FROM test.nosuch, allowing table-existence enumeration; on DEFINER/INVOKER views, inner 1356 can also precede caller view denial. tidb-rs checks table/view read access (1142) first (and before view expansion / 1356), returning 1142 uniformly when the user has no table/view read access, and returning 1143 only when the user already has table read access (e.g. SELECT(a)) but lacks privilege on a specific column (e.g. b)."
+rationale = "Owner decision (2026-11-26, D3 option A): closes the 1143 vs 1142 table-existence oracle and aligns error precedence with table-before-column access semantics."
+approver = "zhigang-du"
+approved = "2026-11-26"
+reopen = "Baseline upgraded to a Go TiDB version that checks table/view access (1142) before column access (1143) and view inner errors (1356), or owner changes the decision; wire test (and layer/unit/stmt if hit by ab) once D04.1 is implemented."
+
+[[ruling]]
+id = "R31"
+name = "missing-table-check-uses-statement-privilege"
+class = "divergence"
+plane = "error"
+layer = "none"
+source = "Constitution Article 1 item 2 and Article 9.1 (owner decision 2026-11-26, D4 option A); specs/D04.1-privilege/spec.md §2.2 item 13 and §6.1 D4; docs/compatibility.md Privilege checks row 3; #438"
+evidence = "In Go TiDB v8.5.8, tableByName (pkg/planner/core/preprocess.go:548) checks AllPrivMask (column = \"\") when a table does not exist, so a user holding only non-SELECT privileges such as INSERT ON test.* (u_db_ins) passes the gate on SELECT 1 FROM test.nosuch and receives 1146 Table 'test.nosuch' doesn't exist, enabling table-existence enumeration. tidb-rs checks SelectPriv (column = \"*\") for read statements on missing tables and uniformly returns 1142 when the user lacks read privilege."
+rationale = "Owner decision (2026-11-26, D4 option A): closes the 1146 missing-table enumeration side-channel for users holding non-SELECT grants."
+approver = "zhigang-du"
+approved = "2026-11-26"
+reopen = "Baseline upgraded to a Go TiDB version that checks statement-appropriate privilege (SelectPriv for reads) in tableByName, or owner changes the decision; wire test (and layer/unit/stmt if hit by ab) once D04.1 is implemented."
+
+[[ruling]]
+id = "R32"
+name = "tidb-rowid-requires-table-select-privilege"
+class = "divergence"
+plane = "error"
+layer = "none"
+source = "Constitution Article 1 item 2 and Article 9.1 (owner decision 2026-11-26, D5 option A); specs/D04.1-privilege/spec.md §5.2 item 1 and §6.1 D5; docs/compatibility.md Privilege checks row 4; #438"
+evidence = "In Go TiDB v8.5.8, buildDataSource (pkg/planner/core/logical_plan_builder.go:5367-5372) omits OrigTblName on the implicit hidden _tidb_rowid FieldName, so precollectColNames skips privilege registration and both zero-privilege users and partial-column SELECT(a) users can run SELECT _tidb_rowid FROM test.t and WHERE _tidb_rowid = 1. tidb-rs populates orig_tbl_name and requires full-table (or db/global) SELECT (column = \"\") to read _tidb_rowid, rejecting zero-privilege users with 1142 (R30) and partial-column SELECT(a) users with 1143 for column '_tidb_rowid'."
+rationale = "Owner decision (2026-11-26, D5 option A): _tidb_rowid is an internal physical row handle rather than an authorized user column, so reading it requires full-table SELECT."
+approver = "zhigang-du"
+approved = "2026-11-26"
+reopen = "Baseline upgraded to a Go TiDB version that requires full-table SELECT for _tidb_rowid, or owner changes the decision; wire test (and layer/unit/stmt if hit by ab) once D04.1 is implemented."
