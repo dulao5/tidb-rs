@@ -221,6 +221,7 @@ impl ExecStmtResult {
             None => Ok(None),
             // cursorTracker.NewCursor + WrapRecordSetWithCursor + finishStmt: the record
             // set's TryDetach already returns blocked-by:D12.12.
+            // log-skip: execStmtResult.TryDetach:2350 detached cursor record sets are blocked-by:D12.12
             Some(_) => Err(tidb_base::blocked::blocked(
                 "D12.12",
                 "detached record sets (cursor fetch)",

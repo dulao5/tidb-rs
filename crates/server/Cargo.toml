@@ -22,11 +22,11 @@ tidb-expression = { workspace = true }
 tidb-executor = { workspace = true }
 # The session the result set belongs to (driver_tidb: TiDBContext → session).
 tidb-session = { workspace = true }
-log = "0.4"
 
 [dev-dependencies]
 serde_json = { workspace = true }
 flate2 = "1.0"
+tidb-log = { workspace = true }
 
 [lints]
 workspace = true

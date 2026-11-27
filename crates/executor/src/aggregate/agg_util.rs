@@ -115,7 +115,7 @@ pub(crate) fn try_recycle_buffer(_buf: &mut Vec<usize>, _group_key: &mut Vec<Vec
 pub(crate) async fn close_base_executor(b: &mut BaseExecutor, err: Error) -> Error {
     // Release the resource, but throw the panic again and let the top level handle it.
     terror::log(b.base.close().await.err().as_ref());
-    log::warn!("panic in Open(), close base executor and throw exception again");
+    tidb_base::log_warn!("panic in Open(), close base executor and throw exception again");
     err
 }
 

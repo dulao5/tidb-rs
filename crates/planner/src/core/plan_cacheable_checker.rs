@@ -810,6 +810,15 @@ pub fn check_table_cacheable(
             if tidb_base::blocked::blocked_by(&err).is_some() {
                 return Err(err);
             }
+            let orig_sql = sctx.stmt_ctx().original_sql.as_bytes();
+            let sql_prefix = &orig_sql[..orig_sql.len().min(256)];
+            tidb_base::log_warn!(
+                "find table failed",
+                "error" => &err,
+                "sql" => tidb_base::structured_log::LogValue::Bytes(sql_prefix),
+                "table_schema" => table_schema.o.as_str(),
+                "table_name" => node.name.o.as_str(),
+            );
             return Ok((
                 false,
                 format!(

@@ -1241,7 +1241,10 @@ impl IndexLookUpShared {
             Ok(tr) => Ok(tr),
             Err(err) => {
                 if !cancelled {
-                    log::error!("build table reader from handles failed: {err}");
+                    tidb_base::log_error!(
+                        "build table reader from handles failed",
+                        "error" => &err,
+                    );
                 }
                 Err(err)
             }

@@ -658,6 +658,8 @@ fn generate_runtime_filter(ctx: &PlanCtx<'_>, plan: &PhysicalPlanRef) -> Result<
     }
     // rfGenerator.GenerateRuntimeFilter(plan): its PhysicalHashJoin arm is the only source
     // of filters (see the doc).
+    // log-skip: generateRuntimeFilter:1158 runtime filter generator only acts on PhysicalHashJoin (unported)
+    // log-skip: generateRuntimeFilter:1166 runtime filter generator only acts on PhysicalHashJoin (unported)
     let _ = plan;
     Ok(())
 }

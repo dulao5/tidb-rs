@@ -211,11 +211,13 @@ impl TxnManager {
                 .flatten()
                 .map(Event::marshal_log_object)
                 .collect();
-            log::info!(
-                "slow transaction duration={duration:?} conn={} txnStartTS={} events=[{}]",
-                sctx.vars.connection_id,
-                sctx.vars.state.txn_ctx.start_ts,
-                events.join(", ")
+            let events_str = format!("[{}]", events.join(", "));
+            tidb_base::log_info!(
+                "slow transaction",
+                "duration" => duration,
+                "conn" => sctx.vars.connection_id,
+                "txnStartTS" => sctx.vars.state.txn_ctx.start_ts,
+                "events" => events_str.as_str(),
             );
         }
 

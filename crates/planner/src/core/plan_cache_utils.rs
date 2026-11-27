@@ -503,11 +503,11 @@ pub fn generate_plan_cache_stmt_with_ast(
     let mut relate_version = HashMap::with_capacity(related.len());
     for id in related {
         let Some(tbl) = is.table_by_id(id)? else {
-            log::error!("table not found in info schema, tableID: {id}");
+            tidb_base::log_error!("table not found in info schema", "tableID" => id);
             return Err(tidb_base::errors::new("table not found in info schema"));
         };
         let Some(db) = is.schema_name_by_id(tbl.dbid) else {
-            log::error!("database not found in info schema, dbID: {}", tbl.dbid);
+            tidb_base::log_error!("database not found in info schema", "dbID" => tbl.dbid);
             return Err(tidb_base::errors::new("database not found in info schema"));
         };
         db_name.push(db);

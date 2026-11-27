@@ -97,11 +97,12 @@ pub async fn auto_commit_after_stmt(
         .unwrap_or(false);
     if let Some(err) = meets_err {
         if !se.sctx.vars.in_txn() {
-            log::info!("rollbackTxn called due to ddl/autocommit failure");
+            tidb_base::log_info!("rollbackTxn called due to ddl/autocommit failure");
             se.rollback_txn();
             record_abort_txn_duration(&se.sctx.vars, is_internal);
         }
         // else if txn.Valid() && txn.IsPessimistic() && ErrDeadlock: pessimistic locks.
+        // log-skip: autoCommitAfterStmt:332 pessimistic deadlock rollback is write path
         return Err(err);
     }
 

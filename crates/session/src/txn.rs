@@ -94,7 +94,7 @@ impl TxnFuture {
                 if tidb_base::config::get_global_config().store == "unistore" {
                     return Err(err);
                 }
-                log::warn!("wait tso failed: {err}");
+                tidb_base::log_warn!("wait tso failed", "error" => &err);
             }
         }
         // tf.pipelined: tikv.WithPipelinedMemDB() (write path, never set).
@@ -370,7 +370,7 @@ impl LazyTxn {
             let r = self.change_pending_to_valid(rg).await;
             vars.duration_wait_ts = begin.elapsed().as_nanos() as i64;
             if let Err(err) = r {
-                log::warn!("active transaction fail: {err}");
+                tidb_base::log_warn!("active transaction fail", "error" => &err);
                 self.cleanup();
                 vars.state.txn_ctx.start_ts = 0;
                 return Err(err);
