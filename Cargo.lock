@@ -4277,7 +4277,9 @@ dependencies = [
  "sha2",
  "tidb-base",
  "tidb-log",
+ "tidb-memory",
  "tidb-parser",
+ "tidb-runtime",
  "tikv-jemallocator",
 ]
 
