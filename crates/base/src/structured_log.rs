@@ -127,6 +127,7 @@ pub enum LogValue<'a> {
     Time(LogTime),
     Error(&'a Error),
     Strings(&'a [&'a str]),
+    I64s(&'a [i64]),
     U64s(&'a [u64]),
     Bools(&'a [bool]),
     F32s(&'a [f32]),
@@ -260,6 +261,11 @@ impl<'a> IntoLogValue<'a> for LogTime {
 impl<'a> IntoLogValue<'a> for &'a [&'a str] {
     fn into_log_value(self) -> LogValue<'a> {
         LogValue::Strings(self)
+    }
+}
+impl<'a> IntoLogValue<'a> for &'a [i64] {
+    fn into_log_value(self) -> LogValue<'a> {
+        LogValue::I64s(self)
     }
 }
 impl<'a> IntoLogValue<'a> for &'a [u64] {
@@ -649,6 +655,10 @@ fn append_fallback_value(buf: &mut Vec<u8>, v: LogValue<'_>) {
         LogValue::Strings(xs) => {
             let joined = format!("[{}]", xs.join(","));
             append_fallback_bytes(buf, joined.as_bytes());
+        }
+        LogValue::I64s(xs) => {
+            let s = format!("{xs:?}");
+            append_fallback_bytes(buf, s.as_bytes());
         }
         LogValue::U64s(xs) => {
             let s = format!("{xs:?}");

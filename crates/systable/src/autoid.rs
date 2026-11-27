@@ -200,6 +200,13 @@ impl RowIdAllocator {
             self.base = new_base;
             self.end = new_end;
         }
+        tidb_base::log_debug!(
+            "alloc N signed ID",
+            "from ID" => self.base as u64,
+            "to ID" => (self.base + n1) as u64,
+            "table ID" => self.tb_id,
+            "database ID" => 0_i64,
+        );
         let min = self.base;
         self.base += n1;
         Ok((min, self.base))

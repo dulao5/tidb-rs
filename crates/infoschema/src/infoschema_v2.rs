@@ -109,6 +109,7 @@ type Index<K, V> = RwLock<BTreeMap<K, V>>;
 /// btreeSet updates the btree: insert, or replace the item with the same key.
 // go: btreeSet L2 (A3: one map under a lock, updated in place, not a copy-on-write B-tree behind an atomic pointer)
 fn btree_set<K: Ord, V>(ptr: &Index<K, V>, key: K, item: V) {
+    // log-skip: pkg/infoschema/infoschema_v2.go:101 A3 RwLock<BTreeMap> cannot have CAS write conflicts
     ptr.write().insert(key, item);
 }
 
@@ -696,6 +697,7 @@ impl Data {
     /// gcOldFKVersion performs GC of old referredForeignKeyItem entries up to maxItems.
     // go: Data.gcOldFKVersion L2 (A3: deleted under the lock; Go's compare-and-swap cannot conflict)
     fn gc_old_fk_version(&self, schema_version: i64) -> usize {
+        // log-skip: pkg/infoschema/infoschema_v2.go:482 A3 RwLock<BTreeMap> cannot have CAS gc conflicts
         let mut rf = self.referred_foreign_keys.write();
         let rf_dels = gc_collect_referred_foreign_key_item(&rf, schema_version, 1024);
         for fk in &rf_dels {
@@ -708,6 +710,7 @@ impl Data {
     /// exported for testing
     // go: Data.GCOldVersion L2 (A3: deleted under the locks; Go's compare-and-swap cannot conflict)
     pub fn gc_old_version(&self, schema_version: i64) -> (usize, i64) {
+        // log-skip: pkg/infoschema/infoschema_v2.go:510 A3 RwLock<BTreeMap> cannot have CAS write conflicts
         if self.by_name.read().is_empty() {
             return (0, 0);
         }

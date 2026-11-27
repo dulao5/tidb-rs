@@ -441,7 +441,7 @@ impl KVSnapshot {
             return Ok(());
         }
         let err_msg = "commit timestamp is required but not returned";
-        log::error!("{err_msg} txnStartTS={}", self.opts.lock().version);
+        tidb_base::log_error!(err_msg, "txnStartTS" => self.opts.lock().version);
         Err(TiKVError::Plain(Error::plain(err_msg)))
     }
 

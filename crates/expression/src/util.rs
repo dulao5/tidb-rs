@@ -310,8 +310,15 @@ pub fn column_substitute_impl(
                 v.get_args(),
             ) {
                 Ok(c) => c,
-                Err(_) => {
-                    // Go logs "Unexpected error happened during ColumnSubstitution".
+                Err(err) => {
+                    let stack = tidb_base::errors::format_backtrace_string(
+                        &std::backtrace::Backtrace::force_capture(),
+                    );
+                    tidb_base::log_warn!(
+                        "Unexpected error happened during ColumnSubstitution",
+                        "stack" => &stack,
+                        "error" => &err,
+                    );
                     return (false, false, Arc::clone(expr));
                 }
             };
@@ -337,7 +344,17 @@ pub fn column_substitute_impl(
                         &tmp_arg_for_coll_check,
                     ) {
                         Ok(c) => c,
-                        Err(_) => return (false, failed, Arc::clone(expr)),
+                        Err(err) => {
+                            let stack = tidb_base::errors::format_backtrace_string(
+                                &std::backtrace::Backtrace::force_capture(),
+                            );
+                            tidb_base::log_warn!(
+                                "Unexpected error happened during ColumnSubstitution",
+                                "stack" => &stack,
+                                "error" => &err,
+                            );
+                            return (false, failed, Arc::clone(expr));
+                        }
                     };
                     if old_coll_et.collation == new_coll_et.collation {
                         if new_func_expr.get_type(&*ev).get_collate()
@@ -1569,22 +1586,30 @@ pub fn is_immutable_func(expr: &Expr) -> bool {
 
 /// GetUint64FromConstant gets a uint64 from constant expression. `(value, is_null, ok)`.
 /// Go logs a warning on the failure paths; the logs are not reproduced (D08.12 spec §4).
-// go: GetUint64FromConstant L2 (no warning logs)
+// go: GetUint64FromConstant L1
 #[allow(non_upper_case_globals)]
 pub fn get_uint64_from_constant(ctx: &dyn EvalContext, expr: &Expr) -> (u64, bool, bool) {
     let Expr::Constant(con) = expr else {
+        let info = expr.string_with_ctx(ctx, tidb_base::errors::RedactLogDisable);
+        tidb_base::log_warn!("not a constant expression", "expression" => &info);
         return (0, false, false);
     };
     let mut dt = con.value.clone();
     if let Some(pm) = &con.param_marker {
         match pm.get_user_var(ctx) {
             Ok(d) => dt = d,
-            Err(_) => return (0, false, false),
+            Err(err) => {
+                tidb_base::log_warn!("get param failed", "error" => &err);
+                return (0, false, false);
+            }
         }
     } else if let Some(de) = &con.deferred_expr {
         match de.eval(ctx, &EvalState::new(), tidb_chunk::Row::default()) {
             Ok(d) => dt = d,
-            Err(_) => return (0, false, false),
+            Err(err) => {
+                tidb_base::log_warn!("eval deferred expr failed", "error" => &err);
+                return (0, false, false);
+            }
         }
     }
     match dt.kind() {

@@ -338,9 +338,11 @@ pub async fn build_cop_tasks<C: TiKVRegionCache>(
     let tasks = builder.build();
     let elapsed = start.elapsed();
     if elapsed > Duration::from_millis(500) {
-        log::warn!(
-            "buildCopTasks takes too much time, elapsed: {elapsed:?}, range len: {ranges_len}, task len: {}",
-            tasks.len()
+        tidb_base::log_warn!(
+            "buildCopTasks takes too much time",
+            "elapsed" => elapsed,
+            "range len" => ranges_len,
+            "task len" => tasks.len(),
         );
     }
     if let Some(e) = opt.elapsed.as_deref_mut() {
@@ -928,6 +930,7 @@ impl<S: TiKVStore> CopClient<S> {
         variables: Option<&tidb_kv::kv::OptionValue>,
         option: &tidb_kv::kv::ClientSendOption,
     ) -> Box<dyn tidb_kv::kv::Response> {
+        // log-skip: pkg/store/copr/coprocessor.go:92 TiFlash batch cop (DEF.MPP) is not ported
         let vars = match Self::prepare_send(req, variables) {
             Ok(v) => v,
             Err(e) => return Box::new(CopErrorResponse(Some(e))),
@@ -987,6 +990,7 @@ impl<S: TiKVStore> CopClient<S> {
         vars: Variables,
         option: &tidb_kv::kv::ClientSendOption,
     ) -> Result<CopIterator<S>, Error> {
+        // log-skip: pkg/store/copr/coprocessor.go:126 failpoint checkKeyRangeSortedForPaging not ported
         if req.store_type == TiDB {
             // coprocessor on TiDB doesn't support paging
             req.paging.enable = false;
@@ -1471,11 +1475,10 @@ impl<S: TiKVStore> CopIterator<S> {
             let result = match result {
                 Ok(r) => r,
                 Err((p, bt)) => {
-                    let msg = tidb_base::panic_guard::panic_payload_message(p.as_ref());
                     let stack = bt.unwrap_or_default();
                     tidb_base::log_error!(
                         "copIteratorWork meet panic",
-                        "r" => &msg,
+                        "r" => tidb_base::panic_guard::panic_payload_log_value(p.as_ref()),
                         "stack trace" => &stack,
                     );
                     return Some(Box::new(CopResponse {
@@ -1742,11 +1745,10 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
         let r = tidb_base::panic_guard::catch_unwind_future(self.handle_task_inner(task, resp_ch))
             .await;
         if let Err((p, bt)) = r {
-            let msg = tidb_base::panic_guard::panic_payload_message(p.as_ref());
             let stack = bt.unwrap_or_default();
             tidb_base::log_warn!(
                 "copIteratorWork meet panic",
-                "r" => &msg,
+                "r" => tidb_base::panic_guard::panic_payload_log_value(p.as_ref()),
                 "stack trace" => &stack,
             );
             let resp = Box::new(CopResponse {
@@ -2009,7 +2011,7 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
             log_str = append_scan_detail(log_str, "data", sd.data.as_ref());
             log_str = append_scan_detail(log_str, "lock", sd.lock.as_ref());
         }
-        log::info!("{log_str}");
+        tidb_base::log_info!(&log_str);
     }
 
     #[allow(clippy::too_many_arguments)] // Go's signature
@@ -2149,17 +2151,33 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
                 "other error: %s",
                 &[Arg::Str(other_err.clone().into_bytes().into())],
             );
-            log::warn!(
-                "other error, txnStartTS: {}, regionID: {}, regionVer: {}, regionConfVer: {}, bucketsVer: {}, latestBucketsVer: {}, rangeNums: {}, storeAddr: {}, error: {}",
-                self.shared.req.start_ts,
-                task.region.get_id(),
-                task.region.get_ver(),
-                task.region.get_conf_ver(),
-                task.buckets_ver,
-                pb.latest_buckets_version,
-                task.ranges.len(),
-                task.store_addr,
-                other_err
+            let (first_start, last_end) = if !task.ranges.is_empty() {
+                (
+                    Some(task.ranges.at(0).start_key.0),
+                    Some(task.ranges.at(task.ranges.len() - 1).end_key.0),
+                )
+            } else {
+                (None, None)
+            };
+            tidb_base::log_warn!(
+                "other error",
+                "txnStartTS" => self.shared.req.start_ts,
+                "regionID" => task.region.get_id(),
+                "regionVer" => task.region.get_ver(),
+                "regionConfVer" => task.region.get_conf_ver(),
+                "bucketsVer" => task.buckets_ver,
+                "latestBucketsVer" => pb.latest_buckets_version,
+                "rangeNums" => task.ranges.len(),
+                "storeAddr" => &task.store_addr,
+                "error" => &other_err,
+                "firstRangeStartKey" => first_start
+                    .as_deref()
+                    .map(tidb_base::structured_log::LogValue::Bytes)
+                    .unwrap_or(tidb_base::structured_log::LogValue::Skip),
+                "lastRangeEndKey" => last_end
+                    .as_deref()
+                    .map(tidb_base::structured_log::LogValue::Bytes)
+                    .unwrap_or(tidb_base::structured_log::LogValue::Skip),
             );
             if err.to_string().contains("write conflict") {
                 return Err(tidb_kv::error::ErrWriteConflict
@@ -2306,16 +2324,32 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
                     "other error: %s",
                     &[Arg::Str(other_err.clone().into_bytes().into())],
                 );
-                log::warn!(
-                    "other error, txnStartTS: {}, regionID: {}, regionVer: {}, regionConfVer: {}, bucketsVer: {}, rangeNums: {}, storeAddr: {}, error: {}",
-                    self.shared.req.start_ts,
-                    task.region.get_id(),
-                    task.region.get_ver(),
-                    task.region.get_conf_ver(),
-                    task.buckets_ver,
-                    task.ranges.len(),
-                    task.store_addr,
-                    err
+                let (first_start, last_end) = if !task.ranges.is_empty() {
+                    (
+                        Some(task.ranges.at(0).start_key.0),
+                        Some(task.ranges.at(task.ranges.len() - 1).end_key.0),
+                    )
+                } else {
+                    (None, None)
+                };
+                tidb_base::log_warn!(
+                    "other error",
+                    "txnStartTS" => self.shared.req.start_ts,
+                    "regionID" => task.region.get_id(),
+                    "regionVer" => task.region.get_ver(),
+                    "regionConfVer" => task.region.get_conf_ver(),
+                    "bucketsVer" => task.buckets_ver,
+                    "rangeNums" => task.ranges.len(),
+                    "storeAddr" => &task.store_addr,
+                    "error" => &err,
+                    "firstRangeStartKey" => first_start
+                        .as_deref()
+                        .map(tidb_base::structured_log::LogValue::Bytes)
+                        .unwrap_or(tidb_base::structured_log::LogValue::Skip),
+                    "lastRangeEndKey" => last_end
+                        .as_deref()
+                        .map(tidb_base::structured_log::LogValue::Bytes)
+                        .unwrap_or(tidb_base::structured_log::LogValue::Skip),
                 );
                 if err.to_string().contains("write conflict") {
                     return Err((
@@ -2339,13 +2373,32 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
             // when the error is generated by client or a load-based server busy,
             // response is empty by design, skip warning for this case.
             if !batch_resps.is_empty() {
-                log::error!(
-                    "response of batched task missing, id: {}, txnStartTS: {}, regionID: {}, rangeNums: {}, storeAddr: {}",
-                    task.task_id,
-                    self.shared.req.start_ts,
-                    task.region.get_id(),
-                    task.ranges.len(),
-                    task.store_addr
+                let (first_start, last_end) = if !task.ranges.is_empty() {
+                    (
+                        Some(task.ranges.at(0).start_key.0),
+                        Some(task.ranges.at(task.ranges.len() - 1).end_key.0),
+                    )
+                } else {
+                    (None, None)
+                };
+                tidb_base::log_error!(
+                    "response of batched task missing",
+                    "id" => task.task_id,
+                    "txnStartTS" => self.shared.req.start_ts,
+                    "regionID" => task.region.get_id(),
+                    "regionVer" => task.region.get_ver(),
+                    "regionConfVer" => task.region.get_conf_ver(),
+                    "bucketsVer" => task.buckets_ver,
+                    "rangeNums" => task.ranges.len(),
+                    "storeAddr" => &task.store_addr,
+                    "firstRangeStartKey" => first_start
+                        .as_deref()
+                        .map(tidb_base::structured_log::LogValue::Bytes)
+                        .unwrap_or(tidb_base::structured_log::LogValue::Skip),
+                    "lastRangeEndKey" => last_end
+                        .as_deref()
+                        .map(tidb_base::structured_log::LogValue::Bytes)
+                        .unwrap_or(tidb_base::structured_log::LogValue::Skip),
                 );
             }
             remain_tasks.push(task);
@@ -2406,7 +2459,8 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
             return Ok(());
         };
         let _resolve_lock_detail = self.get_lock_resolver_details();
-        log::debug!("coprocessor encounters lock, lock: {lock_err:?}");
+        let lock_str = format!("{lock_err:?}");
+        tidb_base::log_debug!("coprocessor encounters lock", "lock" => &lock_str);
         self.shared
             .kvclient
             .resolve_lock_and_wait(bo, lock_err)
@@ -2420,6 +2474,7 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
         _task: &CopTask,
         _cop_req: &mut coprocessor::Request,
     ) -> (Option<Vec<u8>>, Option<()>) {
+        // log-skip: pkg/store/copr/coprocessor.go:1871 coprocessor cache is D07.4 (A3, not ported)
         if self.shared.store.copr_cache.is_some() {
             unreachable!("the coprocessor cache is D07.4");
         }
@@ -2577,7 +2632,10 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
         if let Some(killed) = &self.shared.vars.killed {
             let k = killed.load(Ordering::SeqCst);
             if k != 0 {
-                log::info!("a killed signal is received in copIteratorWorker, signal: {k}");
+                tidb_base::log_info!(
+                    "a killed signal is received in copIteratorWorker",
+                    "signal" => k,
+                );
                 return true;
             }
         }
@@ -2775,9 +2833,9 @@ impl tidb_memory::ActionOnExceed for RateLimitAction {
         cond.once_done = true;
         if cond.remaining_token_num < 2 {
             self.set_enabled(false);
-            log::info!(
-                "memory exceeds quota, rateLimitAction delegate to fallback action, total token count: {}",
-                self.total_token_num
+            tidb_base::log_info!(
+                "memory exceeds quota, rateLimitAction delegate to fallback action",
+                "total token count" => self.total_token_num,
             );
             drop(cond);
             if let Some(fallback) = self.base.get_fallback() {
@@ -2785,12 +2843,12 @@ impl tidb_memory::ActionOnExceed for RateLimitAction {
             }
             return Ok(());
         }
-        log::info!(
-            "memory exceeds quota, destroy one token now., consumed: {}, quota: {}, total token count: {}, remaining token count: {}",
-            t.bytes_consumed(),
-            t.get_bytes_limit(),
-            self.total_token_num,
-            cond.remaining_token_num
+        tidb_base::log_info!(
+            "memory exceeds quota, destroy one token now.",
+            "consumed" => t.bytes_consumed(),
+            "quota" => t.get_bytes_limit(),
+            "total token count" => self.total_token_num,
+            "remaining token count" => cond.remaining_token_num,
         );
         cond.exceeded = true;
         cond.trigger_count_for_test += 1;

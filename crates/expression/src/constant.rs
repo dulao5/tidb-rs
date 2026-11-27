@@ -220,8 +220,12 @@ impl Constant {
         if let Some(pm) = &self.param_marker {
             let mut tp = new_field_type(mysql::TypeUnspecified);
             // intest.AssertNoError: compiled out of production Go builds (also here).
-            let Ok(dt) = pm.get_user_var(ctx) else {
-                return None;
+            let dt = match pm.get_user_var(ctx) {
+                Ok(dt) => dt,
+                Err(err) => {
+                    tidb_base::log_warn!("fail to get param", "error" => &err);
+                    return None;
+                }
             };
             infer_param_type_from_datum(&dt, &mut tp);
             return Some(Cow::Owned(tp));

@@ -139,7 +139,7 @@ impl KeyLocation {
                 end_key: self.end_key.clone(),
             });
         }
-        log::info!("Unreachable place");
+        tidb_base::log_info!("Unreachable place");
         panic!("Unreachable");
     }
 

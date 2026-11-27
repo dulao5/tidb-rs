@@ -87,6 +87,8 @@ async fn select_impl(
         .instance
         .enable_collect_execution_info
         .load();
+    // log-skip: pkg/distsql/distsql.go:72 eventCb not wired in ClientSendOption (logged directly by coprocessor.rs)
+    // log-skip: pkg/distsql/distsql.go:97 failpoint setting TryCopLiteWorker not ported
     let option = ClientSendOption {
         session_mem_tracker: dctx.session_mem_tracker.clone(),
         enabled_rate_limit_action: dctx.enabled_rate_limit_action,

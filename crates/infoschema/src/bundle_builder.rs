@@ -86,7 +86,7 @@ impl BundleInfoBuilder {
 
         let bundle = placement::new_table_bundle(&PolicyGetterImpl { is: misc }, tbl.meta());
         match bundle {
-            Err(err) => log::error!("create table bundle failed, error: {err}"),
+            Err(err) => tidb_base::log_error!("create table bundle failed", "error" => &err),
             Ok(Some(bundle)) => {
                 misc.rule_bundle_map.insert(table_id, Arc::new(bundle));
             }
@@ -100,9 +100,10 @@ impl BundleInfoBuilder {
         for par in partition.definitions.iter().flatten() {
             let bundle = placement::new_partition_bundle(&PolicyGetterImpl { is: misc }, par);
             match bundle {
-                Err(err) => log::error!(
-                    "create partition bundle failed, error: {err}, partition id: {}",
-                    par.id
+                Err(err) => tidb_base::log_error!(
+                    "create partition bundle failed",
+                    "error" => &err,
+                    "partition id" => par.id,
                 ),
                 Ok(Some(bundle)) => {
                     misc.rule_bundle_map.insert(par.id, Arc::new(bundle));

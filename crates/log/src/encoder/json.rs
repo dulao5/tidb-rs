@@ -167,6 +167,17 @@ fn encode_value(value: LogValue<'_>, out: &mut Vec<u8>) {
             }
             out.push(b']');
         }
+        LogValue::I64s(xs) => {
+            out.push(b'[');
+            let mut itoa_buf = itoa::Buffer::new();
+            for (i, &n) in xs.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                out.extend_from_slice(itoa_buf.format(n).as_bytes());
+            }
+            out.push(b']');
+        }
         LogValue::U64s(xs) => {
             out.push(b'[');
             let mut itoa_buf = itoa::Buffer::new();

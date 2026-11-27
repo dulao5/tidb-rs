@@ -29,8 +29,6 @@ tipb = { workspace = true }
 protobuf = { workspace = true }
 # DefaultExprPushDownBlacklist (atomic.Value, M-SNAP).
 arc-swap = "1"
-# logutil (ported crates log through the `log` facade).
-log = "0.4"
 
 [dev-dependencies]
 # The govec vectors are committed as .jsonl.gz.
