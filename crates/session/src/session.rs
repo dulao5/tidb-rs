@@ -391,7 +391,7 @@ impl SessCtx {
         } else {
             let err = self.do_commit().await;
             // tryReplaceWriteConflictError / retry: write conflicts (write path).
-            // log-skip: session.doCommitWithRetry:817 write-conflict retry is write path
+            // log-skip: session.doCommitWithRetry:819 write-conflict retry is write path
             // log-skip: session.doCommitWithRetry:829 write-conflict retry is write path
             // recordOnTransactionExecution(err, TxnCtx.StatementCount, ...): D14.1.
             if let Err(e) = &err
@@ -747,7 +747,7 @@ impl SessionCore {
     /// Internal statements read the request source from the context (`kv.RequestSourceKey`):
     /// the new stack runs no internal statement.
     // go: session.setRequestSource L2 (no internal statements on the new stack)
-    fn set_request_source(&mut self, stmt_label: &str) {
+    fn set_request_source(&mut self, stmt_label: &str, stmt_text: &str) {
         if !self.sctx.is_internal() {
             let mut label = stmt_label.to_owned();
             if self.sctx.txn.valid() {
@@ -766,6 +766,7 @@ impl SessionCore {
         tidb_base::log_warn!(
             "unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context",
             "internal" => self.sctx.is_internal(),
+            "sql" => stmt_text,
         );
     }
 
@@ -1149,8 +1150,8 @@ pub fn is_end_txn_stmt(stmt: &ast::Stmt, vars: &SessionVars) -> Result<bool, Err
 /// AST and never reach the new stack: every statement is a general query.
 // go: logStmt L2 (the crucial statements are not in the Rust AST)
 fn log_stmt(exec_stmt: &ExecStmt, s: &SessionCore) {
-    // log-skip: logStmt:4316 crucial DDL/user/privilege statements are not in the Rust AST
-    // log-skip: logStmt:4334 crucial DDL/user/privilege statements are not in the Rust AST
+    // log-skip: logStmt:4322 crucial DDL/user/privilege statements are not in the Rust AST
+    // log-skip: logStmt:4328 crucial DDL/user/privilege statements are not in the Rust AST
     log_general_query(exec_stmt, s, false);
 }
 
@@ -1449,7 +1450,7 @@ impl Session {
     // go: session.Close L2 (table / advisory locks, stats and index usage collectors, bindings, plan cache: not on the read-only node or not ported)
     pub fn close(&mut self) {
         self.running = None;
-        // log-skip: session.Close:2575 table locks are not held on the read-only node
+        // log-skip: session.Close:2724 table locks are not held on the read-only node
         // RollbackTxn(context.WithValue(ctx, inCloseSession{}, struct{}{})).
         self.core.sctx.rollback_txn_state_in(true);
         self.core.txn_manager.on_txn_end(&self.core.sctx);
@@ -1551,13 +1552,13 @@ impl Session {
         if stmt_label.is_empty() {
             stmt_label = crate::glue::get_stmt_label(&stmt_node)?;
         }
-        self.core.set_request_source(&stmt_label);
+        let text = self.core.sctx.vars.stmt_ctx().original_sql.clone();
+        self.core.set_request_source(&stmt_label, &text);
 
         // The planner's table lookups do not read TiKV (D06.3 spec §11.2).
         load_stmt_tables(&self.core.sctx, &stmt_node).await;
 
         // Transform abstract syntax tree to a physical plan(stored in executor.ExecStmt).
-        let text = self.core.sctx.vars.stmt_ctx().original_sql.clone();
         let compiler = Compiler;
         // The statement is handed over to Compile, which freezes it after planning (spec §9.2).
         let stmt = compiler.compile(&mut self.core, stmt_node, &text);
@@ -1747,7 +1748,7 @@ impl Session {
                 // cache (A3, see above), so this is not reached.
                 core.rollback_on_error();
                 // glue: blocked-by:D13.1 (the prepare dedup cache is the plan-cache exception A3)
-                // log-skip: session.PrepareStmt:2631 prepare dedup cache rebuild is blocked-by:D13.1 (A3)
+                // log-skip: session.PrepareStmt:2538 prepare dedup cache rebuild is blocked-by:D13.1 (A3)
                 return Err(blocked(
                     "D13.1",
                     "the prepare dedup cache (the plan-cache exception A3)",

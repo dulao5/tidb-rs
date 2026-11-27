@@ -107,4 +107,14 @@ async fn general_log_and_prepared_stmt_not_found_match_go_whole_line() {
         normalize_caller(main_out.trim_end_matches('\n')),
         "[ERROR] [session.rs:<LINE>] [\"prepared statement not found\"] [stmtID=99]"
     );
+
+    // 3. Slow-transaction Event::marshal_log_object uses Go duration_string format.
+    let ev = tidb_session::txnmanager::Event {
+        event: "enter txn".to_owned(),
+        duration: std::time::Duration::from_millis(12),
+    };
+    assert_eq!(
+        ev.marshal_log_object(),
+        r#"{"event":"enter txn","gap":"12ms"}"#
+    );
 }

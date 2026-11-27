@@ -1128,7 +1128,7 @@ fn try_lock_mdl_inner(
             && tbl.update_ts == table_info.update_ts);
     if !same_table {
         // glue: blocked-by:D06.3 (SessionExtendedInfoSchema.UpdateTableInfo: a table newer than the transaction's InfoSchema)
-        // log-skip: tryLockMDLAndUpdateSchemaIfNecessary:2182 SessionExtendedInfoSchema.UpdateTableInfo is blocked-by:D06.3
+        // log-skip: tryLockMDLAndUpdateSchemaIfNecessary:2180 SessionExtendedInfoSchema.UpdateTableInfo is blocked-by:D06.3
         return Err(blocked(
             "D06.3",
             "a table definition newer than the transaction's InfoSchema (SessionExtendedInfoSchema.UpdateTableInfo)",

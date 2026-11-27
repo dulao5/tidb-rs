@@ -525,7 +525,7 @@ impl ExecStmt {
     // go: ExecStmt.RebuildPlan L2 (boundary stub, blocked-by:D09.0)
     pub fn rebuild_plan(&mut self) -> Result<i64, Error> {
         // glue: stub, blocked-by:D09.0 (preprocess and optimize, VS1-10)
-        // log-skip: ExecStmt.RebuildPlan:458 boundary stub blocked-by:D09.0
+        // log-skip: ExecStmt.RebuildPlan:464 boundary stub blocked-by:D09.0
         Err(blocked(
             "D09.0",
             "rebuilding the plan of a retried statement",

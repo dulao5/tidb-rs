@@ -550,7 +550,7 @@ pub fn optimize(
     ctx.vars.duration_optimization = begin_opt.elapsed().as_nanos() as i64;
 
     // The alternative rounds: none is enabled without tidb_opt_enable_alternative_logical_plans.
-    // log-skip: optimize:527 alternative logical plan rounds are blocked-by:D09.13
+    // log-skip: optimize:769 alternative logical plan rounds are blocked-by:D09.13
     Ok((best_plan, best_names, best_cost))
 }
 

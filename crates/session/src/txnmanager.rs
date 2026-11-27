@@ -52,9 +52,11 @@ impl Event {
     /// The zap object of the slow transaction log: `{event, gap}`.
     // go: event.MarshalLogObject L2 (a log string instead of a zap encoder)
     pub fn marshal_log_object(&self) -> String {
+        let ns = i64::try_from(self.duration.as_nanos()).unwrap_or(i64::MAX);
         format!(
-            "{{\"event\": {:?}, \"gap\": {:?}}}",
-            self.event, self.duration
+            "{{\"event\":{:?},\"gap\":{:?}}}",
+            self.event,
+            tidb_base::gostd::time::duration_string(ns)
         )
     }
 }
@@ -211,7 +213,7 @@ impl TxnManager {
                 .flatten()
                 .map(Event::marshal_log_object)
                 .collect();
-            let events_str = format!("[{}]", events.join(", "));
+            let events_str = format!("[{}]", events.join(","));
             tidb_base::log_info!(
                 "slow transaction",
                 "duration" => duration,
