@@ -220,9 +220,9 @@ impl Histogram {
     // go: Histogram.BucketToString L1
     pub fn bucket_to_string(&self, bkt_id: usize, idx_cols: usize) -> String {
         let (upper_val, err) = value_to_string(&self.get_upper(bkt_id), idx_cols);
-        tidb_base::terror::log(err.err().as_ref());
+        tidb_base::terror::log(err.err().map(tidb_base::errors::trace).as_ref());
         let (lower_val, err) = value_to_string(&self.get_lower(bkt_id), idx_cols);
-        tidb_base::terror::log(err.err().as_ref());
+        tidb_base::terror::log(err.err().map(tidb_base::errors::trace).as_ref());
         format!(
             "num: {} lower_bound: {} upper_bound: {} repeats: {} ndv: {}",
             self.bucket_count(bkt_id),

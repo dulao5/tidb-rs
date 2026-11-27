@@ -75,6 +75,8 @@ pub type RunInNewTxn<'a> =
 /// A signed row-ID allocator (`allocator`, `RowIDAllocType`, `isUnsigned = false`).
 #[derive(Clone, Debug)]
 pub struct RowIdAllocator {
+    /// `dbID`.
+    pub db_id: i64,
     /// `tbID`.
     pub tb_id: i64,
     /// `base`: the last ID handed out.
@@ -95,6 +97,7 @@ impl RowIdAllocator {
     // go-part: NewAllocator (RowIDAllocType, signed) L1
     pub fn new(tb_id: i64, cache: i64, tb_version: u16, now: Instant) -> RowIdAllocator {
         let mut a = RowIdAllocator {
+            db_id: 0,
             tb_id,
             base: 0,
             end: 0,
@@ -114,6 +117,13 @@ impl RowIdAllocator {
             a.step = DefaultStep;
         }
         a
+    }
+
+    /// Set the database ID (`alloc.dbID`) reported in debug logs.
+    // glue: builder setter for alloc.dbID
+    pub fn with_db_id(mut self, db_id: i64) -> Self {
+        self.db_id = db_id;
+        self
     }
 
     /// Alloc allocates n consecutive autoID for table with tableID, returning (min, max] of
@@ -205,7 +215,7 @@ impl RowIdAllocator {
             "from ID" => self.base as u64,
             "to ID" => (self.base + n1) as u64,
             "table ID" => self.tb_id,
-            "database ID" => 0_i64,
+            "database ID" => self.db_id,
         );
         let min = self.base;
         self.base += n1;

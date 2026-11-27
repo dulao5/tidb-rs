@@ -930,7 +930,7 @@ impl<S: TiKVStore> CopClient<S> {
         variables: Option<&tidb_kv::kv::OptionValue>,
         option: &tidb_kv::kv::ClientSendOption,
     ) -> Box<dyn tidb_kv::kv::Response> {
-        // log-skip: pkg/store/copr/coprocessor.go:92 TiFlash batch cop (DEF.MPP) is not ported
+        // log-skip: pkg/store/copr/coprocessor.go:93 TiFlash batch cop (DEF.MPP) is not ported
         let vars = match Self::prepare_send(req, variables) {
             Ok(v) => v,
             Err(e) => return Box::new(CopErrorResponse(Some(e))),
@@ -990,7 +990,7 @@ impl<S: TiKVStore> CopClient<S> {
         vars: Variables,
         option: &tidb_kv::kv::ClientSendOption,
     ) -> Result<CopIterator<S>, Error> {
-        // log-skip: pkg/store/copr/coprocessor.go:126 failpoint checkKeyRangeSortedForPaging not ported
+        // log-skip: pkg/store/copr/coprocessor.go:128 failpoint checkKeyRangeSortedForPaging not ported
         if req.store_type == TiDB {
             // coprocessor on TiDB doesn't support paging
             req.paging.enable = false;
@@ -1101,6 +1101,7 @@ impl<S: TiKVStore> CopClient<S> {
             store_batched_fallback_num: AtomicU64::new(0),
             stats,
             finish: finish_rx,
+            on_cop_meet_lock: option.on_cop_meet_lock.clone(),
         });
         Ok(CopIterator {
             shared,
@@ -1142,6 +1143,7 @@ pub(crate) struct CopIteratorShared<S: TiKVStore> {
     store_batched_fallback_num: AtomicU64,
     stats: Option<Arc<Mutex<Vec<CopRuntimeStats>>>>,
     finish: tokio::sync::watch::Receiver<bool>,
+    on_cop_meet_lock: Option<tidb_kv::kv::CopMeetLockCallback>,
 }
 
 /// copIterator.
@@ -2446,8 +2448,8 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
         Ok((batch_resp_list, remain_tasks))
     }
 
-    /// The event callback (`trxevents`) is not ported: the lock is logged at debug level,
-    /// Go's behaviour without a callback.
+    /// Invokes `on_cop_meet_lock` when set (matching Go `task.eventCb` in `distsql.go:70-74`),
+    /// otherwise logs `"coprocessor encounters lock"` at debug level with compact proto text.
     // go: copIteratorWorker.handleLockErr L1 [M-ERR]
     async fn handle_lock_err(
         &self,
@@ -2459,8 +2461,12 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
             return Ok(());
         };
         let _resolve_lock_detail = self.get_lock_resolver_details();
-        let lock_str = format!("{lock_err:?}");
-        tidb_base::log_debug!("coprocessor encounters lock", "lock" => &lock_str);
+        let lock_str = format_lock_info_proto_text(&lock_err);
+        if let Some(cb) = &self.shared.on_cop_meet_lock {
+            cb(&lock_str);
+        } else {
+            tidb_base::log_debug!("coprocessor encounters lock", "lock" => lock_str.as_str());
+        }
         self.shared
             .kvclient
             .resolve_lock_and_wait(bo, lock_err)
@@ -2474,7 +2480,7 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
         _task: &CopTask,
         _cop_req: &mut coprocessor::Request,
     ) -> (Option<Vec<u8>>, Option<()>) {
-        // log-skip: pkg/store/copr/coprocessor.go:1871 coprocessor cache is D07.4 (A3, not ported)
+        // log-skip: pkg/store/copr/coprocessor.go:1870 coprocessor cache is D07.4 (A3, not ported)
         if self.shared.store.copr_cache.is_some() {
             unreachable!("the coprocessor cache is D07.4");
         }
@@ -2931,5 +2937,86 @@ impl RateLimitAction {
     // go: rateLimitAction.isEnabled L1
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst) > 0
+    }
+}
+
+/// Format a `kvrpcpb::LockInfo` in Go `proto.CompactTextString` format (`kvrpcpb.LockInfo.String()`),
+/// omitting proto3 zero/empty default fields.
+// glue: Go proto.CompactTextString for kvrpcpb.LockInfo (coprocessor encounters lock)
+pub fn format_lock_info_proto_text(lock: &kvrpcpb::LockInfo) -> String {
+    let mut out = String::new();
+    append_lock_info_proto_text(&mut out, lock);
+    out
+}
+
+fn append_proto_bytes_field(out: &mut String, name: &str, bytes: &[u8]) {
+    use std::fmt::Write as _;
+    let _ = write!(out, "{name}:\"");
+    for &b in bytes {
+        match b {
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(b as char),
+            _ => {
+                let _ = write!(out, "\\{:03o}", b);
+            }
+        }
+    }
+    out.push_str("\" ");
+}
+
+fn append_lock_info_proto_text(out: &mut String, lock: &kvrpcpb::LockInfo) {
+    use std::fmt::Write as _;
+    if !lock.primary_lock.is_empty() {
+        append_proto_bytes_field(out, "primary_lock", &lock.primary_lock);
+    }
+    if lock.lock_version != 0 {
+        let _ = write!(out, "lock_version:{} ", lock.lock_version);
+    }
+    if !lock.key.is_empty() {
+        append_proto_bytes_field(out, "key", &lock.key);
+    }
+    if lock.lock_ttl != 0 {
+        let _ = write!(out, "lock_ttl:{} ", lock.lock_ttl);
+    }
+    if lock.txn_size != 0 {
+        let _ = write!(out, "txn_size:{} ", lock.txn_size);
+    }
+    if lock.lock_type != 0 {
+        match kvrpcpb::Op::try_from(lock.lock_type) {
+            Ok(op) => {
+                let _ = write!(out, "lock_type:{} ", op.as_str_name());
+            }
+            Err(_) => {
+                let _ = write!(out, "lock_type:{} ", lock.lock_type);
+            }
+        }
+    }
+    if lock.lock_for_update_ts != 0 {
+        let _ = write!(out, "lock_for_update_ts:{} ", lock.lock_for_update_ts);
+    }
+    if lock.use_async_commit {
+        out.push_str("use_async_commit:true ");
+    }
+    if lock.min_commit_ts != 0 {
+        let _ = write!(out, "min_commit_ts:{} ", lock.min_commit_ts);
+    }
+    for sec in &lock.secondaries {
+        append_proto_bytes_field(out, "secondaries", sec);
+    }
+    if lock.duration_to_last_update_ms != 0 {
+        let _ = write!(
+            out,
+            "duration_to_last_update_ms:{} ",
+            lock.duration_to_last_update_ms
+        );
+    }
+    for shared in &lock.shared_lock_infos {
+        out.push_str("shared_lock_infos:<");
+        append_lock_info_proto_text(out, shared);
+        out.push_str("> ");
     }
 }

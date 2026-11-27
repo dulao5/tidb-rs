@@ -436,12 +436,21 @@ impl KVSnapshot {
         &self,
         require_commit_ts: bool,
         commit_ts: u64,
+        key: &[u8],
     ) -> Result<(), TiKVError> {
         if !require_commit_ts || commit_ts > 0 {
             return Ok(());
         }
         let err_msg = "commit timestamp is required but not returned";
-        tidb_base::log_error!(err_msg, "txnStartTS" => self.opts.lock().version);
+        let key_str = tidb_base::redact::key(key);
+        let stack =
+            tidb_base::errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture());
+        tidb_base::log_error!(
+            err_msg,
+            "txnStartTS" => self.opts.lock().version,
+            "key" => key_str.as_str(),
+            "stack" => stack.as_str(),
+        );
         Err(TiKVError::Plain(Error::plain(err_msg)))
     }
 
@@ -463,7 +472,7 @@ impl KVSnapshot {
             Some(v) if !v.is_empty() => tidb_kv::kv::new_value_entry(v, 0),
             _ => return Err(TiKVError::NotExist),
         };
-        self.check_commit_ts_required(return_commit_ts, entry.commit_ts)?;
+        self.check_commit_ts_required(return_commit_ts, entry.commit_ts, k)?;
         Ok(entry)
     }
 
@@ -493,7 +502,7 @@ impl KVSnapshot {
             if v.is_empty() {
                 continue;
             }
-            self.check_commit_ts_required(return_commit_ts, 0)?;
+            self.check_commit_ts_required(return_commit_ts, 0, &k)?;
             m.insert(k, tidb_kv::kv::new_value_entry(v, 0));
         }
         Ok(m)

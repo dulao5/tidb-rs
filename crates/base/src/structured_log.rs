@@ -110,6 +110,20 @@ pub struct LogTime {
     pub offset_secs: i32,
 }
 
+impl LogTime {
+    /// Construct a [`LogTime`] from Unix `(secs, nanos)` using the process's local time zone
+    /// offset (Go `time.Unix(secs, nanos)` / `oracle.GetTimeFromTS` semantics).
+    // glue: local-timezone LogTime from Unix timestamp
+    pub fn from_local_unix(secs: i64, nanos: u32) -> Self {
+        let (_, offset_secs) = crate::gostd::time::unix(secs, i64::from(nanos)).zone();
+        Self {
+            secs,
+            nanos,
+            offset_secs,
+        }
+    }
+}
+
 /// Typed structured field value preserving exact Go / `zap` semantics (including raw non-UTF-8
 /// bytes and `&tidb_base::Error`).
 #[derive(Clone, Copy, Debug)]
@@ -657,7 +671,15 @@ fn append_fallback_value(buf: &mut Vec<u8>, v: LogValue<'_>) {
             append_fallback_bytes(buf, joined.as_bytes());
         }
         LogValue::I64s(xs) => {
-            let s = format!("{xs:?}");
+            use std::fmt::Write as _;
+            let mut s = String::from("[");
+            for (i, n) in xs.iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                let _ = write!(s, "{n}");
+            }
+            s.push(']');
             append_fallback_bytes(buf, s.as_bytes());
         }
         LogValue::U64s(xs) => {

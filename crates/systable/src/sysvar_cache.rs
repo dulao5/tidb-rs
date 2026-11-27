@@ -52,8 +52,8 @@ impl SysVarCache {
     /// then rebuilds, since only it can scan the table).
     // go: Domain.rebuildSysVarCacheIfNeeded L2 (returns the condition; the caller, which can scan the table, rebuilds)
     pub fn needs_rebuild(&self) -> bool {
-        // log-skip: pkg/domain/sysvar_cache.go:49 caller triggers rebuild and logs "sysvar cache is empty, triggering rebuild"
-        // log-skip: pkg/domain/sysvar_cache.go:51 caller logs "rebuilding sysvar cache failed" on rebuild error
+        // log-skip: pkg/domain/sysvar_cache.go:49 no production caller for needs_rebuild yet (blocked-by:D06.5)
+        // log-skip: pkg/domain/sysvar_cache.go:51 no production caller for needs_rebuild yet (blocked-by:D06.5)
         let m = self.maps.read();
         m.session.is_empty() || m.global.is_empty()
     }

@@ -125,12 +125,10 @@ impl SysTables {
         let a = match allocs.iter_mut().position(|a| a.tb_id == tbl.id) {
             Some(i) => &mut allocs[i],
             None => {
-                allocs.push(RowIdAllocator::new(
-                    tbl.id,
-                    tbl.auto_id_cache,
-                    tbl.version,
-                    now,
-                ));
+                allocs.push(
+                    RowIdAllocator::new(tbl.id, tbl.auto_id_cache, tbl.version, now)
+                        .with_db_id(MYSQL_DB_ID),
+                );
                 allocs.last_mut().unwrap()
             }
         };
