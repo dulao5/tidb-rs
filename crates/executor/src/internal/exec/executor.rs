@@ -244,7 +244,7 @@ pub struct ExecutorMeta {
 
 /// newExecutorMeta creates a new `executorMeta`
 // go: newExecutorMeta L1
-fn new_executor_meta(
+pub(crate) fn new_executor_meta(
     schema: Option<Schema>,
     id: isize,
     children: Vec<Box<dyn Executor>>,

@@ -35,38 +35,45 @@ use tidb_expression::expression::EvalState;
 use tidb_expression::util::extract_cor_columns;
 use tidb_expression::{Column, Expr, ExprRef, Schema};
 use tidb_infoschema::infoschema_v2::Ctx as IsCtx;
-use tidb_infoschema::table::PhysicalTable;
 use tidb_infoschema::table::column::get_col_origin_default_value;
+use tidb_infoschema::table::{PhysicalTable, TableRef};
 use tidb_infoschema::tables::{find_primary_index, try_get_common_pk_column_ids};
 use tidb_kv::copr::StoreLabel;
-use tidb_kv::key::KeyRange;
+use tidb_kv::key::{Handle, KeyRange};
 use tidb_kv::kv::{CoprRequestAdjuster, Request, Snapshot};
 use tidb_kv::option::{
     self as kvopt, ReplicaReadClosestAdaptive, ReplicaReadLeader, ReplicaReadMixed, ReplicaReadType,
 };
 use tidb_kv::txn_scope_var::GlobalTxnScope;
 use tidb_model::{
-    ColumnInfo, ExtraHandleID, TableCacheStatusDisable, TableInfo, TempTableLocal, TempTableNone,
+    ColumnInfo, ExtraHandleID, IndexColumn, TableCacheStatusDisable, TableInfo, TempTableLocal,
+    TempTableNone,
 };
 use tidb_planner::PhysicalKind;
 use tidb_planner::base::PhysicalPlan;
 use tidb_planner::core::physical_plans::{
-    BatchCop, Cop, PhysicalIndexReader, PhysicalIndexScan, PhysicalLimit, PhysicalProjection,
-    PhysicalSelection, PhysicalTableDual, PhysicalTableReader, PhysicalTableScan,
+    BatchCop, Cop, PhysicalIndexLookUpReader, PhysicalIndexReader, PhysicalIndexScan,
+    PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalTableDual, PhysicalTableReader,
+    PhysicalTableScan,
 };
 use tidb_planner::util::handle_cols::{HandleCols, new_common_handle_cols, new_int_handle_cols};
 use tidb_sessionctx::distsql_ctx::DistSQLContext;
 use tidb_sessionctx::exprctx::ExprContextRef;
 use tidb_sessionctx::ranger::Range;
-use tidb_store::distsql::table_handle_ranges_to_kv_ranges;
+use tidb_store::distsql::{RequestBuilder, table_handle_ranges_to_kv_ranges};
 use tidb_tablecodec::rowcodec::decoder::{ChunkDecoder, ColInfo, DefDatumFn, new_chunk_decoder};
 use tidb_types::field_type::new_field_type;
 use tikv_client::proto::metapb;
 
 use crate::adapter::TelemetryInfo;
-use crate::distsql::{IndexReaderExecutor, new_index_reader_executor_context};
+use crate::distsql::{
+    IndexLookUpExecutor, IndexReaderExecutor, get_physical_plan_ids,
+    new_index_look_up_executor_context, new_index_reader_executor_context,
+};
 use crate::glue::{InfoSchemaRef, Plan, SessionContext};
-use crate::internal::builder::builder_utils::construct_dag_req;
+use crate::internal::builder::builder_utils::{
+    construct_dag_req, construct_dag_req_for_un_nature_order_plans,
+};
 use crate::internal::exec::executor::{
     self as exec, Executor, new_base_executor, new_base_executor_v2,
 };
@@ -74,8 +81,8 @@ use crate::internal::exec::indexusage::IndexUsageReporter;
 use crate::projection::{ProjectionExec, new_projection_executor_context};
 use crate::select::{LimitExec, SelectionExec, TableDualExec, new_selection_executor_context};
 use crate::table_reader::{
-    KvRangeBuilder, SelectResultHook, TableReaderExecutor, new_table_reader_executor_context,
-    table_reader_schema,
+    KvRangeBuilder, SelectResultHook, TableReaderExecutor, TableResultHandler,
+    new_table_reader_executor_context, table_reader_schema,
 };
 use tidb_planner::core::physical_plans::{PhysicalSort, PhysicalTopN};
 use tidb_planner::core::point_get_plan::PointGetPlan;
@@ -213,6 +220,20 @@ impl ExecutorBuilder {
                 .await
                 .map(|e| Box::new(e) as Box<dyn Executor>);
         }
+        if v.kind() == PhysicalKind::IndexLookUpReader {
+            // b.buildIndexLookUpReader(v): `case *plannercore.PhysicalIndexLookUpReader`.
+            let Some(ilu) = v.as_any().downcast_ref::<PhysicalIndexLookUpReader>() else {
+                self.err = Some(Error::plain(
+                    "an IndexLookUpReader plan that is not a *core.PhysicalIndexLookUpReader"
+                        .to_owned(),
+                ));
+                return None;
+            };
+            return self
+                .build_index_look_up_reader(sctx, ilu)
+                .await
+                .map(|e| Box::new(e) as Box<dyn Executor>);
+        }
         if v.kind() == PhysicalKind::Sort {
             // b.buildSort(v): `case *plannercore.PhysicalSort`.
             let Some(sort) = v.as_any().downcast_ref::<PhysicalSort>() else {
@@ -274,7 +295,8 @@ impl ExecutorBuilder {
             PhysicalKind::Sort
             | PhysicalKind::TopN
             | PhysicalKind::TableReader
-            | PhysicalKind::IndexReader => {
+            | PhysicalKind::IndexReader
+            | PhysicalKind::IndexLookUpReader => {
                 unreachable!("built above")
             }
             // A table scan or index scan is pushed down inside a reader, never built on its own:
@@ -314,10 +336,6 @@ impl ExecutorBuilder {
                     ),
                 );
                 return None;
-            }
-            // glue: blocked-by:D12.1 (IndexLookUpExecutor is part 2C of D12.1; guard before D12.0 catchall and before any StatementContext mutation)
-            PhysicalKind::IndexLookUpReader => {
-                ("D12.1", "buildIndexLookUpReader (IndexLookUpExecutor)")
             }
             _ => ("D12.0", "an executor for this plan"),
         };
@@ -1548,6 +1566,585 @@ impl ExecutorBuilder {
         ret.ranges = is.ranges.clone();
         Some(ret)
     }
+
+    /// Clones this builder's frozen configuration (without `err`) for a [`DataReaderBuilder`].
+    // glue: shallow copy `*b` in newDataReaderBuilder
+    fn clone_for_data_reader(&self, ts: u64) -> ExecutorBuilder {
+        ExecutorBuilder {
+            is: self.is.as_ref().map(Arc::clone),
+            err: None,
+            has_lock: self.has_lock,
+            ti: Arc::clone(&self.ti),
+            is_staleness: self.is_staleness,
+            txn_scope: self.txn_scope.clone(),
+            read_replica_scope: self.read_replica_scope.clone(),
+            in_update_stmt: self.in_update_stmt,
+            in_delete_stmt: self.in_delete_stmt,
+            in_insert_stmt: self.in_insert_stmt,
+            in_select_lock_stmt: self.in_select_lock_stmt,
+            for_data_reader_builder: true,
+            data_reader_ts: ts,
+            encounter_union_scan: self.encounter_union_scan,
+        }
+    }
+
+    /// newDataReaderBuilder creates a [`DataReaderBuilder`] holding a frozen snapshot TS and
+    /// `DistSQLContext` for background table lookup tasks (block D12.7, carried with D12.1 Part 2C).
+    // go: executorBuilder.newDataReaderBuilder L2 (clones frozen builder fields + DistSQLContext, N2)
+    pub async fn new_data_reader_builder(
+        &mut self,
+        sctx: &mut dyn SessionContext,
+        p: Option<Plan>,
+    ) -> Result<DataReaderBuilder, Error> {
+        let ts = self.get_snapshot_ts(sctx).await?;
+        let builder_for_data_reader = self.clone_for_data_reader(ts);
+        let dctx = sctx.get_dist_sql_ctx();
+        Ok(DataReaderBuilder {
+            plan: p,
+            builder: builder_for_data_reader,
+            dctx,
+            select_result_hook: SelectResultHook::default(),
+        })
+    }
+
+    /// buildIndexLookUpReader builds an [`IndexLookUpExecutor`].
+    ///
+    /// Unsupported branches (static/dynamic partitioned tables, cached tables, correlated
+    /// columns in access conditions) stop here before any `StatementContext` or `TelemetryInfo`
+    /// mutation so the router can fall back cleanly (spec §11.1, §11.2).
+    // go: executorBuilder.buildIndexLookUpReader L2 (pre-Open boundary guards for static/dynamic partition, cached table, corColInAccess before mutating StatementContext/TelemetryInfo; omits D14.1 counter)
+    pub async fn build_index_look_up_reader(
+        &mut self,
+        sctx: &mut dyn SessionContext,
+        v: &PhysicalIndexLookUpReader,
+    ) -> Option<IndexLookUpExecutor> {
+        let Some(is) = v
+            .index_plans
+            .first()
+            .and_then(|p| p.as_any().downcast_ref::<PhysicalIndexScan>())
+        else {
+            self.err = Some(Error::plain(
+                "buildIndexLookUpReader: IndexPlans[0] is not *core.PhysicalIndexScan",
+            ));
+            return None;
+        };
+        let Some(ts) = v
+            .table_plans
+            .first()
+            .and_then(|p| p.as_any().downcast_ref::<PhysicalTableScan>())
+        else {
+            self.err = Some(Error::plain(
+                "buildIndexLookUpReader: TablePlans[0] is not *core.PhysicalTableScan",
+            ));
+            return None;
+        };
+        assert_by_items_are_columns(&is.by_items);
+        if let Err(err) = self.valid_can_read_temporary_or_cache_table(sctx, &is.table) {
+            self.err = Some(err);
+            return None;
+        }
+
+        // Pre-Open fallback guards (spec §11.1, §11.2): detect unsupported branches before
+        // mutating StatementContext, TelemetryInfo, or opening any executor.
+        if is.is_partition().0 || ts.is_partition().0 {
+            self.err = Some(blocked(
+                "D06.4",
+                "static partitioned table read in IndexLookUpReader (PartitionedTable.GetPartition)",
+            ));
+            return None;
+        }
+        if sctx
+            .get_session_vars()
+            .stmt_ctx()
+            .use_dynamic_partition_prune()
+            && is.table.get_partition_info().is_some()
+        {
+            self.err = Some(blocked(
+                "D09.12",
+                "dynamic partition pruning in buildIndexLookUpReader",
+            ));
+            return None;
+        }
+        if is.table.table_cache_status_type != TableCacheStatusDisable {
+            self.err = Some(blocked(
+                "D06.4",
+                "reading a cached table in IndexLookUpReader",
+            ));
+            return None;
+        }
+        if v.index_plans
+            .first()
+            .is_some_and(|p| self.cor_col_in_access(p.as_ref()))
+        {
+            self.err = Some(blocked(
+                "D10.1",
+                "rebuildIndexRanges (correlated column in IndexLookUpReader access condition)",
+            ));
+            return None;
+        }
+
+        // Write TelemetryInfo / StatementContext metadata before build_no_range_index_look_up_reader
+        // shares StatementContext with BaseExecutorV2; restore all fields on error so fallback
+        // leaves session/statement state untouched.
+        let prev_use_table_look_up = self.ti.use_table_look_up.swap(true, Ordering::SeqCst);
+        let prev_is_tikv = sctx
+            .get_session_vars()
+            .stmt_ctx()
+            .is_tikv
+            .load(Ordering::SeqCst);
+        let prev_index_names_len = sctx.get_session_vars().stmt_ctx().index_names.len();
+        let prev_table_ids_len = sctx.get_session_vars().stmt_ctx().table_ids.len();
+        sctx.get_session_vars_mut()
+            .stmt_ctx_mut()
+            .index_names
+            .push(format!("{}:{}", is.table.name.o, is.index.name.o));
+        sctx.get_session_vars_mut()
+            .stmt_ctx_mut()
+            .table_ids
+            .push(ts.table.id);
+
+        let mut ret = match build_no_range_index_look_up_reader(self, sctx, v).await {
+            Ok(e) => e,
+            Err(err) => {
+                self.ti
+                    .use_table_look_up
+                    .store(prev_use_table_look_up, Ordering::SeqCst);
+                sctx.get_session_vars()
+                    .stmt_ctx()
+                    .is_tikv
+                    .store(prev_is_tikv, Ordering::SeqCst);
+                sctx.get_session_vars_mut()
+                    .stmt_ctx_mut()
+                    .index_names
+                    .truncate(prev_index_names_len);
+                sctx.get_session_vars_mut()
+                    .stmt_ctx_mut()
+                    .table_ids
+                    .truncate(prev_table_ids_len);
+                self.err = Some(err);
+                return None;
+            }
+        };
+
+        assert_by_items_are_columns(&ts.by_items);
+        ret.ranges = is.ranges.clone();
+        Some(ret)
+    }
+}
+
+/// dataReaderBuilder builds table/index readers for `IndexLookUpExecutor` and index joins
+/// (block D12.7, carried with D12.1 Part 2C).
+pub struct DataReaderBuilder {
+    pub plan: Option<Plan>,
+    pub builder: ExecutorBuilder,
+    pub dctx: Arc<DistSQLContext>,
+    pub select_result_hook: SelectResultHook,
+}
+
+impl Clone for DataReaderBuilder {
+    fn clone(&self) -> Self {
+        Self {
+            plan: self.plan.as_ref().map(Arc::clone),
+            builder: self
+                .builder
+                .clone_for_data_reader(self.builder.data_reader_ts),
+            dctx: Arc::clone(&self.dctx),
+            select_result_hook: self.select_result_hook.clone(),
+        }
+    }
+}
+
+impl DataReaderBuilder {
+    /// buildTableReaderBase constructs the table-side KV request (without attaching a memory
+    /// tracker, matching Go `builder.go:4911` and spec §10.6) and opens the `TableResultHandler`.
+    // go: dataReaderBuilder.buildTableReaderBase L1 [M-GOCTX]
+    pub async fn build_table_reader_base(
+        &self,
+        kv_ctx: &tidb_kv::Context,
+        mut e: TableReaderExecutor,
+        mut req_builder_with_range: RequestBuilder,
+    ) -> Result<TableReaderExecutor, Error> {
+        let start_ts = self.builder.data_reader_ts;
+        req_builder_with_range
+            .set_dag_request(e.dag_pb.clone())
+            .set_start_ts(start_ts)
+            .set_desc(e.desc)
+            .set_keep_order(e.keep_order)
+            .set_txn_scope(e.txn_scope.clone())
+            .set_read_replica_scope(e.read_replica_scope.clone())
+            .set_is_staleness(e.is_staleness)
+            .set_from_session_vars(&e.ctx.dctx);
+        if let Some(is) = e.ctx.get_info_schema() {
+            req_builder_with_range.set_from_info_schema(is);
+        }
+        let adjuster = new_closest_read_adjuster(
+            &e.ctx.dctx,
+            &req_builder_with_range.request,
+            e.net_data_size,
+        );
+        let kv_req = req_builder_with_range
+            .set_closest_replica_read_adjuster(adjuster)
+            .set_paging(e.paging)
+            .set_conn_id_and_conn_alias(e.ctx.dctx.connection_id, e.ctx.dctx.session_alias.clone())
+            .build()?;
+
+        if let Some(krs) = &kv_req.key_ranges {
+            let existing = std::mem::take(&mut e.kv_ranges);
+            e.kv_ranges = krs.append_self_to(existing);
+        }
+        let result = self
+            .select_result_hook
+            .select_result(
+                kv_ctx,
+                Arc::clone(&self.dctx),
+                &kv_req,
+                exec::ret_types(&e).to_vec(),
+                get_physical_plan_ids(&e.plans),
+                e.base.meta.id(),
+            )
+            .await?;
+        let mut handler = TableResultHandler::default();
+        handler.open(None, Some(result));
+        e.result_handler = Some(handler);
+        Ok(e)
+    }
+
+    /// buildTableReaderFromHandles sorts handles (when `can_reorder_handles`), encodes them as
+    /// KV ranges, and sends the table-side DAG request.
+    // go: dataReaderBuilder.buildTableReaderFromHandles L1 [M-GOCTX]
+    pub async fn build_table_reader_from_handles(
+        &self,
+        kv_ctx: &tidb_kv::Context,
+        e: TableReaderExecutor,
+        mut handles: Vec<Handle>,
+        can_reorder_handles: bool,
+    ) -> Result<TableReaderExecutor, Error> {
+        if can_reorder_handles {
+            handles.sort_by(|i, j| i.compare(j).cmp(&0));
+        }
+        let mut b = RequestBuilder::default();
+        if let Some(first) = handles.first() {
+            if matches!(first, Handle::Partition(_)) {
+                b.set_partitions_and_handles(&handles);
+            } else {
+                let tid = e
+                    .table
+                    .as_deref()
+                    .map(get_physical_table_id)
+                    .ok_or_else(|| Error::plain("buildTableReaderFromHandles: table is None"))?;
+                b.set_table_handles(tid, &handles);
+            }
+        } else {
+            b.set_key_ranges(Vec::new());
+        }
+        self.build_table_reader_base(kv_ctx, e, b).await
+    }
+}
+
+/// buildTableReq builds the table-side DAG request and looks up the target table.
+// go: buildTableReq L2 (static partition and cached table stop at blocked-by:D06.4)
+pub async fn build_table_req(
+    b: &ExecutorBuilder,
+    sctx: &mut dyn SessionContext,
+    schema_len: usize,
+    plans: &[Plan],
+) -> Result<(tipb::DagRequest, TableRef), Error> {
+    let mut table_req = construct_dag_req(sctx, plans, TiKV)?;
+    for i in 0..schema_len {
+        table_req.mut_output_offsets().push(i as u32);
+    }
+    let Some(ts) = plans
+        .first()
+        .and_then(|p| p.as_any().downcast_ref::<PhysicalTableScan>())
+    else {
+        return Err(Error::plain(
+            "buildTableReq: plans[0] is not *core.PhysicalTableScan",
+        ));
+    };
+    let tbl = match &b.is {
+        Some(is_schema) => {
+            is_schema
+                .table_by_id(IsCtx::background(), ts.table.id)
+                .await
+        }
+        None => None,
+    };
+    let Some(tbl) = tbl else {
+        return Err(Error::plain(format!(
+            "table id {} not found in infoschema",
+            ts.table.id
+        )));
+    };
+    let (is_partition, _physical_table_id) = ts.is_partition();
+    if is_partition {
+        return Err(blocked(
+            "D06.4",
+            "static partitioned table read in buildTableReq (PartitionedTable.GetPartition)",
+        ));
+    }
+    if ts.table.table_cache_status_type != TableCacheStatusDisable
+        || tbl.as_cached_table().is_some()
+    {
+        return Err(blocked("D06.4", "reading a cached table in buildTableReq"));
+    }
+    Ok((table_req, tbl))
+}
+
+/// buildIndexLookUpPushDownDAGReq builds the index-side DAG request for pushed-down index lookup.
+// go: buildIndexLookUpPushDownDAGReq L1 [M-INT]
+pub fn build_index_look_up_push_down_dag_req(
+    sctx: &dyn SessionContext,
+    columns: &[IndexColumn],
+    handle_len: usize,
+    plans: &[Plan],
+    plan_un_nature_orders: &HashMap<isize, isize>,
+) -> Result<tipb::DagRequest, Error> {
+    let mut index_req =
+        construct_dag_req_for_un_nature_order_plans(sctx, plans, plan_un_nature_orders, TiKV)?;
+    let Some(idx_scan) = plans
+        .first()
+        .and_then(|p| p.as_any().downcast_ref::<PhysicalIndexScan>())
+    else {
+        return Err(Error::plain(
+            "buildIndexLookUpPushDownDAGReq: plans[0] is not *core.PhysicalIndexScan",
+        ));
+    };
+    let intermediate_output_offsets =
+        build_index_scan_output_offsets(idx_scan, sctx.get_session_vars(), columns, handle_len)?;
+
+    let mut intermediate_output_index = 0u32;
+    let mut found = false;
+    for (i, e) in index_req.get_executors().iter().enumerate() {
+        if e.get_tp() == tipb::ExecType::TypeIndexLookUp {
+            intermediate_output_index = i as u32;
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return Err(Error::plain("IndexLookUp executor not found"));
+    }
+
+    let mut ch = tipb::IntermediateOutputChannel::default();
+    ch.set_executor_idx(intermediate_output_index);
+    ch.set_output_offsets(intermediate_output_offsets);
+    index_req.set_intermediate_output_channels(vec![ch].into());
+
+    let output_offsets_len = plans.last().map_or(0, |p| p.schema().columns.len());
+    let output_offsets: Vec<u32> = (0..output_offsets_len).map(|i| i as u32).collect();
+    index_req.set_output_offsets(output_offsets);
+    Ok(index_req)
+}
+
+/// buildIndexReq creates a DAG request for the index side of `IndexLookUpExecutor`.
+// go: buildIndexReq L1
+pub fn build_index_req(
+    sctx: &dyn SessionContext,
+    columns: &[IndexColumn],
+    handle_len: usize,
+    plans: &[Plan],
+) -> Result<tipb::DagRequest, Error> {
+    let mut index_req = construct_dag_req(sctx, plans, TiKV)?;
+    let Some(idx_scan) = plans
+        .first()
+        .and_then(|p| p.as_any().downcast_ref::<PhysicalIndexScan>())
+    else {
+        return Err(Error::plain(
+            "buildIndexReq: plans[0] is not *core.PhysicalIndexScan",
+        ));
+    };
+    let output_offsets =
+        build_index_scan_output_offsets(idx_scan, sctx.get_session_vars(), columns, handle_len)?;
+    index_req.set_output_offsets(output_offsets);
+    Ok(index_req)
+}
+
+/// buildIndexScanOutputOffsets builds the output offsets for indexScan rows.
+/// If `by_items` is non-empty, the index request also returns those columns so TiDB can merge-sort.
+// go: buildIndexScanOutputOffsets L1 [M-INT]
+pub fn build_index_scan_output_offsets(
+    p: &PhysicalIndexScan,
+    vars: &tidb_sessionctx::variable::session::SessionVars,
+    columns: &[IndexColumn],
+    handle_len: usize,
+) -> Result<Vec<u32>, Error> {
+    let need_extra_output_col = p.need_extra_output_col_with_vars(vars);
+    let est_cap = p.by_items.len() + handle_len + usize::from(need_extra_output_col);
+    let mut output_offsets = Vec::with_capacity(est_cap);
+
+    if !p.by_items.is_empty() {
+        let schema = p.schema();
+        for item in &p.by_items {
+            let Expr::Column(c) = item.expr.as_ref() else {
+                return Err(Error::plain(
+                    "Not support non-column in orderBy pushed down",
+                ));
+            };
+            let mut found = false;
+            for (i, schema_col) in schema.columns.iter().enumerate() {
+                if schema_col.id == c.id {
+                    output_offsets.push(i as u32);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(Error::plain(
+                    "Not found order by related columns in indexScan.schema",
+                ));
+            }
+        }
+    }
+
+    for i in 0..handle_len {
+        output_offsets.push((columns.len() + i) as u32);
+    }
+
+    if need_extra_output_col {
+        output_offsets.push((columns.len() + handle_len) as u32);
+    }
+    Ok(output_offsets)
+}
+
+/// buildNoRangeIndexLookUpReader builds an [`IndexLookUpExecutor`] without ranges populated.
+// go: buildNoRangeIndexLookUpReader L2 (A3 read-only plan; keeps Go idxNetDataSize = avg_row_size bug per spec §14.4)
+pub async fn build_no_range_index_look_up_reader(
+    b: &mut ExecutorBuilder,
+    sctx: &mut dyn SessionContext,
+    v: &PhysicalIndexLookUpReader,
+) -> Result<IndexLookUpExecutor, Error> {
+    let Some(is) = v
+        .index_plans
+        .first()
+        .and_then(|p| p.as_any().downcast_ref::<PhysicalIndexScan>())
+    else {
+        return Err(Error::plain(
+            "buildNoRangeIndexLookUpReader: IndexPlans[0] is not *core.PhysicalIndexScan",
+        ));
+    };
+    let handle_len = if !v.common_handle_cols.is_empty() {
+        v.common_handle_cols.len()
+    } else {
+        1
+    };
+    let idx_cols_slice = is.index.columns.as_deref().unwrap_or(&[]);
+    let index_req = if v.index_look_up_push_down {
+        build_index_look_up_push_down_dag_req(
+            sctx,
+            idx_cols_slice,
+            handle_len,
+            &v.index_plans,
+            &v.index_plans_un_nature_orders,
+        )?
+    } else {
+        build_index_req(sctx, idx_cols_slice, handle_len, &v.index_plans)?
+    };
+    let index_paging = v.paging.load(Ordering::Relaxed);
+    let (table_req, tbl) =
+        build_table_req(b, sctx, v.schema().columns.len(), &v.table_plans).await?;
+    let Some(ts) = v
+        .table_plans
+        .first()
+        .and_then(|p| p.as_any().downcast_ref::<PhysicalTableScan>())
+    else {
+        return Err(Error::plain(
+            "buildNoRangeIndexLookUpReader: TablePlans[0] is not *core.PhysicalTableScan",
+        ));
+    };
+    let start_ts = b.get_snapshot_ts(sctx).await?;
+    let reader_builder = b.new_data_reader_builder(sctx, None).await?;
+
+    sctx.get_session_vars()
+        .stmt_ctx()
+        .is_tikv
+        .store(true, Ordering::SeqCst);
+
+    let ilu_ctx = new_index_look_up_executor_context(sctx)?;
+    let base = new_base_executor_v2(
+        sctx.get_session_vars(),
+        &sctx.sql_killer(),
+        Some(v.schema().clone()),
+        v.id() as isize,
+        Vec::new(),
+    );
+    let index_usage_reporter = b.build_index_usage_reporter(sctx, v);
+    let cor_col_in_idx_side = b.cor_col_in_dist_plan(&v.index_plans);
+    let cor_col_in_tbl_side = b.cor_col_in_dist_plan(&v.table_plans);
+    let cor_col_in_access = v
+        .index_plans
+        .first()
+        .is_some_and(|p| b.cor_col_in_access(p.as_ref()));
+    // Matches Go builder.go:4335 (tracked as upstream-pitfall #463, go-bug-kept, spec §14.4).
+    let avg_row_size = v.get_avg_table_row_size_with_vars(sctx.get_session_vars());
+
+    let mut handle_idx = Vec::new();
+    let mut handle_cols = Vec::new();
+    let mut primary_key_index = None;
+    if let Some(extra) = &v.extra_handle_col {
+        handle_idx.push(extra.index as usize);
+        handle_cols.push(Arc::clone(extra));
+    } else {
+        for hc in &v.common_handle_cols {
+            handle_idx.push(hc.index as usize);
+        }
+        handle_cols.clone_from(&v.common_handle_cols);
+        primary_key_index = find_primary_index(tbl.meta()).cloned();
+    }
+
+    let dummy = tbl.meta().temp_table_type != TempTableNone;
+
+    Ok(IndexLookUpExecutor {
+        ctx: ilu_ctx,
+        base,
+        index_usage_reporter,
+        table: Some(tbl),
+        index: Arc::clone(&is.index),
+        ranges: Vec::new(),
+        grouped_ranges: is.grouped_ranges.clone(),
+        dag_pb: index_req,
+        start_ts,
+        txn_scope: b.txn_scope.clone(),
+        read_replica_scope: b.read_replica_scope.clone(),
+        is_staleness: b.is_staleness,
+        handle_idx,
+        handle_cols,
+        primary_key_index,
+        table_request: table_req,
+        columns: ts.columns.clone(),
+        partition_id_map: HashSet::new(),
+        data_reader_builder: reader_builder,
+        idx_net_data_size: avg_row_size,
+        avg_row_size,
+        partition_table_mode: false,
+        pruned_partitions: Vec::new(),
+        partition_range_map: HashMap::new(),
+        finished_tx: None,
+        result_rx: None,
+        result_curr: None,
+        idx_worker_handle: None,
+        tbl_worker_handles: Vec::new(),
+        mem_tracker: None,
+        check_index_value: None,
+        grouped_kv_ranges: Vec::new(),
+        worker_started: false,
+        by_items: is.by_items.clone(),
+        keep_order: is.keep_order,
+        desc: is.desc,
+        index_paging,
+        cor_col_in_idx_side,
+        cor_col_in_tbl_side,
+        cor_col_in_access,
+        idx_plans: v.index_plans.clone(),
+        idx_plan_un_nature_orders: v.index_plans_un_nature_orders.clone(),
+        tbl_plans: v.table_plans.clone(),
+        idx_cols: is.idx_cols.clone(),
+        col_lens: is.idx_col_lens.clone(),
+        pushed_limit: v.pushed_limit,
+        stats: None,
+        select_result_hook: SelectResultHook::default(),
+        dummy,
+        index_look_up_push_down: v.index_look_up_push_down,
+    })
 }
 
 /// Go `kvRangeBuilderFromRangeAndPartition`: builds per-partition KV key ranges from logical
@@ -1810,8 +2407,8 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            tidb_base::blocked::blocked_by(&b.err.unwrap()),
-            Some("D12.1")
+            b.err.unwrap().to_string(),
+            "an IndexLookUpReader plan that is not a *core.PhysicalIndexLookUpReader"
         );
     }
 
