@@ -223,3 +223,6 @@ opt-level = 3
 [profile.release-checked]
 inherits = "release"
 overflow-checks = true
+# CI runs 500M-iteration fuzzing under release-checked; keep DWARF line tables disabled here
+# so overflow-fuzz CI binaries stay fast while `[profile.release]` retains `line-tables-only`.
+debug = false
