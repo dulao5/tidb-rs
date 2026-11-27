@@ -638,8 +638,10 @@ impl Session {
         params: &[Literal],
     ) -> Result<tidb_sql::Plan, SqlError> {
         let start = Instant::now();
+        // Match Go's `preprocess -> build_logical_plan -> check_privilege` order:
+        // 1. Preprocess R31 missing-table check (1142 before 1146).
         if let Some(pm) = &self.privilege_manager {
-            privilege::check_poc_select_privilege(
+            privilege::check_poc_missing_table_privilege(
                 pm.as_ref(),
                 &self.active_roles,
                 &self.auth_user,
@@ -649,6 +651,7 @@ impl Session {
                 is,
             )?;
         }
+        // 2. Plan build (unknown columns, only_full_group_by, unsupported SQL errors come first).
         let plan = tidb_sql::plan_select(
             sel,
             is,
@@ -660,7 +663,20 @@ impl Session {
         );
         let compile = &self.stmt.compile;
         compile.set(compile.get() + start.elapsed());
-        plan
+        let plan = plan?;
+        // 3. Post-build privilege verification (R29/R30/R32).
+        if let Some(pm) = &self.privilege_manager {
+            privilege::check_poc_select_privilege(
+                pm.as_ref(),
+                &self.active_roles,
+                &self.auth_user,
+                &self.auth_host,
+                self.current_db.as_deref(),
+                sel,
+                is,
+            )?;
+        }
+        Ok(plan)
     }
 
     /// Synced mode (ADR 0005): plan with the newest loaded schema, narrow the statement's
@@ -1047,10 +1063,11 @@ impl Session {
         let mut columns = Vec::new();
         if let Statement::Select(sel) = &lowered.stmt {
             if sel.from.is_some() {
-                // Resolve names now, like Go's prepare: unknown tables/columns fail here.
+                // Resolve names now, like Go's prepare: preprocess missing-table R31 check,
+                // then plan build (unknown tables/columns & semantic checks), then privilege check.
                 let is = self.name_schema().await?;
                 if let Some(pm) = &self.privilege_manager {
-                    privilege::check_poc_select_privilege(
+                    privilege::check_poc_missing_table_privilege(
                         pm.as_ref(),
                         &self.active_roles,
                         &self.auth_user,
@@ -1069,6 +1086,17 @@ impl Session {
                         describe_only: true,
                     },
                 )?;
+                if let Some(pm) = &self.privilege_manager {
+                    privilege::check_poc_select_privilege(
+                        pm.as_ref(),
+                        &self.active_roles,
+                        &self.auth_user,
+                        &self.auth_host,
+                        self.current_db.as_deref(),
+                        sel,
+                        &is,
+                    )?;
+                }
                 columns = plan.columns;
                 for c in &mut columns {
                     apply_result_charset(c, self.results_charset.as_deref());

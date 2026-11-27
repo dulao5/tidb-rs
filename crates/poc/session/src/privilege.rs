@@ -95,7 +95,49 @@ pub fn authenticate_user_record(
     })
 }
 
-/// Enforces rulings R29, R30, R31, and R32 on a PoC `SELECT` statement before planning/reading.
+/// Enforces R31 (missing-table `1142` vs `1146` oracle check) during the PoC preprocess phase,
+/// **before** [`tidb_sql::plan_select`] runs.
+///
+/// Mirrors Go's `preprocess::tableByName`: if the target table does not exist in `is`, an
+/// unauthorized caller gets `1142` instead of `1146`. When the table *does* exist, this returns
+/// `Ok(())` so [`tidb_sql::plan_select`] runs first and reports plan-build errors (e.g. `1054`
+/// unknown column, `only_full_group_by`) before post-build [`check_poc_select_privilege`] runs.
+pub fn check_poc_missing_table_privilege(
+    pm: &dyn PrivilegeManager,
+    active_roles: &[RoleIdentity],
+    auth_user: &str,
+    auth_host: &str,
+    current_db: Option<&str>,
+    sel: &Select,
+    is: &InfoSchema,
+) -> Result<(), SqlError> {
+    let Some(from) = &sel.from else {
+        return Ok(());
+    };
+    let db = if from.schema.is_empty() {
+        let Some(cur) = current_db else {
+            return Err(SqlError::new(
+                tidb_mysql_protocol::error::code::ER_NO_DB,
+                "No database selected",
+            ));
+        };
+        cur
+    } else {
+        from.schema.as_str()
+    };
+    let table = from.name.as_str();
+    if is.table_by_name(db, table).is_none()
+        && !pm.request_verification(active_roles, db, table, "*", SelectPriv)
+    {
+        return Err(SqlError::table_access_denied(
+            "SELECT", auth_user, auth_host, table,
+        ));
+    }
+    Ok(())
+}
+
+/// Enforces rulings R29, R30, R31, and R32 on a PoC `SELECT` statement after logical planning
+/// (matching Go's `preprocess -> build_logical_plan -> check_privilege` error order).
 ///
 /// Matches the new stack's planner (`tidb-planner`) semantics:
 /// 1. Missing table (R31): requires `SelectPriv` with `column = "*"` -> returns `1142` when denied;
@@ -105,9 +147,9 @@ pub fn authenticate_user_record(
 /// 3. Wildcard (`*`, `t.*`, `db.t.*`): requires `SelectPriv` on every public column of the table,
 ///    returning `1142` (`for table '...'`, matching Go `ReportTableErrOption`).
 /// 4. Explicit column references (`SELECT`, `WHERE`, `GROUP BY`, `ORDER BY`):
-///    - Pass 1 checks ordinary public columns first (skipping `GROUP BY`/`ORDER BY` aliases that
-///      resolve to a `SELECT`-list alias, and skipping unknown columns so `plan_select` reports
-///      `1054`).
+///    - Pass 1 checks ordinary public columns first (skipping unqualified `ORDER BY` aliases that
+///      resolve to a `SELECT`-list alias, never skipping `GROUP BY` columns, and skipping unknown
+///      columns so `plan_select` reports `1054`).
 ///    - Pass 2 checks hidden `_tidb_rowid` (R32, only when `!tbl.pk_is_handle && !tbl.is_common_handle`)
 ///      with `column = ""`, returning `1143` (`for column '_tidb_rowid' in table '...'`) only after
 ///      all ordinary columns pass.
@@ -299,6 +341,11 @@ mod tests {
                 l: name.to_lowercase(),
             },
             offset,
+            field_type: tidb_meta::model::FieldType {
+                tp: 3,   // MYSQL_TYPE_LONG (INT)
+                flag: 1, // NOT_NULL_FLAG
+                ..Default::default()
+            },
             state: SchemaState::Public,
             ..Default::default()
         };
@@ -569,5 +616,75 @@ mod tests {
         assert!(authenticate_user_record(&mp, "root", "127.0.0.1").is_none());
         assert!(authenticate_user_record(&mp, "u_net", "10.0.0.5").is_none());
         assert!(authenticate_user_record(&mp, "u_never_lt", "127.0.0.1").is_some());
+    }
+
+    #[test]
+    fn poc_plan_error_order_matches_go_preprocess_build_then_privilege() {
+        let is = test_schema();
+        let handle = test_handle();
+        let plan_with_priv = |user: &str, sql: &str| -> Result<tidb_sql::Plan, SqlError> {
+            let lowered = tidb_sql::parse_and_lower(sql).unwrap();
+            let Statement::Select(sel) = &lowered.stmt else {
+                panic!("expected SELECT");
+            };
+            let pm = UserPrivileges::new(user, "%", Arc::clone(&handle));
+            // 1. Preprocess (R31 missing-table check)
+            check_poc_missing_table_privilege(&pm, &[], user, "%", Some("test"), sel, &is)?;
+            // 2. Plan build (unknown column 1054, only_full_group_by 1235, etc.)
+            let plan = tidb_sql::plan_select(
+                sel,
+                &is,
+                tidb_sql::PlanContext {
+                    current_db: Some("test"),
+                    params: &[],
+                    describe_only: false,
+                },
+            )?;
+            // 3. Post-build privilege check (R29/R30/R32)
+            check_poc_select_privilege(&pm, &[], user, "%", Some("test"), sel, &is)?;
+            Ok(plan)
+        };
+
+        // Plan-build error (only_full_group_by / unknown column) precedes privilege errors,
+        // matching Go's `build_logical_plan` before `check_privilege`.
+        for u in ["u_none", "u_ins", "u_cola", "u_mixed"] {
+            let err = plan_with_priv(u, "SELECT a FROM test.t GROUP BY b").unwrap_err();
+            assert_eq!(
+                err.code, 1235,
+                "{u} only_full_group_by must fail at plan-build before privilege check: {err}"
+            );
+            let err = plan_with_priv(u, "SELECT nosuch FROM test.t").unwrap_err();
+            assert_eq!(
+                err.code, 1054,
+                "{u} unknown column must fail at plan-build before privilege check: {err}"
+            );
+        }
+
+        // R31 missing-table check still runs in preprocess (1142 instead of 1146).
+        for u in ["u_none", "u_ins", "u_db_ins"] {
+            let err = plan_with_priv(u, "SELECT 1 FROM test.nosuch").unwrap_err();
+            assert_eq!(err.code, 1142, "{u} missing table must return 1142: {err}");
+        }
+        assert_eq!(
+            plan_with_priv("u_db_sel", "SELECT 1 FROM test.nosuch")
+                .unwrap_err()
+                .code,
+            1146
+        );
+
+        // Valid plans still enforce R29/R30/column checks.
+        assert_eq!(
+            plan_with_priv("u_none", "SELECT a FROM test.t")
+                .unwrap_err()
+                .code,
+            1142
+        );
+        assert_eq!(
+            plan_with_priv("u_cola", "SELECT COUNT(*) AS b FROM test.t GROUP BY b")
+                .unwrap_err()
+                .code,
+            1143
+        );
+        assert!(plan_with_priv("u_cola", "SELECT a FROM test.t").is_ok());
     }
 }
