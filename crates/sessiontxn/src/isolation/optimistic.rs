@@ -104,17 +104,18 @@ impl BaseTxnContextProvider {
 
         if ok {
             let vars = sctx.get_session_vars();
-            log::debug!(
-                "init txnStartTS with MaxUint64, conn: {}, text: {}",
-                vars.connection_id,
-                vars.stmt_ctx().original_sql
+            tidb_base::log_debug!(
+                "init txnStartTS with MaxUint64",
+                "conn" => vars.connection_id,
+                "text" => &vars.stmt_ctx().original_sql,
             );
 
             if let Err(err) = self.force_prepare_const_start_ts(u64::MAX) {
-                log::error!(
-                    "failed init txnStartTS with MaxUint64, error: {err}, conn: {}, text: {}",
-                    vars.connection_id,
-                    vars.stmt_ctx().original_sql
+                tidb_base::log_error!(
+                    "failed init txnStartTS with MaxUint64",
+                    "error" => &err,
+                    "conn" => vars.connection_id,
+                    "text" => &vars.stmt_ctx().original_sql,
                 );
                 return Err(err);
             }

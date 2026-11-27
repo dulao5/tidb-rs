@@ -178,10 +178,11 @@ impl PbConverter<'_> {
         let d = match expr.eval(self.ctx, self.st, Row::default()) {
             Ok(d) => d,
             Err(err) => {
-                log::error!(
-                    "eval constant or correlated column expression={} error={}",
-                    String::from_utf8_lossy(&expr.string_with_ctx(self.ctx, RedactLogDisable)),
-                    err
+                let info = expr.string_with_ctx(self.ctx, RedactLogDisable);
+                tidb_base::log_error!(
+                    "eval constant or correlated column",
+                    "expression" => &info,
+                    "error" => &err,
                 );
                 return None;
             }
@@ -254,7 +255,7 @@ impl PbConverter<'_> {
                 // are encoded into protobuf and will be used to do calculation so it should use the
                 // MyDecimal precision and fraction otherwise there may be a loss of accuracy.
                 if let Err(err) = encode_decimal(&mut val, d.get_mysql_decimal(), 0, 0) {
-                    log::error!("encode decimal error={err}");
+                    tidb_base::log_error!("encode decimal", "error" => &err);
                     return (tp, None, false);
                 }
             }
@@ -276,7 +277,7 @@ impl PbConverter<'_> {
                         Err(err) => ec.handle_error(err),
                     };
                     if let Err(err) = res {
-                        log::error!("encode mysql time error={err}");
+                        tidb_base::log_error!("encode mysql time", "error" => &err);
                         return (tp, None, false);
                     }
                     return (tp, Some(val), true);
@@ -327,8 +328,9 @@ fn elem_to_pb(e: &[u8]) -> String {
     match std::str::from_utf8(e) {
         Ok(s) => s.to_owned(),
         Err(_) => {
-            log::warn!(
-                "ToPBFieldType: ENUM/SET element is not UTF-8, converted lossily elem={e:x?}"
+            tidb_base::log_warn!(
+                "ToPBFieldType: ENUM/SET element is not UTF-8, converted lossily",
+                "elem" => e,
             );
             debug_assert!(false, "ENUM/SET element is not UTF-8: {e:x?}");
             String::from_utf8_lossy(e).into_owned()
@@ -463,7 +465,13 @@ impl PbConverter<'_> {
             match m.write_to_bytes() {
                 Ok(b) => encoded = Some(b),
                 Err(err) => {
-                    log::error!("encode metadata metadata={metadata:?} error={err}");
+                    let meta_str = format!("{metadata:?}");
+                    let err_str = err.to_string();
+                    tidb_base::log_error!(
+                        "encode metadata",
+                        "metadata" => &meta_str,
+                        "error" => &err_str,
+                    );
                     return None;
                 }
             }

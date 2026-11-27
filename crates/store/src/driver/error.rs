@@ -195,7 +195,7 @@ fn extract_key_err(key_err: &kvrpcpb::KeyError) -> ClientGoError<'_> {
     if !key_err.abort.is_empty() {
         let err =
             tidb_base::errors::errorf("tikv aborts txn: %s", &[Arg::from(key_err.abort.clone())]);
-        log::warn!("2PC failed: {err}");
+        tidb_base::log_warn!("2PC failed", "error" => &err);
         return ClientGoError::Other(err);
     }
     if let Some(too_large) = &key_err.commit_ts_too_large {
@@ -203,7 +203,7 @@ fn extract_key_err(key_err: &kvrpcpb::KeyError) -> ClientGoError<'_> {
             "commit TS %v is too large",
             &[Arg::from(too_large.commit_ts)],
         );
-        log::warn!("2PC failed: {err}");
+        tidb_base::log_warn!("2PC failed", "error" => &err);
         return ClientGoError::Other(err);
     }
     if let Some(not_found) = &key_err.txn_not_found {

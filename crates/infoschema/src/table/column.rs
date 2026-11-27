@@ -438,9 +438,11 @@ fn cast_column_value_inner(
         let s = match val.to_string() {
             Ok(s) => s,
             Err(err1) => {
-                log::warn!(
-                    "Datum ToString failed, Datum: {}, error: {err1}",
-                    String::from_utf8_lossy(&val.string())
+                let datum_bytes = val.string();
+                tidb_base::log_warn!(
+                    "Datum ToString failed",
+                    "Datum" => &datum_bytes,
+                    "error" => &err1,
                 );
                 Vec::new()
             }
@@ -455,9 +457,11 @@ fn cast_column_value_inner(
         let s = match val.to_string() {
             Ok(s) => s,
             Err(err1) => {
-                log::warn!(
-                    "Datum ToString failed, Datum: {}, error: {err1}",
-                    String::from_utf8_lossy(&val.string())
+                let datum_bytes = val.string();
+                tidb_base::log_warn!(
+                    "Datum ToString failed",
+                    "Datum" => &datum_bytes,
+                    "error" => &err1,
                 );
                 val.get_string().to_vec()
             }
@@ -471,7 +475,13 @@ fn cast_column_value_inner(
         casted = inn_casted;
     } else if is_err(&err, &ErrInvalidCharacterString) {
         err = Err(convert_to_incorrect_string_err(err.unwrap_err(), col_name));
-        log::debug!("incorrect string value, conn: {conn_id}, error: {err:?}");
+        if let Err(e) = &err {
+            tidb_base::log_debug!(
+                "incorrect string value",
+                "conn" => conn_id,
+                "error" => e,
+            );
+        }
     }
 
     let mut err = tc.handle_truncate(err);

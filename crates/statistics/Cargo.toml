@@ -24,8 +24,6 @@ tidb-codec = { workspace = true }
 tidb-expression = { workspace = true }
 # SessionVars / StatementContext read by ColumnStatsIsInvalid / IndexStatsIsInvalid.
 tidb-sessionctx = { workspace = true }
-# terror.Log of BucketToString.
-log = "0.4"
 
 [lints]
 workspace = true

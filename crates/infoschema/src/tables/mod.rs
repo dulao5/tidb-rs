@@ -299,11 +299,13 @@ pub fn table_from_meta(allocs: Allocators, tbl_info: Arc<TableInfo>) -> Result<T
 
         // Print some information when the column's offset isn't equal to i.
         if col_info.offset != i as isize {
-            log::error!(
-                "wrong table schema, table: {}, column: {}, index: {i}, offset: {}, columnNumber: {cols_len}",
-                tbl_info.name.o,
-                col_info.name.o,
-                col_info.offset
+            tidb_base::log_error!(
+                "wrong table schema",
+                "table" => &tbl_info.name.o,
+                "column" => &col_info.name.o,
+                "index" => i,
+                "offset" => col_info.offset,
+                "columnNumber" => cols_len,
             );
         }
 
@@ -315,8 +317,10 @@ pub fn table_from_meta(allocs: Allocators, tbl_info: Arc<TableInfo>) -> Result<T
             let ti = Arc::clone(&tbl_info);
             col.generated_expr = Some(new_clonable_expr_node(Arc::new(move || {
                 build_generated_expr(&ti, &gen_str).inspect_err(|err1| {
-                    log::warn!(
-                        "unexpected parse generated string error, generatedStr: {gen_str}, error: {err1}"
+                    tidb_base::log_warn!(
+                        "unexpected parse generated string error",
+                        "generatedStr" => &gen_str,
+                        "error" => err1,
                     );
                 })
             })));

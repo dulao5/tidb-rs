@@ -3758,18 +3758,16 @@ name = "tidb-domain"
 version = "0.0.0"
 dependencies = [
  "futures",
- "log",
  "parking_lot 0.12.5",
  "tidb-base",
  "tidb-infoschema",
  "tidb-kv",
+ "tidb-log",
  "tidb-metrics",
  "tidb-model",
  "tidb-parser",
  "tidb-sessionctx",
  "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -3826,7 +3824,6 @@ version = "0.0.0"
 dependencies = [
  "arc-swap 1.9.3",
  "flate2",
- "log",
  "protobuf",
  "serde_json",
  "tidb-base",
@@ -3876,7 +3873,6 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "futures",
- "log",
  "parking_lot 0.12.5",
  "protobuf",
  "regex",
@@ -3906,7 +3902,6 @@ dependencies = [
  "flate2",
  "futures",
  "hashbrown 0.17.2",
- "log",
  "parking_lot 0.12.5",
  "protobuf",
  "rand 0.8.8",
@@ -4173,7 +4168,6 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "futures",
- "log",
  "parking_lot 0.12.5",
  "serde_json",
  "tidb-base",
@@ -4196,7 +4190,6 @@ dependencies = [
 name = "tidb-statistics"
 version = "0.0.0"
 dependencies = [
- "log",
  "tidb-base",
  "tidb-chunk",
  "tidb-codec",
@@ -4215,7 +4208,6 @@ dependencies = [
  "bytes",
  "flate2",
  "futures",
- "log",
  "parking_lot 0.12.5",
  "prost",
  "protobuf",
@@ -4227,6 +4219,7 @@ dependencies = [
  "tidb-expression",
  "tidb-infoschema",
  "tidb-kv",
+ "tidb-log",
  "tidb-memory",
  "tidb-metrics",
  "tidb-model",
