@@ -696,6 +696,19 @@ pub fn is_physical_plan_cacheable(
                 sub_plans.push(index_plan);
             }
         }
+        PhysicalKind::IndexLookUpReader => {
+            let x = p
+                .as_any()
+                .downcast_ref::<crate::core::physical_plans::PhysicalIndexLookUpReader>()
+                .expect("PhysicalIndexLookUpReader");
+            if let Some(index_plan) = &x.index_plan {
+                sub_plans.push(index_plan);
+            }
+            if let Some(table_plan) = &x.table_plan {
+                sub_plans.push(table_plan);
+            }
+        }
+        PhysicalKind::LocalIndexLookUp => {}
         PhysicalKind::IndexScan => {
             let x = p
                 .as_any()

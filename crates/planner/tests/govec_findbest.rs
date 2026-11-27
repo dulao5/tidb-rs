@@ -95,12 +95,6 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D09.5", 4),
     // Subqueries.
     ("D09.6", 2),
-    // An index path left after the skyline pruning where Go plans a double-read
-    // IndexLookUpReader (part 2B of FindBestTask).
-    ("D10.2", 215),
-    // An index path left after the skyline pruning where Go keeps the table path by cost,
-    // and a double-read index candidate is still pending part 2B.
-    ("D10.2 (Go: table)", 130),
     // LogicalWindow.ExhaustPhysicalPlans (physical window enumeration).
     ("D10.3", 48),
     // `OR` conditions over two or more paths, or multi-valued indexes: index merge paths.
@@ -305,6 +299,78 @@ fn dump(ctx: &PlanCtx<'_>, p: &dyn PhysicalPlan) -> Value {
             }
             o.insert("outputCols".into(), cols_out(ctx, &x.output_columns));
         }
+        PhysicalKind::IndexLookUpReader => {
+            let x = any
+                .downcast_ref::<tidb_planner::core::physical_plans::PhysicalIndexLookUpReader>()
+                .unwrap();
+            o.insert(
+                "indexPlans".into(),
+                Value::Array(
+                    x.index_plans
+                        .iter()
+                        .map(|ip| json!([ip.tp(), ip.id()]))
+                        .collect(),
+                ),
+            );
+            o.insert(
+                "tablePlans".into(),
+                Value::Array(
+                    x.table_plans
+                        .iter()
+                        .map(|tp| json!([tp.tp(), tp.id()]))
+                        .collect(),
+                ),
+            );
+            if let Some(ip) = x.index_plans.last() {
+                o.insert("idx".into(), dump(ctx, &**ip));
+            }
+            if let Some(tp) = x.table_plans.last() {
+                o.insert("tbl".into(), dump(ctx, &**tp));
+            }
+            o.insert(
+                "indexLookUpPushDown".into(),
+                json!(x.index_look_up_push_down),
+            );
+            let mut uno_keys: Vec<isize> = x.index_plans_un_nature_orders.keys().copied().collect();
+            uno_keys.sort_unstable();
+            o.insert(
+                "indexPlansUnNatureOrders".into(),
+                Value::Array(
+                    uno_keys
+                        .into_iter()
+                        .map(|k| json!([k, x.index_plans_un_nature_orders[&k]]))
+                        .collect(),
+                ),
+            );
+            o.insert("paging".into(), json!(x.paging.load(Ordering::Relaxed)));
+            o.insert("keepOrder".into(), json!(x.keep_order));
+            if let Some(lim) = &x.pushed_limit {
+                o.insert(
+                    "pushedLimit".into(),
+                    json!({"offset": lim.offset, "count": lim.count}),
+                );
+            }
+            if let Some(eh) = &x.extra_handle_col {
+                let eval = ctx.eval_ctx();
+                o.insert(
+                    "extraHandle".into(),
+                    gs(&eh.string_with_ctx(&*eval, RedactLogDisable)),
+                );
+            }
+            o.insert(
+                "commonHandleCols".into(),
+                cols_out(ctx, &x.common_handle_cols),
+            );
+        }
+        PhysicalKind::LocalIndexLookUp => {
+            let x = any
+                .downcast_ref::<tidb_planner::core::physical_plans::PhysicalLocalIndexLookUp>()
+                .unwrap();
+            o.insert(
+                "indexHandleOffsets".into(),
+                Value::Array(x.index_handle_offsets.iter().map(|v| json!(*v)).collect()),
+            );
+        }
         PhysicalKind::IndexScan => {
             let x = any.downcast_ref::<PhysicalIndexScan>().unwrap();
             o.insert("table".into(), json!(x.table.name.o));
@@ -444,6 +510,8 @@ fn with_built(
     };
     let mode = opts["mode"].as_i64().unwrap();
     let mut vars = SessionVars::new(Box::new(Acc));
+    // Matches Go mock.NewContext() (pkg/util/mock/context.go:685: vars.EnablePaging = DefTiDBEnablePaging).
+    vars.enable_paging = true;
     vars.current_db = "test".to_owned();
     vars.sql_mode = mode;
     vars.remove_orderby_in_subquery = !opts["keep_order"].as_bool().unwrap();
@@ -451,6 +519,11 @@ fn with_built(
     vars.stmt_ctx_mut().use_dynamic_prune_mode = opts["dynamic"].as_bool().unwrap();
     if opts["no_index_merge"].as_bool() == Some(true) {
         vars.set_enable_index_merge(false);
+    }
+    if let Some(policy) = opts["pushdown_policy"].as_str() {
+        vars.index_look_up_push_down_policy = policy.to_owned();
+        vars.set_system_var("transaction_isolation", "REPEATABLE-READ")
+            .unwrap();
     }
     let is = InfoSchemaHandle(Arc::clone(tables) as Arc<dyn InfoSchemaLookup>);
 
@@ -817,9 +890,21 @@ fn owned_alone(p: &tidb_planner::PhysicalPlanRef) -> bool {
             r.get_index_plan()
                 .is_none_or(|ip| Arc::strong_count(ip) <= 2 && owned_alone_chain(ip))
         });
+    let index_lookup_extra = p
+        .as_any()
+        .downcast_ref::<tidb_planner::core::physical_plans::PhysicalIndexLookUpReader>()
+        .is_none_or(|r| {
+            r.index_plan
+                .as_ref()
+                .is_none_or(|ip| Arc::strong_count(ip) <= 2 && owned_alone_chain(ip))
+                && r.table_plan
+                    .as_ref()
+                    .is_none_or(|tp| Arc::strong_count(tp) <= 2 && owned_alone_chain(tp))
+        });
     Arc::strong_count(p) == 1
         && table_reader_extra
         && index_reader_extra
+        && index_lookup_extra
         && p.children().iter().all(owned_alone)
 }
 
@@ -1016,13 +1101,86 @@ fn best_plan_is_owned_alone_after_the_memo() {
             json!(0),
             "{sql}: postOptimize copies: {v}"
         );
-        // The whole physical optimization, the `ResolveIndices` on the best plan at its end
-        // included, copies no node: the memo and the best task are dropped before the plan
-        // is written (a live memo would make the root shared and get it copied).
+        // Single-read plans copy 0 nodes across the whole physicalOptimize (FindBestTask +
+        // ResolveIndices): the memo and the best task are dropped before the plan is written.
         assert_eq!(
             v["physical_copies"],
             json!(0),
             "{sql}: physicalOptimize copies: {v}"
+        );
+    }
+
+    // Double-read IndexLookUp and push-down LocalIndexLookUp: FindBestTask legitimately clones
+    // nodes when TaskMap shares a sub-task or `build_push_down_index_look_up_plan` clones the
+    // table subplan, while `owned_alone` holds once the memo is dropped and `postOptimize` (as
+    // well as a standalone `resolve_indices` on the owned plan) copies 0 nodes.
+    for (sql, pushdown, expect_lookup) in [
+        ("SELECT c FROM sbtest1 WHERE k = 1", false, true),
+        ("SELECT c FROM sbtest1 ORDER BY k LIMIT 3", false, true),
+        ("SELECT c FROM sbtest1 WHERE k = 1", true, true),
+        (
+            "SELECT c FROM sbtest1 WHERE k BETWEEN 1 AND 100",
+            false,
+            false,
+        ),
+    ] {
+        let mut opts = spike_opts();
+        if pushdown {
+            opts["pushdown_policy"] = json!("force");
+        }
+        let out = with_built(&tables, sql, &opts, &mut |ctx, flag, p| {
+            let p = tidb_planner::core::optimizer::logical_optimize(ctx, flag, p)?;
+            let mut counter = -1;
+            let (mut plan, _) =
+                tidb_planner::core::optimizer::physical_optimize(ctx, p, &mut counter)?;
+            let owned = owned_alone(&plan);
+            let copies = tidb_planner::physicalop::clone_node_calls();
+            tidb_planner::physicalop::make_mut_plan(&mut plan).resolve_indices(ctx)?;
+            let resolve_copies = tidb_planner::physicalop::clone_node_calls() - copies;
+            let copies = tidb_planner::physicalop::clone_node_calls();
+            let plan = tidb_planner::core::optimizer::post_optimize(ctx, plan)?;
+            Ok(json!({
+                "owned": owned,
+                "resolve_copies": resolve_copies,
+                "post_copies": tidb_planner::physicalop::clone_node_calls() - copies,
+                "plan": dump(ctx, &*plan),
+            }))
+        });
+        let Outcome::Value(v) = out else {
+            panic!("not planned (pushdown={pushdown}): {sql}")
+        };
+        if expect_lookup {
+            let mut cur = &v["plan"];
+            while cur["tp"] != json!("IndexLookUp") {
+                if let Some(child) = cur["children"].as_array().and_then(|c| c.first()) {
+                    cur = child;
+                } else {
+                    break;
+                }
+            }
+            assert_eq!(
+                cur["tp"],
+                json!("IndexLookUp"),
+                "pushdown={pushdown} {sql}: {v}"
+            );
+            if pushdown {
+                assert_eq!(
+                    cur["indexLookUpPushDown"],
+                    json!(true),
+                    "pushdown {sql}: {v}"
+                );
+            }
+        }
+        assert_eq!(v["owned"], json!(true), "pushdown={pushdown} {sql}: {v}");
+        assert_eq!(
+            v["resolve_copies"],
+            json!(0),
+            "pushdown={pushdown} {sql}: resolve_indices copies: {v}"
+        );
+        assert_eq!(
+            v["post_copies"],
+            json!(0),
+            "pushdown={pushdown} {sql}: postOptimize copies: {v}"
         );
     }
 }

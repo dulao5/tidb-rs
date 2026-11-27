@@ -332,23 +332,48 @@ fn cop_task_converts_to_a_table_reader() {
     assert_eq!(ir.schema().len(), 1);
     assert_eq!(ir.output_columns.len(), 1);
 
-    // An index lookup and an index merge are outside part 2A.
-    for cop in [
-        CopTask {
-            index_plan: Some(table_scan(&ctx, 1.0)),
-            table_plan: Some(table_scan(&ctx, 1.0)),
-            ..Default::default()
-        },
-        CopTask {
-            idx_merge_part_plans: Some(vec![table_scan(&ctx, 1.0)]),
-            table_plan: Some(table_scan(&ctx, 1.0)),
-            index_plan_finished: true,
-            ..Default::default()
-        },
-    ] {
-        let err = Task::Cop(cop).convert_to_root_task(&ctx).unwrap_err();
-        assert_eq!(blocked_by(&err), Some("D10.1"), "{err}");
-    }
+    // Double-read cop task converts to a PhysicalIndexLookUpReader (part 2B).
+    let lookup_cop = CopTask {
+        index_plan: Some(Arc::new(
+            PhysicalIndexScan {
+                table: Arc::new(TableInfo::default()),
+                index: Arc::new(tidb_model::IndexInfo {
+                    id: 1,
+                    name: CIStr::new("idx_a"),
+                    ..Default::default()
+                }),
+                data_source_schema: Some(new_schema(vec![col(1)])),
+                ..Default::default()
+            }
+            .init(&ctx, 0),
+        )),
+        table_plan: Some(table_scan(&ctx, 1.0)),
+        ..Default::default()
+    };
+    let lookup_root = Task::Cop(lookup_cop).convert_to_root_task(&ctx).unwrap();
+    let lookup_p = root_plan(&lookup_root);
+    assert_eq!(lookup_p.kind(), PhysicalKind::IndexLookUpReader);
+    let ilr = lookup_p
+        .as_any()
+        .downcast_ref::<crate::core::physical_plans::PhysicalIndexLookUpReader>()
+        .unwrap();
+    assert_eq!(ilr.index_plans.len(), 1);
+    assert_eq!(ilr.table_plans.len(), 1);
+    let ts_leaf = ilr.table_plans[0]
+        .as_any()
+        .downcast_ref::<PhysicalTableScan>()
+        .unwrap();
+    assert!(ts_leaf.is_child_of_index_look_up);
+
+    // An index merge is outside D10.2 part 2B (D10.7).
+    let merge_cop = CopTask {
+        idx_merge_part_plans: Some(vec![table_scan(&ctx, 1.0)]),
+        table_plan: Some(table_scan(&ctx, 1.0)),
+        index_plan_finished: true,
+        ..Default::default()
+    };
+    let err = Task::Cop(merge_cop).convert_to_root_task(&ctx).unwrap_err();
+    assert_eq!(blocked_by(&err), Some("D10.1"), "{err}");
 }
 
 /// Limit over a table cop task: a pushed-down limit of offset + count in the cop task, the
@@ -1511,4 +1536,350 @@ fn match_property_group_ranges_guards() {
     );
     assert!(over_cap.grouped_ranges.is_empty());
     assert!(over_cap.group_by_col_idxs.is_empty());
+}
+
+#[test]
+fn physical_index_lookup_and_local_lookup_unit_parity() {
+    use crate::core::physical_plans::{
+        PhysicalIndexLookUpReader, PhysicalLocalIndexLookUp, add_extra_phys_tbl_id_column,
+        build_push_down_index_look_up_plan, collect_plan_stats_version,
+    };
+    use crate::util::path::{
+        INDEX_LOOK_UP_PUSH_DOWN_BY_HINT, INDEX_LOOK_UP_PUSH_DOWN_BY_SYS_VAR,
+        INDEX_LOOK_UP_PUSH_DOWN_NONE,
+    };
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
+    use tidb_model::{ExtraHandleID, ExtraPhysTblID, IndexInfo, PartitionInfo};
+    use tidb_sessionctx::planctx::BuildPBContext;
+
+    let mut vars = session();
+    let ctx = ctx_of(&mut vars);
+    let c1 = col(1);
+    let c2 = col(2);
+    let mut is = PhysicalIndexScan {
+        table: Arc::new(TableInfo {
+            name: CIStr::new("t_lu"),
+            ..Default::default()
+        }),
+        index: Arc::new(IndexInfo {
+            id: 1,
+            name: CIStr::new("idx_c1"),
+            ..Default::default()
+        }),
+        data_source_schema: Some(new_schema(vec![Arc::clone(&c1), Arc::clone(&c2)])),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    is.set_schema(new_schema(vec![Arc::clone(&c1)]));
+    is.set_stats(Some(Arc::new(StatsInfo {
+        row_count: 10.0,
+        stats_version: 77,
+        ..Default::default()
+    })));
+    let is_ref: PhysicalPlanRef = Arc::new(is);
+
+    let mut ts = PhysicalTableScan {
+        table: Arc::new(TableInfo {
+            name: CIStr::new("t_lu"),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    ts.set_schema(new_schema(vec![Arc::clone(&c1), Arc::clone(&c2)]));
+    ts.set_stats(Some(Arc::new(StatsInfo {
+        row_count: 10.0,
+        stats_version: 88,
+        ..Default::default()
+    })));
+    let ts_ref: PhysicalPlanRef = Arc::new(ts);
+
+    // 1. Standard IndexLookUpReader: Init sets table_plans[0].is_child_of_index_look_up = true
+    // without CoW splitting table_plan and table_plans[0].
+    let reader = PhysicalIndexLookUpReader {
+        index_plan: Some(Arc::clone(&is_ref)),
+        table_plan: Some(Arc::clone(&ts_ref)),
+        expected_cnt: 100,
+        ..Default::default()
+    }
+    .init(&ctx, 0, INDEX_LOOK_UP_PUSH_DOWN_NONE);
+    assert!(!reader.index_look_up_push_down);
+    assert!(Arc::ptr_eq(
+        reader.table_plan.as_ref().unwrap(),
+        &reader.table_plans[0]
+    ));
+    assert!(
+        reader.table_plans[0]
+            .as_any()
+            .downcast_ref::<PhysicalTableScan>()
+            .unwrap()
+            .is_child_of_index_look_up
+    );
+    assert!(reader.index_plans_un_nature_orders.is_empty());
+    assert_eq!(
+        blocked_by(&reader.load_table_stats().unwrap_err()),
+        Some("D10.2")
+    );
+
+    // collect_plan_stats_version walks index_plan only (77, not table_plan 88).
+    let mut sv = HashMap::new();
+    collect_plan_stats_version(&reader, &mut sv);
+    assert_eq!(sv.get("t_lu"), Some(&77));
+
+    // MemoryUsage matches Go formula: sp + 3*1 + part(0) + 8 + 8*uno + index_plan + table_plan.
+    let expected_mem = reader.sp.memory_usage()
+        + 3
+        + 8
+        + reader.index_plan.as_ref().unwrap().memory_usage()
+        + reader.table_plan.as_ref().unwrap().memory_usage();
+    assert_eq!(reader.memory_usage(), expected_mem);
+
+    // Clone copies structure and resets paging / keep_order / expected_cnt per Go.
+    reader.paging.store(true, Ordering::Relaxed);
+    let cloned = reader.clone_plan().unwrap();
+    let cloned_r = cloned
+        .as_any()
+        .downcast_ref::<PhysicalIndexLookUpReader>()
+        .unwrap();
+    assert!(!cloned_r.paging.load(Ordering::Relaxed));
+    assert_eq!(cloned_r.expected_cnt, 0);
+
+    // 2. Push-down IndexLookUpReader -> PhysicalLocalIndexLookUp inside index_plan tree.
+    let mut pushed = PhysicalIndexLookUpReader {
+        index_plan: Some(Arc::clone(&is_ref)),
+        table_plan: Some(Arc::clone(&ts_ref)),
+        ..Default::default()
+    }
+    .init(&ctx, 0, INDEX_LOOK_UP_PUSH_DOWN_BY_SYS_VAR);
+    assert!(pushed.index_look_up_push_down);
+    assert_eq!(
+        pushed.index_plan.as_ref().unwrap().kind(),
+        PhysicalKind::LocalIndexLookUp
+    );
+    assert_eq!(pushed.index_plans.len(), 3);
+    assert_eq!(pushed.index_plans[0].kind(), PhysicalKind::IndexScan);
+    assert_eq!(pushed.index_plans[1].kind(), PhysicalKind::TableScan);
+    assert_eq!(pushed.index_plans[2].kind(), PhysicalKind::LocalIndexLookUp);
+    assert_eq!(pushed.index_plans_un_nature_orders.get(&0), Some(&2));
+    // table_plan row count is scaled to 0 when pushed down.
+    assert_eq!(pushed.table_plan.as_ref().unwrap().stats_count(), 0.0);
+
+    // ResolveIndices on pushed-down IndexLookUpReader syncs PhysicalLocalIndexLookUp.schema()
+    // column indices from children[1] (TableRowIDScan), matching Go's shared *Schema (N1 §3.3).
+    pushed.resolve_indices(&ctx).unwrap();
+    let local_after = pushed
+        .index_plan
+        .as_ref()
+        .unwrap()
+        .as_any()
+        .downcast_ref::<PhysicalLocalIndexLookUp>()
+        .unwrap();
+    for (i, col) in local_after.schema().columns.iter().enumerate() {
+        assert_eq!(col.index, i as isize);
+    }
+
+    // PhysicalLocalIndexLookUp: ToPB omits ExecutorId and KeepOrder; non-TiKV fails.
+    let local = pushed
+        .index_plan
+        .as_ref()
+        .unwrap()
+        .as_any()
+        .downcast_ref::<PhysicalLocalIndexLookUp>()
+        .unwrap();
+    assert_eq!(local.index_handle_offsets, vec![0]);
+    assert_eq!(local.explain_info(), "index handle offsets:[0]");
+    assert_eq!(local.memory_usage(), local.sp.memory_usage() + 24 + 4);
+    let expr_ctx: tidb_sessionctx::exprctx::BuildContextRef =
+        Arc::<dyn tidb_expression::context::AggFuncBuildContext>::clone(&ctx.expr_ctx);
+    let bctx = BuildPBContext {
+        expr_ctx,
+        client: Arc::new(MockClient),
+        tiflash_fast_scan: false,
+        tiflash_fine_grained_shuffle_batch_size: 0,
+        group_concat_max_len: 1024,
+        in_explain_stmt: false,
+        warn_handler: None,
+        extra_warnghandler: None,
+    };
+    let pb_exec = local.to_pb(&bctx, kv::TiKV).unwrap();
+    assert_eq!(pb_exec.get_tp(), tipb::ExecType::TypeIndexLookUp);
+    assert!(!pb_exec.has_executor_id());
+    assert_eq!(pb_exec.get_fine_grained_shuffle_stream_count(), 0);
+    assert_eq!(pb_exec.get_fine_grained_shuffle_batch_size(), 0);
+    assert_eq!(pb_exec.get_index_lookup().get_index_handle_offsets(), &[0]);
+    assert!(local.to_pb(&bctx, kv::TiFlash).is_err());
+
+    // 3. keep_order + INDEX_LOOK_UP_PUSH_DOWN_BY_HINT appends Go hint warning and skips push-down.
+    let warn_before = ctx.vars.stmt_ctx().warning_count();
+    let kept = PhysicalIndexLookUpReader {
+        index_plan: Some(Arc::clone(&is_ref)),
+        table_plan: Some(Arc::clone(&ts_ref)),
+        keep_order: true,
+        ..Default::default()
+    }
+    .init(&ctx, 0, INDEX_LOOK_UP_PUSH_DOWN_BY_HINT);
+    assert!(!kept.index_look_up_push_down);
+    assert_eq!(ctx.vars.stmt_ctx().warning_count(), warn_before + 1);
+
+    // 4. build_push_down_index_look_up_plan edge cases: trailing ExtraPhysTblID skipped,
+    // missing handle returns Err, non-TableScan leaf returns Err (no production panic).
+    let mut is_extra = PhysicalIndexScan::default().init(&ctx, 0);
+    is_extra.set_schema(new_schema(vec![
+        Arc::new(Column {
+            id: ExtraHandleID as i64,
+            unique_id: 10,
+            ret_type: Arc::new(new_field_type(TypeLonglong)),
+            ..Default::default()
+        }),
+        Arc::new(Column {
+            id: ExtraPhysTblID as i64,
+            unique_id: 11,
+            ret_type: Arc::new(new_field_type(TypeLonglong)),
+            ..Default::default()
+        }),
+    ]));
+    let built =
+        build_push_down_index_look_up_plan(&ctx, Arc::new(is_extra), &ts_ref, false).unwrap();
+    let built_local = built
+        .as_any()
+        .downcast_ref::<PhysicalLocalIndexLookUp>()
+        .unwrap();
+    assert_eq!(built_local.index_handle_offsets, vec![0]);
+
+    let mut is_no_handle = PhysicalIndexScan::default().init(&ctx, 0);
+    is_no_handle.set_schema(new_schema(vec![Arc::new(Column {
+        id: ExtraPhysTblID as i64,
+        unique_id: 12,
+        ret_type: Arc::new(new_field_type(TypeLonglong)),
+        ..Default::default()
+    })]));
+    assert!(
+        build_push_down_index_look_up_plan(&ctx, Arc::new(is_no_handle), &ts_ref, false).is_err()
+    );
+    // Non-TableScan leaf returns Err instead of panicking.
+    let bad_leaf: PhysicalPlanRef = Arc::new(PhysicalTableDual::default().init(&ctx, None, 0));
+    assert!(
+        build_push_down_index_look_up_plan(&ctx, Arc::clone(&is_ref), &bad_leaf, false).is_err()
+    );
+
+    // 5. AddExtraPhysTblIDColumn is idempotent, and PhysicalIndexScan::need_extra_output_col.
+    let (cols, sch, added) = add_extra_phys_tbl_id_column(&ctx, Vec::new(), Schema::default());
+    assert!(added);
+    assert_eq!(cols.len(), 1);
+    assert_eq!(sch.len(), 1);
+    let (_, _, added_again) = add_extra_phys_tbl_id_column(&ctx, cols, sch);
+    assert!(!added_again);
+
+    let mut is_part = PhysicalIndexScan {
+        table: Arc::new(TableInfo {
+            partition: Some(Box::new(PartitionInfo::default())),
+            ..Default::default()
+        }),
+        index: Arc::new(IndexInfo {
+            global: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(is_part.need_extra_output_col(&ctx));
+    is_part.index = Arc::new(IndexInfo {
+        global: false,
+        ..Default::default()
+    });
+    assert!(!is_part.need_extra_output_col(&ctx));
+}
+
+#[test]
+fn check_index_lookup_pushdown_supported_all_reasons() {
+    use crate::core::planbuilder::check_index_look_up_push_down_supported;
+    use tidb_model::{IndexInfo, TableCacheStatusEnable, TempTableLocal};
+
+    let mut vars = session();
+    vars.set_system_var("transaction_isolation", "REPEATABLE-READ")
+        .unwrap();
+    let mut tbl = TableInfo::default();
+    let mut idx = IndexInfo::default();
+
+    // Baseline: REPEATABLE-READ, leader read, normal table/index -> supported.
+    assert!(check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, false
+    ));
+    assert_eq!(vars.stmt_ctx().warning_count(), 0);
+
+    // 1. Old common handle version.
+    tbl.is_common_handle = true;
+    tbl.common_handle_version = 0;
+    assert!(!check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, false
+    ));
+    assert_eq!(vars.stmt_ctx().warning_count(), 1);
+    tbl.common_handle_version = 1;
+    assert!(check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, true
+    ));
+
+    // 2. Global index.
+    idx.global = true;
+    assert!(!check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, true
+    ));
+    idx.global = false;
+
+    // 3. Temp table.
+    tbl.temp_table_type = TempTableLocal;
+    assert!(!check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, true
+    ));
+    tbl.temp_table_type = tidb_model::TempTableNone;
+
+    // 4. Cached table.
+    tbl.table_cache_status_type = TableCacheStatusEnable;
+    assert!(!check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, true
+    ));
+    tbl.table_cache_status_type = tidb_model::TableCacheStatusDisable;
+
+    // 5. MV index.
+    idx.mv_index = true;
+    assert!(!check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, true
+    ));
+    idx.mv_index = false;
+
+    // 6. Isolation != REPEATABLE-READ.
+    vars.state.txn_ctx.isolation.clear();
+    vars.set_system_var("transaction_isolation", "READ-COMMITTED")
+        .unwrap();
+    assert!(!check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, true
+    ));
+    vars.state.txn_ctx.isolation.clear();
+    vars.set_system_var("transaction_isolation", "REPEATABLE-READ")
+        .unwrap();
+
+    // 7. Non-leader read.
+    vars.stmt_ctx_mut().is_read_only = true;
+    vars.set_replica_read(tidb_kv::option::ReplicaReadFollower);
+    assert!(!check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, true
+    ));
+    vars.set_replica_read(tidb_kv::option::ReplicaReadLeader);
+
+    // 8. Stale read.
+    vars.state.txn_ctx.is_staleness = true;
+    assert!(!check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, true
+    ));
+    vars.state.txn_ctx.is_staleness = false;
+
+    // 9. Historical read (snapshot_ts != 0).
+    vars.snapshot_ts = 12345;
+    assert!(!check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, true
+    ));
+    vars.snapshot_ts = 0;
+    assert!(check_index_look_up_push_down_supported(
+        &mut vars, &tbl, &idx, true
+    ));
 }

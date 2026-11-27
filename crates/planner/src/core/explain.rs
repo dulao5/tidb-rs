@@ -15,6 +15,7 @@ use tidb_base::blocked::blocked;
 // glue: stub of PhysicalTableScan.ExplainNormalizedInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 // glue: stub of PhysicalIndexReader.ExplainInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 // glue: stub of PhysicalIndexReader.ExplainNormalizedInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
+// glue: stub of PhysicalIndexLookUpReader.ExplainInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 // glue: stub of PhysicalIndexScan.ExplainInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 // glue: stub of PhysicalIndexScan.ExplainNormalizedInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)
 // glue: stub of PhysicalIndexScan.OperatorInfo, blocked-by:D10.9 (the EXPLAIN text and access objects of the operators)

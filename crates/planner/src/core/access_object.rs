@@ -440,5 +440,17 @@ impl PhysicalIndexReader {
     }
 }
 
+impl crate::core::physical_plans::PhysicalIndexLookUpReader {
+    /// `accessObject` of `partitionAccesser`.
+    // go: PhysicalIndexLookUpReader.accessObject L2 (Result for the partition pruning boundary)
+    pub fn access_object(&self, sctx: &PlanCtx<'_>) -> Result<Box<dyn AccessObject>, Error> {
+        let is = self.index_plans[0]
+            .as_any()
+            .downcast_ref::<PhysicalIndexScan>()
+            .expect("interface conversion: base.PhysicalPlan is not *core.PhysicalIndexScan");
+        get_access_object_from_index_scan(sctx, is, self.plan_part_info.as_deref())
+    }
+}
+
 #[cfg(test)]
 mod tests;

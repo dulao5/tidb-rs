@@ -44,8 +44,9 @@ use tidb_planner::core::access_object::{
 };
 use tidb_planner::core::optimizer::{adjust_optimization_flags, do_optimize_plan};
 use tidb_planner::core::physical_plans::{
-    NominalSort, PhysicalIndexReader, PhysicalIndexScan, PhysicalLimit, PhysicalProjection,
-    PhysicalSelection, PhysicalSort, PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
+    NominalSort, PhysicalIndexLookUpReader, PhysicalIndexReader, PhysicalIndexScan, PhysicalLimit,
+    PhysicalLocalIndexLookUp, PhysicalProjection, PhysicalSelection, PhysicalSort,
+    PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
 };
 use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
 use tidb_planner::core::planbuilder::new_plan_builder;
@@ -228,11 +229,18 @@ fn with_built(
     };
     let mode = opts["mode"].as_i64().unwrap();
     let mut vars = SessionVars::new(Box::new(Acc));
+    // Matches Go mock.NewContext() (pkg/util/mock/context.go:685: vars.EnablePaging = DefTiDBEnablePaging).
+    vars.enable_paging = true;
     vars.current_db = "test".to_owned();
     vars.sql_mode = mode;
     vars.remove_orderby_in_subquery = !opts["keep_order"].as_bool().unwrap();
     vars.enable_stable_result_mode = opts["stable"].as_bool().unwrap();
     vars.stmt_ctx_mut().use_dynamic_prune_mode = opts["dynamic"].as_bool().unwrap();
+    if let Some(policy) = opts["pushdown_policy"].as_str() {
+        vars.index_look_up_push_down_policy = policy.to_owned();
+        vars.set_system_var("transaction_isolation", "REPEATABLE-READ")
+            .unwrap();
+    }
     let is = InfoSchemaHandle(Arc::clone(tables) as Arc<dyn InfoSchemaLookup>);
 
     let blocked_or = |e: Error| match blocked_by(&e) {
@@ -448,6 +456,42 @@ fn dump(
             o.insert("pb".into(), Value::Array(pbs));
             o.insert("acc".into(), acc(&*x.access_object(ctx)?));
         }
+        PhysicalKind::IndexLookUpReader => {
+            let x = any.downcast_ref::<PhysicalIndexLookUpReader>().unwrap();
+            o.insert("virt".into(), virt(x.schema()));
+            let idx = x.index_plans.last().expect("indexPlan");
+            let tbl = x.table_plans.last().expect("tablePlan");
+            o.insert("idx".into(), dump(ctx, bctx, &**idx, false)?);
+            o.insert("tbl".into(), dump(ctx, bctx, &**tbl, false)?);
+            let idx_pbs = x
+                .index_plans
+                .iter()
+                .map(|ip| pb(ip.to_pb(bctx, TiKV)))
+                .collect::<Result<Vec<_>, _>>()?;
+            o.insert("idxPb".into(), Value::Array(idx_pbs));
+            let tbl_pbs = x
+                .table_plans
+                .iter()
+                .map(|tp| pb(tp.to_pb(bctx, TiKV)))
+                .collect::<Result<Vec<_>, _>>()?;
+            o.insert("tblPb".into(), Value::Array(tbl_pbs));
+            o.insert("acc".into(), acc(&*x.access_object(ctx)?));
+            if let Some(eh) = &x.extra_handle_col {
+                o.insert("extraHandle".into(), json!(eh.index));
+            }
+            o.insert(
+                "commonHandle".into(),
+                cols(&new_schema(x.common_handle_cols.clone())),
+            );
+        }
+        PhysicalKind::LocalIndexLookUp => {
+            let x = any.downcast_ref::<PhysicalLocalIndexLookUp>().unwrap();
+            o.insert(
+                "offsets".into(),
+                Value::Array(x.index_handle_offsets.iter().map(|v| json!(*v)).collect()),
+            );
+            o.insert("pb".into(), pb(x.to_pb(bctx, TiKV))?);
+        }
         PhysicalKind::IndexScan => {
             let x = any.downcast_ref::<PhysicalIndexScan>().unwrap();
             o.insert("cols".into(), cols(x.schema()));
@@ -575,6 +619,43 @@ fn check_reader_schemas(p: &dyn PhysicalPlan, sql: &str) {
         }
         INDEX_READERS_CHECKED.fetch_add(1, Ordering::Relaxed);
     }
+    if let Some(r) = p.as_any().downcast_ref::<PhysicalIndexLookUpReader>() {
+        let tbl = r.table_plan.as_ref().expect("tablePlan").schema();
+        assert_eq!(
+            ids(r.schema()),
+            ids(tbl),
+            "{sql}: the index lookup reader's schema columns (unique id, index) differ from its table plan's"
+        );
+        if let Some(eh) = &r.extra_handle_col {
+            assert!(
+                eh.index >= 0,
+                "{sql}: unresolved index lookup extra handle column {} (index={})",
+                eh.unique_id,
+                eh.index
+            );
+        }
+        for c in &r.common_handle_cols {
+            assert!(
+                c.index >= 0,
+                "{sql}: unresolved index lookup common handle column {} (index={})",
+                c.unique_id,
+                c.index
+            );
+        }
+        if let Some(ip) = &r.index_plan {
+            check_reader_schemas(&**ip, sql);
+        }
+        READERS_CHECKED.fetch_add(1, Ordering::Relaxed);
+    }
+    if let Some(local) = p.as_any().downcast_ref::<PhysicalLocalIndexLookUp>()
+        && let Some(tbl_scan) = local.children().get(1)
+    {
+        assert_eq!(
+            ids(local.schema()),
+            ids(tbl_scan.schema()),
+            "{sql}: PhysicalLocalIndexLookUp schema columns (unique id, index) differ from children[1] TableRowIDScan"
+        );
+    }
     for c in p.children() {
         check_reader_schemas(&**c, sql);
     }
@@ -585,6 +666,8 @@ fn check_reader_schemas(p: &dyn PhysicalPlan, sql: &str) {
 enum Step {
     Table,
     Index,
+    LookupIndex,
+    LookupTable,
     Child(usize),
 }
 
@@ -601,6 +684,18 @@ fn preorder(p: &dyn PhysicalPlan, path: &mut Vec<Step>, out: &mut Vec<Vec<Step>>
         path.push(Step::Index);
         preorder(&**ip, path, out);
         path.pop();
+    }
+    if let Some(r) = p.as_any().downcast_ref::<PhysicalIndexLookUpReader>() {
+        if let Some(ip) = r.index_plan.as_ref() {
+            path.push(Step::LookupIndex);
+            preorder(&**ip, path, out);
+            path.pop();
+        }
+        if let Some(tp) = r.table_plan.as_ref() {
+            path.push(Step::LookupTable);
+            preorder(&**tp, path, out);
+            path.pop();
+        }
     }
     for (i, c) in p.children().iter().enumerate() {
         path.push(Step::Child(i));
@@ -630,6 +725,23 @@ fn node_at<'a>(p: &'a mut PhysicalPlanRef, path: &[Step]) -> &'a mut dyn Physica
             // The flattened list shares the index plan's nodes.
             r.index_plans.clear();
             node_at(r.index_plan.as_mut().unwrap(), &path[1..])
+        }
+        Some(Step::LookupIndex) => {
+            let r = node
+                .as_any_mut()
+                .downcast_mut::<PhysicalIndexLookUpReader>()
+                .unwrap();
+            r.index_plans.clear();
+            r.index_plans_un_nature_orders.clear();
+            node_at(r.index_plan.as_mut().unwrap(), &path[1..])
+        }
+        Some(Step::LookupTable) => {
+            let r = node
+                .as_any_mut()
+                .downcast_mut::<PhysicalIndexLookUpReader>()
+                .unwrap();
+            r.table_plans.clear();
+            node_at(r.table_plan.as_mut().unwrap(), &path[1..])
         }
         Some(Step::Child(i)) => node_at(&mut node.children_mut()[*i], &path[1..]),
     }

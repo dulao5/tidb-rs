@@ -140,7 +140,7 @@ fn task_plan(p: Option<&PhysicalPlanRef>) -> &PhysicalPlanRef {
 /// RootTask is the final sink node of a plan graph. It should be a single goroutine on tidb.
 #[derive(Clone, Debug, Default)]
 pub struct RootTask {
-    p: Option<PhysicalPlanRef>,
+    pub(crate) p: Option<PhysicalPlanRef>,
     /// isEmpty indicates if this task contains a dual table and returns empty data.
     is_empty: bool,
     // TODO: The flag 'isEmpty' is only checked by Projection and UnionAll. We should support more cases in the future.
@@ -506,7 +506,7 @@ impl CopTask {
     /// - The index merge reader, the index lookup reader and the index reader are outside the
     ///   first vertical slice (boundary stubs on the branch Go takes); a join in the table
     ///   plan (`PhysicalHashJoin`, TiFlash) likewise.
-    // go: CopTask.convertToRootTaskImpl L2 (index readers / joins / virtual column expansion are blocked-by:D10.1)
+    // go: CopTask.convertToRootTaskImpl L2 (index merge / joins / virtual column expansion are blocked-by:D10.1)
     pub fn convert_to_root_task_impl(&mut self, ctx: &PlanCtx<'_>) -> Result<RootTask, Error> {
         // copTasks are run in parallel, to make the estimated cost closer to execution time, we amortize
         // the cost to cop iterator workers. According to `CopClient::Send`, the concurrency
@@ -539,11 +539,7 @@ impl CopTask {
             ));
         }
         if self.index_plan.is_some() && self.table_plan.is_some() {
-            // glue: blocked-by:D10.1 (buildIndexLookUpTask, PhysicalIndexLookUpReader is outside the first slice)
-            return Err(blocked(
-                "D10.1",
-                "convertToRootTask of an index lookup (PhysicalIndexLookUpReader)",
-            ));
+            new_task = crate::core::task::build_index_look_up_task(ctx, self);
         } else if let Some(index_plan) = &self.index_plan {
             let mut p = PhysicalIndexReader {
                 index_plan: Some(Arc::clone(index_plan)),

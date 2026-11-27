@@ -61,6 +61,21 @@ fn inner_plans(p: &dyn PhysicalPlan) -> Vec<&crate::PhysicalPlanRef> {
             .and_then(|r| r.index_plan.as_ref())
             .into_iter()
             .collect(),
+        PhysicalKind::IndexLookUpReader => {
+            let mut out = Vec::with_capacity(2);
+            if let Some(r) = p
+                .as_any()
+                .downcast_ref::<crate::core::physical_plans::PhysicalIndexLookUpReader>()
+            {
+                if let Some(ip) = r.index_plan.as_ref() {
+                    out.push(ip);
+                }
+                if let Some(tp) = r.table_plan.as_ref() {
+                    out.push(tp);
+                }
+            }
+            out
+        }
         _ => Vec::new(),
     }
 }
@@ -178,6 +193,48 @@ impl HeapSizer {
                 for c in &x.output_columns {
                     self.column(c);
                 }
+            }
+            PhysicalKind::IndexLookUpReader => {
+                let Some(x) =
+                    any.downcast_ref::<crate::core::physical_plans::PhysicalIndexLookUpReader>()
+                else {
+                    return; // a test double of the kind
+                };
+                self.schema(p.schema());
+                if let Some(ip) = &x.index_plan {
+                    self.plan(ip);
+                }
+                if let Some(tp) = &x.table_plan {
+                    self.plan(tp);
+                }
+                self.bytes +=
+                    (x.index_plans.capacity() * size_of::<crate::PhysicalPlanRef>()) as i64;
+                for ip in &x.index_plans {
+                    self.plan(ip);
+                }
+                self.bytes +=
+                    (x.table_plans.capacity() * size_of::<crate::PhysicalPlanRef>()) as i64;
+                for tp in &x.table_plans {
+                    self.plan(tp);
+                }
+                self.bytes +=
+                    (x.index_plans_un_nature_orders.capacity() * (2 * size_of::<isize>())) as i64;
+                if let Some(c) = &x.extra_handle_col {
+                    self.column(c);
+                }
+                self.bytes += (x.common_handle_cols.capacity() * size_of::<usize>()) as i64;
+                for c in &x.common_handle_cols {
+                    self.column(c);
+                }
+            }
+            PhysicalKind::LocalIndexLookUp => {
+                let Some(x) =
+                    any.downcast_ref::<crate::core::physical_plans::PhysicalLocalIndexLookUp>()
+                else {
+                    return; // a test double of the kind
+                };
+                self.schema(p.schema());
+                self.bytes += (x.index_handle_offsets.capacity() * size_of::<u32>()) as i64;
             }
             PhysicalKind::IndexScan => {
                 let Some(x) = any.downcast_ref::<PhysicalIndexScan>() else {
@@ -534,6 +591,22 @@ pub fn plan_structure_hash(p: &dyn PhysicalPlan) -> u64 {
         }
         if let Some(x) = p.as_any().downcast_ref::<PhysicalIndexReader>() {
             x.index_plans.len().hash(h);
+        }
+        if let Some(x) = p
+            .as_any()
+            .downcast_ref::<crate::core::physical_plans::PhysicalIndexLookUpReader>()
+        {
+            x.index_look_up_push_down.hash(h);
+            x.paging.load(std::sync::atomic::Ordering::Relaxed).hash(h);
+            x.pushed_limit.map(|l| (l.offset, l.count)).hash(h);
+            x.index_plans.len().hash(h);
+            x.table_plans.len().hash(h);
+        }
+        if let Some(x) = p
+            .as_any()
+            .downcast_ref::<crate::core::physical_plans::PhysicalLocalIndexLookUp>()
+        {
+            x.index_handle_offsets.hash(h);
         }
         for inner in inner_plans(p) {
             structure_into(inner.as_ref(), h);

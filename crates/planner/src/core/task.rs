@@ -134,11 +134,9 @@ pub fn attach_plan2_task(mut p: PhysicalPlanRef, mut t: Task) -> Task {
 impl CopTask {
     /// finishIndexPlan means we no longer add plan to index plan, and compute the network cost for it.
     ///
-    /// With both an index and a table plan (an index lookup) Go gives the scan the index
-    /// plan's stats object and then writes its stats version, through the shared pointer,
-    /// into the index plan's stats as well; the index lookup is outside the first slice, so
-    /// that branch is a boundary stub.
-    // go: CopTask.finishIndexPlan L2 (the index lookup branch is blocked-by:D10.1)
+    /// Preserves `origin_stats.stats_version` in a cloned `StatsInfo` for the table scan without
+    /// mutating the index plan's shared `StatsInfo` (N1 §3.4, D10.2 spec §11.4).
+    // go: CopTask.finishIndexPlan L1 [M-PLAN]
     pub fn finish_index_plan(&mut self) -> Result<(), Error> {
         if self.index_plan_finished {
             return Ok(());
@@ -146,12 +144,23 @@ impl CopTask {
         self.index_plan_finished = true;
         // index merge case is specially handled for now.
         // We need a elegant way to solve the stats of index merge in this case.
-        if self.table_plan.is_some() && self.index_plan.is_some() {
-            // glue: blocked-by:D10.1 (the stats of an index lookup's table scan; index lookup is outside the first slice)
-            return Err(blocked(
-                "D10.1",
-                "finishIndexPlan of an index lookup (PhysicalIndexLookUpReader)",
-            ));
+        if let (Some(table_plan), Some(index_plan)) = (&mut self.table_plan, &self.index_plan) {
+            let index_stats = index_plan.stats_info().map(Arc::clone);
+            let ts = make_mut_plan(table_plan)
+                .as_any_mut()
+                .downcast_mut::<PhysicalTableScan>()
+                .expect("interface conversion: base.PhysicalPlan is not *core.PhysicalTableScan");
+            let origin_stats_version = ts.stats_info().map(|s| s.stats_version);
+            if let Some(stats) = index_stats {
+                let mut new_stats = (*stats).clone();
+                if let Some(ver) = origin_stats_version {
+                    // keep the original stats version
+                    new_stats.stats_version = ver;
+                }
+                ts.set_stats(Some(Arc::new(new_stats)));
+            } else {
+                ts.set_stats(None);
+            }
         }
         Ok(())
     }
@@ -457,7 +466,7 @@ fn attach2_task_limit(
                 cop = c;
             }
             t = cop.convert_to_root_task(ctx)?;
-            sunk = sink_into_index_look_up(limit, &t);
+            sunk = sink_into_index_look_up(ctx, limit, &mut t);
         } else {
             // glue: blocked-by:D10.1 (the limit push down into an index merge reader; index merge is outside the first slice)
             return Err(blocked(
@@ -497,26 +506,180 @@ fn attach2_task_limit(
     Ok(attach_plan2_task(p, t))
 }
 
+/// `buildIndexLookUpTask`.
+// go: buildIndexLookUpTask L1 [M-CTX, M-PLAN]
+pub(crate) fn build_index_look_up_task(ctx: &PlanCtx<'_>, t: &CopTask) -> RootTask {
+    let mut new_task = RootTask::default();
+    let table_plan = Arc::clone(deref(t.table_plan.as_ref()));
+    let index_plan = Arc::clone(deref(t.index_plan.as_ref()));
+    let qb_offset = table_plan.query_block_offset();
+    let p = crate::core::physical_plans::PhysicalIndexLookUpReader {
+        table_plan: Some(table_plan),
+        index_plan: Some(index_plan),
+        extra_handle_col: t.extra_handle_col.clone(),
+        common_handle_cols: t.common_handle_cols.clone(),
+        expected_cnt: t.expect_cnt,
+        keep_order: t.keep_order,
+        plan_part_info: t.phys_plan_part_info.clone(),
+        ..Default::default()
+    }
+    .init(ctx, qb_offset, t.index_look_up_push_down_by);
+    // Do not inject the extra Projection even if t.needExtraProj is set, or the schema between the phase-1 agg and
+    // the final agg would be broken. Please reference comments for the similar logic in
+    // (*copTask).convertToRootTaskImpl() for the PhysicalTableReader case.
+    // (`PhysicalHashAgg`, `PhysicalStreamAgg`: not ported yet.)
+    let agg_pushed_down = false;
+
+    if t.need_extra_proj && !agg_pushed_down {
+        let schema = t
+            .origin_schema
+            .as_ref()
+            .expect("runtime error: invalid memory address or nil pointer dereference");
+        let p_stats = p.stats_info().map(Arc::clone);
+        let mut proj = PhysicalProjection {
+            exprs: tidb_expression::column2_exprs(&schema.columns),
+            ..Default::default()
+        }
+        .init(ctx, p_stats, qb_offset, Vec::new());
+        proj.set_schema((**schema).clone_schema());
+        proj.set_children(vec![Arc::new(p)]);
+        new_task.set_plan(Arc::new(proj));
+    } else {
+        new_task.set_plan(Arc::new(p));
+    }
+    new_task
+}
+
+/// setTableScanToTableRowIDScan is to update the isChildOfIndexLookUp attribute of PhysicalTableScan child.
+// go: setTableScanToTableRowIDScan L1 [M-PLAN]
+pub(crate) fn set_table_scan_to_table_row_id_scan(p: &mut PhysicalPlanRef) {
+    if p.kind() == PhysicalKind::TableScan {
+        let ts = make_mut_plan(p)
+            .as_any_mut()
+            .downcast_mut::<PhysicalTableScan>()
+            .expect("PhysicalTableScan");
+        ts.set_is_child_of_index_look_up(true);
+    } else {
+        crate::map_children(p, |mut child| {
+            set_table_scan_to_table_row_id_scan(&mut child);
+            child
+        });
+    }
+}
+
 /// `sinkIntoIndexLookUp`.
 ///
-/// `PhysicalIndexLookUpReader` is not ported: no root plan (nor the child of a root
-/// projection) can be one, since `convertToRootTaskImpl` stops at an index lookup with a
-/// boundary stub before building it. Every reachable plan takes Go's `return false`.
-// go: PhysicalLimit.sinkIntoIndexLookUp L2 (PhysicalIndexLookUpReader is not ported; see the doc)
-fn sink_into_index_look_up(limit: &PhysicalLimit, t: &Task) -> bool {
-    let _ = limit;
+/// Mutates `reader` (clearing `table_plans` before writing `table_plan`'s `TableScan` stats and
+/// rebuilding `table_plans` afterwards) BEFORE optionally wrapping `root` in `extraProj` so `Arc`
+/// refcounts stay unique (N1 §3.4, D10.2 spec §11.3 item 4).
+// go: PhysicalLimit.sinkIntoIndexLookUp L1 [M-CTX, M-PLAN]
+fn sink_into_index_look_up(ctx: &PlanCtx<'_>, limit: &PhysicalLimit, t: &mut Task) -> bool {
     let Task::Root(root) = t else {
         panic!("interface conversion: base.Task is not *core.RootTask");
     };
-    let plan = deref(root.get_plan());
-    // `root.GetPlan().(*PhysicalIndexLookUpReader)`: not ported (see the doc).
-    let is_double_read = false;
-    let is_proj = plan.kind() == PhysicalKind::Projection;
-    if !is_double_read && !is_proj {
-        return false;
+    let is_double_read;
+    let is_proj;
+    let need_extra_proj;
+    {
+        let plan = deref(root.get_plan());
+        let reader_ref: &crate::core::physical_plans::PhysicalIndexLookUpReader = if let Some(r) =
+            plan.as_any()
+                .downcast_ref::<crate::core::physical_plans::PhysicalIndexLookUpReader>()
+        {
+            is_double_read = true;
+            is_proj = false;
+            r
+        } else if plan.kind() == PhysicalKind::Projection {
+            is_proj = true;
+            let Some(r) = plan.children().first().and_then(|c| {
+                c.as_any()
+                    .downcast_ref::<crate::core::physical_plans::PhysicalIndexLookUpReader>()
+            }) else {
+                return false;
+            };
+            is_double_read = true;
+            r
+        } else {
+            return false;
+        };
+        let _ = is_double_read;
+        // We can sink Limit into IndexLookUpReader only if tablePlan contains no Selection.
+        let Some(tp) = reader_ref.table_plan.as_ref() else {
+            return false;
+        };
+        if tp.kind() != PhysicalKind::TableScan {
+            return false;
+        }
+        need_extra_proj = limit.schema().len() != reader_ref.schema().len();
     }
-    // `proj.Children()[0].(*PhysicalIndexLookUpReader)`: not ported (see the doc).
-    false
+
+    let limit_stats = limit.stats_info().map(Arc::clone);
+    let pushed_limit = crate::core::physical_plans::PushedDownLimit {
+        offset: limit.offset,
+        count: limit.count,
+    };
+
+    let apply_to_reader = |reader_plan: &mut PhysicalPlanRef| {
+        let reader = make_mut_plan(reader_plan)
+            .as_any_mut()
+            .downcast_mut::<crate::core::physical_plans::PhysicalIndexLookUpReader>()
+            .expect("PhysicalIndexLookUpReader");
+        reader.pushed_limit = Some(pushed_limit);
+        // Clear table_plans BEFORE mutating table_plan to avoid CoW splitting TableRowIDScan.
+        reader.table_plans.clear();
+        let tp = reader.table_plan.as_mut().expect("tablePlan");
+        let ts = make_mut_plan(tp)
+            .as_any_mut()
+            .downcast_mut::<PhysicalTableScan>()
+            .expect("PhysicalTableScan");
+        let origin_stats = ts.stats_info().map(Arc::clone);
+        let origin_rc = origin_stats
+            .as_ref()
+            .expect("runtime error: invalid memory address or nil pointer dereference")
+            .row_count;
+        let limit_rc = limit_stats
+            .as_ref()
+            .expect("runtime error: invalid memory address or nil pointer dereference")
+            .row_count;
+        if origin_rc >= limit_rc {
+            // Only reset the table scan stats when its row estimation is larger than the limit count.
+            // When indexLookUp push down is enabled, some rows have been looked up in TiKV side,
+            // and the rows processed by the TiDB table scan may be less than the limit count.
+            let mut new_stats = (**limit_stats.as_ref().expect("stats")).clone();
+            if let Some(orig) = origin_stats {
+                // keep the original stats version
+                new_stats.stats_version = orig.stats_version;
+            }
+            ts.set_stats(Some(Arc::new(new_stats)));
+        }
+        reader.table_plans = crate::core::initialize::flatten_list_push_down_plan(tp);
+        reader.set_stats(limit_stats.clone());
+    };
+
+    let root_plan = root.p.as_mut().expect("root plan");
+    if is_proj {
+        let proj = make_mut_plan(root_plan);
+        apply_to_reader(&mut proj.children_mut()[0]);
+        proj.set_stats(limit_stats.clone());
+    } else {
+        apply_to_reader(root_plan);
+    }
+
+    if need_extra_proj {
+        let limit_schema = limit.schema().clone_schema();
+        let mut extra_proj = PhysicalProjection {
+            exprs: tidb_expression::column2_exprs(&limit_schema.columns),
+            ..Default::default()
+        }
+        .init(ctx, limit_stats, limit.query_block_offset(), Vec::new());
+        extra_proj.set_schema(limit_schema);
+        // If the root.p is already a Projection. We left the optimization for the later Projection Elimination.
+        let prev = root.p.take().expect("root plan");
+        extra_proj.set_children(vec![prev]);
+        root.set_plan(Arc::new(extra_proj));
+    }
+
+    true
 }
 
 /// Attach2Task implements PhysicalPlan interface.

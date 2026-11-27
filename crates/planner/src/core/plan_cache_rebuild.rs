@@ -163,6 +163,31 @@ pub fn rebuild_range(ctx: &mut PlanCtx<'_>, p: &mut PhysicalPlanRef) -> Result<(
                 x.index_plan = Some(new_chain);
             }
         }
+        PhysicalKind::IndexLookUpReader => {
+            // rebuildRange(x.IndexPlans[0]): rebuild_chain_bottom follows children[0] down to the
+            // leaf IndexScan (passing through LocalIndexLookUp without touching children[1]'s
+            // TableRowIDScan); rebuild index_plans + index_plans_un_nature_orders via
+            // flatten_tree_push_down_plan when the chain changes (N1 §3 item 9).
+            let x = p
+                .as_any()
+                .downcast_ref::<crate::core::physical_plans::PhysicalIndexLookUpReader>()
+                .expect("PhysicalIndexLookUpReader");
+            let Some(chain) = &x.index_plan else {
+                return Ok(());
+            };
+            let mut new_chain = Arc::clone(chain);
+            rebuild_chain_bottom(ctx, &mut new_chain)?;
+            if !Arc::ptr_eq(&new_chain, chain) {
+                let x = make_mut_plan(p)
+                    .as_any_mut()
+                    .downcast_mut::<crate::core::physical_plans::PhysicalIndexLookUpReader>()
+                    .expect("PhysicalIndexLookUpReader");
+                let (flat, uno) = crate::core::initialize::flatten_tree_push_down_plan(&new_chain);
+                x.index_plans = flat;
+                x.index_plans_un_nature_orders = uno.unwrap_or_default();
+                x.index_plan = Some(new_chain);
+            }
+        }
         PhysicalKind::PointGet => rebuild_point_get(ctx, p)?,
         // case base.PhysicalPlan: rebuild the children.
         _ => {

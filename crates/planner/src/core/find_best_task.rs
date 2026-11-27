@@ -1229,14 +1229,37 @@ fn get_index_candidate(
 
 // glue: stub of expressionContainsHash, blocked-by:D10.7 (the filters of index merge paths)
 // glue: stub of checkColinSchema, blocked-by:D10.7 (the partial table scans of index merge)
-// glue: stub of PhysicalTableScan.appendExtraHandleCol, blocked-by:D10.2 (the keep-order index lookup of part 2)
 // glue: stub of PhysicalTableScan.addPushedDownSelectionToMppTask, blocked-by:D10.1 (the MPP task of a TiFlash table scan)
 // glue: stub of isMatchPropForIndexMerge, blocked-by:D10.7 (index merge paths; no such path reaches skyline pruning)
-/// The functions of index merge, MPP and index lookups that FindBestTask does not reach in
-/// the first slice: skyline pruning and the table path return their boundaries (index merge
-/// paths, TiFlash scans) before them.
+/// The functions of index merge and MPP that FindBestTask does not reach in the first slice:
+/// skyline pruning and the table path return their boundaries (index merge paths, TiFlash scans)
+/// before them.
 pub fn find_best_task_boundary(what: &str, block: &str) -> Error {
     blocked(block, what)
+}
+
+impl PhysicalTableScan {
+    // go: PhysicalTableScan.appendExtraHandleCol L1 [M-CTX]
+    fn append_extra_handle_col(
+        &mut self,
+        ds: &DataSource,
+        ctx: &PlanCtx<'_>,
+    ) -> (Arc<Column>, bool) {
+        if let Some(hc) = &ds.handle_cols {
+            return (
+                Arc::clone(
+                    hc.get_col(0)
+                        .expect("runtime error: index out of range [0] with length 0"),
+                ),
+                false,
+            );
+        }
+        let handle_col = Arc::new(ds.new_extra_handle_schema_col(ctx));
+        self.sp.schema_mut().append([Arc::clone(&handle_col)]);
+        self.columns
+            .push(Arc::new(tidb_model::new_extra_handle_col_info()));
+        (handle_col, true)
+    }
 }
 
 /// skylinePruning prunes access paths according to different factors. An access path can be
@@ -1874,12 +1897,7 @@ fn convert_candidates(
 }
 
 /// convertToIndexScan converts the DataSource to index scan with idx.
-///
-/// Single-read (`PhysicalIndexReader`) is implemented in part 2A. After all `InvalidTask`
-/// preconditions pass, a double-read (`!path.is_single_scan`) candidate immediately returns
-/// a `D10.2` boundary (part 2B) so part 2A never silently drops a double-read candidate and picks
-/// a different plan than Go.
-// go: convertToIndexScan L2 (double-read PhysicalIndexLookUpReader is a boundary: D10.2 part 2B)
+// go: convertToIndexScan L1 [M-CTX]
 fn convert_to_index_scan(
     ds: &mut DataSource,
     ctx: &PlanCtx<'_>,
@@ -1918,13 +1936,6 @@ fn convert_to_index_scan(
     if path.force_partial_order && prop.partial_order_info.is_none() {
         return Ok(Task::invalid_task());
     }
-    if !path.is_single_scan {
-        // glue: blocked-by:D10.2 (convertToIndexScan: double-read PhysicalIndexLookUpReader is part 2B of this block)
-        return Err(blocked(
-            "D10.2",
-            "a double-read index path (convertToIndexScan: PhysicalIndexLookUpReader)",
-        ));
-    }
     let mut is = get_original_physical_index_scan(
         ds,
         ctx,
@@ -1950,8 +1961,59 @@ fn convert_to_index_scan(
         columns: ds.tbl_cols.clone(),
         column_names: ds.output_names(&ctx.arena).clone(),
     }));
+    let mut ts: Option<PhysicalTableScan> = if !path.is_single_scan {
+        // On this way, it's double read case.
+        let mut ts = PhysicalTableScan {
+            columns: clone_col_infos(&ds.columns),
+            table: Arc::clone(&is.table),
+            table_as_name: ds.table_as_name.clone(),
+            db_name: ds.db_name.clone(),
+            is_partition: ds.partition_def_idx.is_some(),
+            physical_table_id: ds.physical_table_id,
+            tbl_cols: ds.tbl_cols.clone(),
+            tbl_col_hists: ds.tbl_col_hists.clone(),
+            ..Default::default()
+        }
+        .init(ctx, is.query_block_offset());
+        ts.set_schema(ds.schema(&ctx.arena).clone_schema());
+        // We set `StatsVersion` here and fill other fields in `(*copTask).finishIndexPlan`. Since `copTask.indexPlan` may
+        // change before calling `(*copTask).finishIndexPlan`, we don't know the stats information of `ts` currently and on
+        // the other hand, it may be hard to identify `StatsVersion` of `ts` in `(*copTask).finishIndexPlan`.
+        ts.set_stats(Some(Arc::new(StatsInfo {
+            stats_version: ds.table_stats.as_ref().expect("initStats").stats_version,
+            ..Default::default()
+        })));
+        cop.index_look_up_push_down_by = path.index_look_up_push_down_by;
+        Some(ts)
+    } else {
+        None
+    };
+    if let Some(ts_mut) = &mut ts
+        && ds.table_info.is_common_handle
+    {
+        cop.common_handle_cols = ds.common_handle_cols.clone();
+        let Some(crate::util::HandleCols::Common(common_handle)) = &ds.handle_cols else {
+            panic!("interface conversion: util.HandleCols is not *util.CommonHandleCols");
+        };
+        let ds_schema = ds.schema(&ctx.arena);
+        for col in common_handle.get_columns() {
+            if ds_schema.column_index(col) == -1 {
+                ts_mut.sp.schema_mut().append([Arc::clone(col)]);
+                ts_mut.columns.push(Arc::new(col.to_info()));
+                cop.need_extra_proj = true;
+            }
+        }
+    }
     if prop.need_keep_order() {
         cop.keep_order = true;
+        if let Some(ts_mut) = &mut ts
+            && !ds.table_info.is_common_handle
+        {
+            let (col, is_new) = ts_mut.append_extra_handle_col(ds, ctx);
+            cop.extra_handle_col = Some(col);
+            cop.need_extra_proj = cop.need_extra_proj || is_new;
+        }
+
         // Add sort items for index scan for the merge-sort operation
         // Case 1: keep order between partitions (only required for local index)
         // Case 2: keep order between range groups (see comments of PropMatchedNeedMergeSort and
@@ -1973,6 +2035,32 @@ fn convert_to_index_scan(
             is.grouped_ranges = path.grouped_ranges.clone();
             is.group_by_col_idxs = path.group_by_col_idxs.clone();
         }
+        if ds.table_info.get_partition_info().is_some()
+            && let Some(ts_mut) = &mut ts
+            && ctx.vars.stmt_ctx().use_dynamic_partition_prune()
+        {
+            if !is.index.global {
+                let is_cols = std::mem::take(&mut is.columns);
+                let is_schema = is.sp.schema().clone_schema();
+                let (new_cols, new_schema, _) =
+                    crate::core::physical_plans::add_extra_phys_tbl_id_column(
+                        ctx, is_cols, is_schema,
+                    );
+                is.columns = new_cols;
+                is.sp.set_schema(Some(new_schema));
+            }
+            // global index for tableScan with keepOrder also need PhysicalTblID
+            let ts_cols = std::mem::take(&mut ts_mut.columns);
+            let ts_schema = ts_mut.sp.schema().clone_schema();
+            let (new_cols, new_schema, succ) =
+                crate::core::physical_plans::add_extra_phys_tbl_id_column(ctx, ts_cols, ts_schema);
+            ts_mut.columns = new_cols;
+            ts_mut.sp.set_schema(Some(new_schema));
+            cop.need_extra_proj = cop.need_extra_proj || succ;
+        }
+    }
+    if let Some(ts_owned) = ts {
+        cop.table_plan = Some(Arc::new(ts_owned));
     }
     if cop.need_extra_proj {
         cop.origin_schema = Some(Arc::new(ds.schema(&ctx.arena).clone_schema()));
@@ -1991,6 +2079,21 @@ fn convert_to_index_scan(
 }
 
 impl PhysicalIndexScan {
+    /// NeedExtraOutputCol indicates whether this index scan needs an extra physical table ID column.
+    // go: PhysicalIndexScan.NeedExtraOutputCol L1 [M-CTX]
+    pub fn need_extra_output_col(&self, ctx: &PlanCtx<'_>) -> bool {
+        if self.table.partition.is_none() {
+            return false;
+        }
+        if self.index.global {
+            return true;
+        }
+        if !self.by_items.is_empty() && ctx.vars.stmt_ctx().use_dynamic_partition_prune() {
+            return true;
+        }
+        false
+    }
+
     // go: PhysicalIndexScan.getScanRowSize L1 [M-CTX]
     pub fn get_scan_row_size(&self, ctx: &PlanCtx<'_>) -> f64 {
         let idx = &self.index;

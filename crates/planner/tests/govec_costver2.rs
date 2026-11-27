@@ -22,8 +22,9 @@ use tidb_parser::model::CIStr;
 use tidb_parser::types::UnspecifiedLength;
 use tidb_planner::baseimpl::new_base_plan;
 use tidb_planner::core::physical_plans::{
-    PhysPlanPartInfo, PhysicalIndexReader, PhysicalIndexScan, PhysicalLimit, PhysicalProjection,
-    PhysicalSelection, PhysicalSort, PhysicalTableReader, PhysicalTableScan, PhysicalTopN,
+    PhysPlanPartInfo, PhysicalIndexLookUpReader, PhysicalIndexReader, PhysicalIndexScan,
+    PhysicalLimit, PhysicalProjection, PhysicalSelection, PhysicalSort, PhysicalTableReader,
+    PhysicalTableScan, PhysicalTopN,
 };
 use tidb_planner::core::plan_cost_ver1::get_tbl_stats;
 use tidb_planner::core::plan_cost_ver2::{
@@ -209,7 +210,7 @@ fn hist_coll(h: &Value) -> HistColl {
     coll
 }
 
-const FACTOR_VARS: [&str; 9] = [
+const FACTOR_VARS: [&str; 10] = [
     "table_full_scan",
     "table_range_scan",
     "table_rowid_scan",
@@ -217,6 +218,7 @@ const FACTOR_VARS: [&str; 9] = [
     "table_reader",
     "index_scan",
     "index_reader",
+    "index_lookup",
     "sort",
     "topn",
 ];
@@ -230,6 +232,7 @@ fn factor_var<'a>(vars: &'a mut SessionVars, name: &str) -> &'a mut f64 {
         "table_reader" => &mut vars.table_reader_cost_factor,
         "index_scan" => &mut vars.index_scan_cost_factor,
         "index_reader" => &mut vars.index_reader_cost_factor,
+        "index_lookup" => &mut vars.index_lookup_cost_factor,
         "sort" => &mut vars.sort_cost_factor,
         "topn" => &mut vars.topn_cost_factor,
         _ => unreachable!("{name}"),
@@ -242,7 +245,9 @@ fn type_name(p: &dyn PhysicalPlan) -> &'static str {
         PhysicalKind::TableReader => "PhysicalTableReader",
         PhysicalKind::TableScan => "PhysicalTableScan",
         PhysicalKind::IndexReader => "PhysicalIndexReader",
+        PhysicalKind::IndexLookUpReader => "PhysicalIndexLookUpReader",
         PhysicalKind::IndexScan => "PhysicalIndexScan",
+        PhysicalKind::LocalIndexLookUp => "PhysicalLocalIndexLookUp",
         PhysicalKind::Selection => "PhysicalSelection",
         PhysicalKind::Projection => "PhysicalProjection",
         PhysicalKind::Limit => "PhysicalLimit",
@@ -267,6 +272,17 @@ fn collect(p: &dyn PhysicalPlan, out: &mut Vec<Value>) {
     {
         collect(ip, out);
     }
+    if let Some(r) = p
+        .as_any()
+        .downcast_ref::<tidb_planner::core::physical_plans::PhysicalIndexLookUpReader>()
+    {
+        if let Some(ip) = r.index_plan.as_deref() {
+            collect(ip, out);
+        }
+        if let Some(tp) = r.table_plan.as_deref() {
+            collect(tp, out);
+        }
+    }
     for ch in p.children() {
         collect(ch.as_ref(), out);
     }
@@ -284,6 +300,36 @@ fn plan(c: &Value) -> Result<Value, Error> {
         vars.set_projection_concurrency(proj_conc);
     }
     vars.set_dist_sql_scan_concurrency(v["scan_conc"].as_i64().unwrap());
+    if let Some(lc) = c
+        .get("lookup_conc")
+        .and_then(Value::as_i64)
+        .filter(|&n| n > 0)
+    {
+        vars.set_index_lookup_concurrency(lc);
+    } else {
+        vars.set_index_lookup_concurrency(
+            tidb_sessionctx::variable::tidb_defs::DefIndexLookupConcurrency,
+        );
+    }
+    if let Some(ls) = c
+        .get("lookup_size")
+        .and_then(Value::as_i64)
+        .filter(|&n| n > 0)
+    {
+        vars.index_lookup_size = ls;
+    } else {
+        vars.index_lookup_size = tidb_sessionctx::variable::tidb_defs::DefIndexLookupSize;
+    }
+    vars.enable_paging = c
+        .get("enable_paging")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    vars.limit_cost_factor = c
+        .get("limit_factor")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|s| fl(&json!(s)))
+        .unwrap_or(1.0);
     vars.allow_mpp_execution = true;
     vars.enforce_mpp_execution = v["enforce_mpp"].as_bool().unwrap();
     vars.state.mem_tracker_bytes_limit = v["mem_quota"].as_i64().unwrap();
@@ -295,7 +341,7 @@ fn plan(c: &Value) -> Result<Value, Error> {
     vars.cost_model_version = v["version"].as_i64().unwrap();
     let mut ctx = PlanCtx::new(&mut vars, es::new_expr_context(Vec::new()));
 
-    let mut reader_size: Option<String> = None;
+    let mut reader_size: Option<Value> = None;
     let root: PhysicalPlanRef = if c["point"].as_bool().unwrap() {
         let tbl = table(c["temp"].as_bool().unwrap(), false, false, &[TypeLonglong]);
         let cols: Vec<Arc<Column>> = c["point_cols"]
@@ -353,68 +399,17 @@ fn plan(c: &Value) -> Result<Value, Error> {
                 ..Default::default()
             }))
         };
-        let ranges = c["ranges"]
+        let ranges: Vec<_> = c["ranges"]
             .as_array()
             .map(|a| a.iter().map(|r| range(r.as_str().unwrap())).collect())
             .unwrap_or_default();
         let store = StoreType(c["store"].as_u64().unwrap() as _);
         let schema_n = c["schema_n"].as_u64().unwrap() as usize;
         let is_index = c["index"].as_bool().unwrap_or(false);
-        let mut cur: PhysicalPlanRef = if is_index {
-            let idx_cols: Vec<IndexColumn> = (0..schema_n)
-                .map(|i| IndexColumn {
-                    offset: i as isize,
-                    length: UnspecifiedLength,
-                    ..Default::default()
-                })
-                .collect();
-            let idx = Arc::new(IndexInfo {
-                id: 1,
-                name: CIStr::new("idx"),
-                columns: Some(idx_cols),
-                unique: c["unique"].as_bool().unwrap_or(false),
-                ..Default::default()
-            });
-            let mut is = PhysicalIndexScan {
-                table: Arc::new(tbl),
-                index: idx,
-                desc: c["desc"].as_bool().unwrap(),
-                ranges,
-                data_source_schema: Some(new_schema(tbl_cols[..schema_n].to_vec())),
-                tbl_col_hists: Some(Arc::clone(&hist)),
-                ..Default::default()
-            }
-            .init(&ctx, 0);
-            is.set_schema(new_schema(tbl_cols[..schema_n].to_vec()));
-            is.set_stats(stats(&c["scan_rows"]));
-            Arc::new(is)
-        } else {
-            let mut ts = PhysicalTableScan {
-                table: Arc::new(tbl),
-                store_type: store,
-                desc: c["desc"].as_bool().unwrap(),
-                ranges,
-                tbl_cols: tbl_cols.clone(),
-                tbl_col_hists: Some(Arc::clone(&hist)),
-                ..Default::default()
-            }
-            .init(&ctx, 0);
-            ts.set_schema(new_schema(tbl_cols[..schema_n].to_vec()));
-            ts.set_stats(stats(&c["scan_rows"]));
-            ts.set_is_child_of_index_look_up(c["lookup"].as_bool().unwrap());
-            if c["range_info"].as_bool().unwrap() {
-                ts.range_info = "range decided by [eq(test.t.a, 1)]".to_owned();
-            }
-            if c["part_conds"].as_bool().unwrap() {
-                ts.plan_part_info = Some(Arc::new(PhysPlanPartInfo {
-                    pruning_conds: vec![Arc::new(Expr::Constant(
-                        tidb_expression::constant::new_one(),
-                    ))],
-                    ..Default::default()
-                }));
-            }
-            Arc::new(ts)
-        };
+        let is_lookup_reader = c
+            .get("lookup_reader")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let build = |ctx: &mut PlanCtx<'_>, cur: PhysicalPlanRef, o: &Value| -> PhysicalPlanRef {
             let col = (*cur.schema().columns[0]).clone();
             let exprs: Vec<ExprRef> = o["exprs"]
@@ -488,33 +483,171 @@ fn plan(c: &Value) -> Result<Value, Error> {
             next.set_children(vec![cur]);
             Arc::from(next)
         };
-        for o in c["cop"].as_array().into_iter().flatten() {
-            cur = build(&mut ctx, cur, o);
-        }
-        if c["reader"].as_bool().unwrap() {
-            if is_index {
-                let mut reader = PhysicalIndexReader {
-                    index_plan: Some(cur),
+        let mut cur: PhysicalPlanRef = if is_lookup_reader {
+            let tbl_arc = Arc::new(tbl);
+            let idx_cols: Vec<IndexColumn> = (0..schema_n)
+                .map(|i| IndexColumn {
+                    offset: i as isize,
+                    length: UnspecifiedLength,
                     ..Default::default()
-                }
-                .init(&ctx, 0);
-                reader.set_stats(stats(&c["reader_rows"]));
-                reader_size = Some(f(reader.get_net_data_size(ctx.vars)));
-                cur = Arc::new(reader);
-            } else {
-                let mut reader = PhysicalTableReader {
-                    table_plan: Some(cur),
-                    store_type: store,
-                    ..Default::default()
-                }
-                .init(&ctx, 0);
-                reader.set_stats(stats(&c["reader_rows"]));
-                reader_size = Some(f(reader.get_avg_row_size(&ctx)));
-                cur = Arc::new(reader);
+                })
+                .collect();
+            let idx = Arc::new(IndexInfo {
+                id: 1,
+                name: CIStr::new("idx"),
+                columns: Some(idx_cols),
+                unique: c["unique"].as_bool().unwrap_or(false),
+                ..Default::default()
+            });
+            let mut is = PhysicalIndexScan {
+                table: Arc::clone(&tbl_arc),
+                index: idx,
+                desc: c["desc"].as_bool().unwrap(),
+                ranges: ranges.clone(),
+                data_source_schema: Some(new_schema(tbl_cols[..schema_n].to_vec())),
+                tbl_col_hists: Some(Arc::clone(&hist)),
+                ..Default::default()
             }
+            .init(&ctx, 0);
+            is.set_schema(new_schema(tbl_cols[..schema_n].to_vec()));
+            is.set_stats(stats(&c["scan_rows"]));
+            let mut idx_cur: PhysicalPlanRef = Arc::new(is);
+            for o in c["cop"].as_array().into_iter().flatten() {
+                idx_cur = build(&mut ctx, idx_cur, o);
+            }
+
+            let mut ts = PhysicalTableScan {
+                table: tbl_arc,
+                store_type: tidb_base::kv::TiKV,
+                desc: false,
+                ranges,
+                tbl_cols: tbl_cols.clone(),
+                tbl_col_hists: Some(Arc::clone(&hist)),
+                ..Default::default()
+            }
+            .init(&ctx, 0);
+            ts.set_schema(new_schema(tbl_cols));
+            ts.set_stats(stats(&c["table_rows"]));
+            ts.set_is_child_of_index_look_up(true);
+            let push_by = if c
+                .get("lookup_push_down")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                tidb_planner::util::path::INDEX_LOOK_UP_PUSH_DOWN_BY_SYS_VAR
+            } else {
+                tidb_planner::util::path::INDEX_LOOK_UP_PUSH_DOWN_NONE
+            };
+            let mut reader = tidb_planner::core::physical_plans::PhysicalIndexLookUpReader {
+                index_plan: Some(idx_cur),
+                table_plan: Some(Arc::new(ts)),
+                expected_cnt: c.get("expected_cnt").and_then(Value::as_u64).unwrap_or(0),
+                ..Default::default()
+            }
+            .init(&ctx, 0, push_by);
+            if c.get("has_pushed_limit")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                reader.pushed_limit = Some(tidb_planner::core::physical_plans::PushedDownLimit {
+                    offset: 0,
+                    count: c
+                        .get("pushed_limit_count")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                });
+            }
+            reader.set_stats(stats(&c["reader_rows"]));
+            reader_size = Some(json!([
+                f(reader.get_index_net_data_size(&ctx)),
+                f(reader.get_avg_table_row_size(&ctx))
+            ]));
+            Arc::new(reader)
         } else {
-            let _ = get_tbl_stats(cur.as_ref());
-        }
+            let mut cur: PhysicalPlanRef = if is_index {
+                let idx_cols: Vec<IndexColumn> = (0..schema_n)
+                    .map(|i| IndexColumn {
+                        offset: i as isize,
+                        length: UnspecifiedLength,
+                        ..Default::default()
+                    })
+                    .collect();
+                let idx = Arc::new(IndexInfo {
+                    id: 1,
+                    name: CIStr::new("idx"),
+                    columns: Some(idx_cols),
+                    unique: c["unique"].as_bool().unwrap_or(false),
+                    ..Default::default()
+                });
+                let mut is = PhysicalIndexScan {
+                    table: Arc::new(tbl),
+                    index: idx,
+                    desc: c["desc"].as_bool().unwrap(),
+                    ranges,
+                    data_source_schema: Some(new_schema(tbl_cols[..schema_n].to_vec())),
+                    tbl_col_hists: Some(Arc::clone(&hist)),
+                    ..Default::default()
+                }
+                .init(&ctx, 0);
+                is.set_schema(new_schema(tbl_cols[..schema_n].to_vec()));
+                is.set_stats(stats(&c["scan_rows"]));
+                Arc::new(is)
+            } else {
+                let mut ts = PhysicalTableScan {
+                    table: Arc::new(tbl),
+                    store_type: store,
+                    desc: c["desc"].as_bool().unwrap(),
+                    ranges,
+                    tbl_cols: tbl_cols.clone(),
+                    tbl_col_hists: Some(Arc::clone(&hist)),
+                    ..Default::default()
+                }
+                .init(&ctx, 0);
+                ts.set_schema(new_schema(tbl_cols[..schema_n].to_vec()));
+                ts.set_stats(stats(&c["scan_rows"]));
+                ts.set_is_child_of_index_look_up(c["lookup"].as_bool().unwrap());
+                if c["range_info"].as_bool().unwrap() {
+                    ts.range_info = "range decided by [eq(test.t.a, 1)]".to_owned();
+                }
+                if c["part_conds"].as_bool().unwrap() {
+                    ts.plan_part_info = Some(Arc::new(PhysPlanPartInfo {
+                        pruning_conds: vec![Arc::new(Expr::Constant(
+                            tidb_expression::constant::new_one(),
+                        ))],
+                        ..Default::default()
+                    }));
+                }
+                Arc::new(ts)
+            };
+            for o in c["cop"].as_array().into_iter().flatten() {
+                cur = build(&mut ctx, cur, o);
+            }
+            if c["reader"].as_bool().unwrap() {
+                if is_index {
+                    let mut reader = PhysicalIndexReader {
+                        index_plan: Some(cur),
+                        ..Default::default()
+                    }
+                    .init(&ctx, 0);
+                    reader.set_stats(stats(&c["reader_rows"]));
+                    reader_size = Some(json!(f(reader.get_net_data_size(ctx.vars))));
+                    cur = Arc::new(reader);
+                } else {
+                    let mut reader = PhysicalTableReader {
+                        table_plan: Some(cur),
+                        store_type: store,
+                        ..Default::default()
+                    }
+                    .init(&ctx, 0);
+                    reader.set_stats(stats(&c["reader_rows"]));
+                    reader_size = Some(json!(f(reader.get_avg_row_size(&ctx))));
+                    cur = Arc::new(reader);
+                }
+            } else {
+                let _ = get_tbl_stats(cur.as_ref());
+            }
+            cur
+        };
         for o in c["root"].as_array().into_iter().flatten() {
             cur = build(&mut ctx, cur, o);
         }
@@ -602,6 +735,20 @@ fn factor(args: &[Value]) -> Value {
             .init(&ctx, 0),
         )
     };
+    let lookup_reader = || -> PhysicalPlanRef {
+        Arc::new(
+            tidb_planner::core::physical_plans::PhysicalIndexLookUpReader {
+                index_plan: Some(Arc::clone(&is)),
+                table_plan: Some(Arc::clone(&ts)),
+                ..Default::default()
+            }
+            .init(
+                &ctx,
+                0,
+                tidb_planner::util::path::INDEX_LOOK_UP_PUSH_DOWN_NONE,
+            ),
+        )
+    };
     let sel = |child: PhysicalPlanRef| -> PhysicalPlanRef {
         let mut s = PhysicalSelection {
             conditions: vec![Arc::new(Expr::Column((*col).clone()))],
@@ -628,6 +775,8 @@ fn factor(args: &[Value]) -> Value {
         "ireader" => idx_reader(is),
         "sel_is" => sel(is),
         "sel_ireader" => sel(idx_reader(is)),
+        "lookup_reader" => lookup_reader(),
+        "sel_lookup_reader" => sel(lookup_reader()),
         "pg" => {
             let mut pg = PointGetPlan {
                 tbl_info: Arc::clone(&tbl),
@@ -897,4 +1046,100 @@ fn costing_shared_children_copies_no_node() {
     let mut other = Arc::clone(&shared);
     tidb_planner::make_mut_plan(&mut other);
     assert_eq!(tidb_planner::physicalop::clone_node_calls(), before + 1);
+
+    // Same zero-copy costing guarantee for shared IndexReader, IndexLookUpReader, and push-down
+    // LocalIndexLookUp subtrees (spec §13 item 3).
+    let tbl_info = Arc::new(table(false, true, false, &[TypeLonglong]));
+    let idx_info = Arc::new(IndexInfo {
+        id: 1,
+        name: CIStr::new("idx_k"),
+        columns: Some(vec![IndexColumn {
+            name: CIStr::new("c0"),
+            offset: 0,
+            length: UnspecifiedLength,
+            use_changing_type: false,
+        }]),
+        ..Default::default()
+    });
+    let mut is = PhysicalIndexScan {
+        table: Arc::clone(&tbl_info),
+        index: Arc::clone(&idx_info),
+        idx_cols: vec![Arc::clone(&col)],
+        idx_col_lens: vec![UnspecifiedLength],
+        tbl_col_hists: Some(Arc::new(HistColl::default())),
+        ranges: full_int_range(false),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    is.set_schema(new_schema(vec![Arc::clone(&col)]));
+    is.set_stats(st(20.0));
+    let is_ref: PhysicalPlanRef = Arc::new(is);
+
+    let mut ir = PhysicalIndexReader {
+        index_plan: Some(Arc::clone(&is_ref)),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    ir.set_stats(st(20.0));
+    let shared_ir: PhysicalPlanRef = Arc::new(ir);
+
+    let mut ts2 = PhysicalTableScan {
+        table: Arc::clone(&tbl_info),
+        tbl_cols: vec![Arc::clone(&col)],
+        tbl_col_hists: Some(Arc::new(HistColl::default())),
+        ranges: full_int_range(false),
+        ..Default::default()
+    }
+    .init(&ctx, 0);
+    ts2.set_schema(new_schema(vec![Arc::clone(&col)]));
+    ts2.set_stats(st(20.0));
+    let ts2_ref: PhysicalPlanRef = Arc::new(ts2);
+
+    let mut ilr = PhysicalIndexLookUpReader {
+        index_plan: Some(Arc::clone(&is_ref)),
+        table_plan: Some(Arc::clone(&ts2_ref)),
+        ..Default::default()
+    }
+    .init(
+        &ctx,
+        0,
+        tidb_planner::util::path::INDEX_LOOK_UP_PUSH_DOWN_NONE,
+    );
+    ilr.set_stats(st(20.0));
+    let shared_ilr: PhysicalPlanRef = Arc::new(ilr);
+
+    let mut ilr_push = PhysicalIndexLookUpReader {
+        index_plan: Some(Arc::clone(&is_ref)),
+        table_plan: Some(Arc::clone(&ts2_ref)),
+        ..Default::default()
+    }
+    .init(
+        &ctx,
+        0,
+        tidb_planner::util::path::INDEX_LOOK_UP_PUSH_DOWN_BY_SYS_VAR,
+    );
+    ilr_push.set_stats(st(20.0));
+    assert!(ilr_push.index_look_up_push_down);
+    let shared_ilr_push: PhysicalPlanRef = Arc::new(ilr_push);
+
+    let before_idx = tidb_planner::physicalop::clone_node_calls();
+    for shared_reader in [&shared_ir, &shared_ilr, &shared_ilr_push] {
+        let mut p1 = PhysicalLimit {
+            count: 5,
+            ..Default::default()
+        }
+        .init(&ctx, st(5.0), 0, Vec::new());
+        p1.set_children(vec![Arc::clone(shared_reader)]);
+        let mut p2 = PhysicalLimit {
+            count: 10,
+            ..Default::default()
+        }
+        .init(&ctx, st(10.0), 0, Vec::new());
+        p2.set_children(vec![Arc::clone(shared_reader)]);
+        let c1 = get_plan_cost(&ctx, &p1, rt, &opt).unwrap();
+        let c2 = get_plan_cost(&ctx, &p2, rt, &opt).unwrap();
+        let c3 = get_plan_cost(&ctx, &p1, rt, &recalc).unwrap();
+        assert!(c1 > 0.0 && c2 > 0.0 && c3 > 0.0);
+    }
+    assert_eq!(tidb_planner::physicalop::clone_node_calls(), before_idx);
 }

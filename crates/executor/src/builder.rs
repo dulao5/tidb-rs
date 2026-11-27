@@ -303,6 +303,22 @@ impl ExecutorBuilder {
                 );
                 return None;
             }
+            PhysicalKind::LocalIndexLookUp => {
+                self.err = Some(
+                    tidb_base::dbterror::exeerrors::ErrUnknownPlan.gen_with_stack(
+                        "Unknown Plan %T",
+                        vec![tidb_base::gofmt::Arg::Stringer(
+                            Vec::new(),
+                            "*core.PhysicalLocalIndexLookUp",
+                        )],
+                    ),
+                );
+                return None;
+            }
+            // glue: blocked-by:D12.1 (IndexLookUpExecutor is part 2C of D12.1; guard before D12.0 catchall and before any StatementContext mutation)
+            PhysicalKind::IndexLookUpReader => {
+                ("D12.1", "buildIndexLookUpReader (IndexLookUpExecutor)")
+            }
             _ => ("D12.0", "an executor for this plan"),
         };
         self.err = Some(blocked(block, what));
@@ -1778,11 +1794,25 @@ mod tests {
                 PhysicalKind::IndexScan,
                 "[executor:8114]Unknown Plan *core.PhysicalIndexScan",
             ),
+            (
+                PhysicalKind::LocalIndexLookUp,
+                "[executor:8114]Unknown Plan *core.PhysicalLocalIndexLookUp",
+            ),
         ] {
             let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
             assert!(b.build(&mut s, Some(&test_plan(kind))).await.is_none());
             assert_eq!(b.err.unwrap().to_string(), expected, "{kind:?}");
         }
+        let mut b = new_executor_builder(&s, None, Arc::new(TelemetryInfo::default()));
+        assert!(
+            b.build(&mut s, Some(&test_plan(PhysicalKind::IndexLookUpReader)))
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            tidb_base::blocked::blocked_by(&b.err.unwrap()),
+            Some("D12.1")
+        );
     }
 
     /// `buildSort` / `buildTopN` build the executor over the child's executor; both run (the

@@ -32,6 +32,7 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
@@ -42,7 +43,7 @@ use tidb_expression::util::{extract_cor_columns, extract_dependent_columns};
 use tidb_expression::{Column, CorrelatedColumn, ExprRef, Schema};
 use tidb_model::{
     ColumnInfo, EmptyColumnInfoSize, ExtraHandleID, ExtraPhysTblID, IndexInfo, TableInfo,
-    TableItemID,
+    TableItemID, new_extra_phys_tbl_id_col_info,
 };
 use tidb_parser::model::CIStr;
 use tidb_sessionctx::planctx::BuildPBContext;
@@ -51,13 +52,17 @@ use tidb_sessionctx::stmtctx::StatementContext;
 use tidb_statistics::HistColl;
 use tidb_types::context::Context as TypeContext;
 use tidb_types::field_name::NameSlice;
+use tidb_types::field_type::new_field_type;
 
 use crate::base::{PhysicalKind, PhysicalPlan};
-use crate::core::initialize::flatten_list_push_down_plan;
+use crate::core::initialize::{TypeLocalIndexLookUp, flatten_list_push_down_plan};
 use crate::core::plan_cost_ver1::get_tbl_stats;
 use crate::core::plan_to_pb::find_column_info_by_id;
+use crate::core::task::set_table_scan_to_table_row_id_scan;
 use crate::core::util::{PhysicalSchemaProducer, clone_physical_plan};
-use crate::physicalop::{BasePhysicalPlan, PhysicalPlanRef, base_physical_plan, make_mut_plan};
+use crate::physicalop::{
+    BasePhysicalPlan, PhysicalPlanRef, base_physical_plan, make_mut_plan, new_base_physical_plan,
+};
 use crate::planctx::PlanCtx;
 use crate::property::{PhysicalProperty, SortItem, TaskType};
 use crate::util::ByItems;
@@ -66,6 +71,9 @@ use crate::util::coreusage::extract_correlated_cols4_physical_plan;
 use crate::util::costusage::CostVer2;
 use crate::util::misc::{clone_col_infos, clone_cols, clone_exprs, clone_ranges};
 use crate::util::optimizetrace::{PhysicalOptimizeOp, PlanCostOption};
+use crate::util::path::{
+    INDEX_LOOK_UP_PUSH_DOWN_BY_HINT, INDEX_LOOK_UP_PUSH_DOWN_NONE, IndexLookUpPushDownByType,
+};
 
 /// `size.SizeOfSlice`.
 const SIZE_OF_SLICE: i64 = 24;
@@ -75,6 +83,8 @@ const SIZE_OF_POINTER: i64 = 8;
 const SIZE_OF_BOOL: i64 = 1;
 /// `size.SizeOfUint8`.
 const SIZE_OF_UINT8: i64 = 1;
+/// `size.SizeOfInt32`.
+const SIZE_OF_INT32: i64 = 4;
 /// `size.SizeOfUint64`.
 const SIZE_OF_UINT64: i64 = 8;
 /// `size.SizeOfInt64`.
@@ -563,6 +573,443 @@ impl PhysicalPlan for PhysicalIndexReader {
     fn explain_normalized_info(&self) -> String {
         crate::core::explain::explain_stub("PhysicalIndexReader.ExplainNormalizedInfo")
     }
+}
+
+/// PhysicalIndexLookUpReader is the index look up reader in tidb. It's used in case of double reading.
+#[derive(Debug, Default)]
+pub struct PhysicalIndexLookUpReader {
+    /// The embedded `physicalSchemaProducer`.
+    pub sp: PhysicalSchemaProducer,
+
+    /// IndexLookUpPushDown indicates whether the index look up is pushed down to TiKV.
+    pub index_look_up_push_down: bool,
+
+    /// indexPlan.
+    pub index_plan: Option<PhysicalPlanRef>,
+    /// tablePlan.
+    pub table_plan: Option<PhysicalPlanRef>,
+    /// IndexPlans flats the indexPlan to construct executor pb.
+    pub index_plans: Vec<PhysicalPlanRef>,
+    /// IndexPlansUnNatureOrders records the child->parent index mapping for tree push-down plans.
+    pub index_plans_un_nature_orders: HashMap<isize, isize>,
+    /// TablePlans flats the tablePlan to construct executor pb.
+    pub table_plans: Vec<PhysicalPlanRef>,
+
+    /// Paging indicates whether using paging API (sticky in Go's `GetPlanCostVer2`; protected by
+    /// `is_sealed()` under A3 §3.6, see #452).
+    // interior: (c)
+    pub paging: AtomicBool,
+
+    /// ExtraHandleCol is used to record the extra handle column needed for keep-order lookup.
+    pub extra_handle_col: Option<Arc<Column>>,
+    /// PushedLimit is used to avoid unnecessary table scan tasks of IndexLookUpReader.
+    pub pushed_limit: Option<PushedDownLimit>,
+
+    /// CommonHandleCols is used to record the common handle columns.
+    pub common_handle_cols: Vec<Arc<Column>>,
+
+    /// Used by partition table.
+    pub plan_part_info: Option<Arc<PhysPlanPartInfo>>,
+
+    /// expectedCnt.
+    pub expected_cnt: u64,
+
+    /// keepOrder is true, if sort data by index.
+    pub keep_order: bool,
+}
+
+impl Clone for PhysicalIndexLookUpReader {
+    // glue: N1 structural copy (clone_node) for AtomicBool field
+    fn clone(&self) -> Self {
+        Self {
+            sp: self.sp.clone(),
+            index_look_up_push_down: self.index_look_up_push_down,
+            index_plan: self.index_plan.clone(),
+            table_plan: self.table_plan.clone(),
+            index_plans: self.index_plans.clone(),
+            index_plans_un_nature_orders: self.index_plans_un_nature_orders.clone(),
+            table_plans: self.table_plans.clone(),
+            paging: AtomicBool::new(self.paging.load(Ordering::Relaxed)),
+            extra_handle_col: self.extra_handle_col.clone(),
+            pushed_limit: self.pushed_limit,
+            common_handle_cols: self.common_handle_cols.clone(),
+            plan_part_info: self.plan_part_info.clone(),
+            expected_cnt: self.expected_cnt,
+            keep_order: self.keep_order,
+        }
+    }
+}
+
+impl PhysicalIndexLookUpReader {
+    /// GetIndexNetDataSize return the estimated total size in bytes via network transfer.
+    // go: PhysicalIndexLookUpReader.GetIndexNetDataSize L1 [M-CTX]
+    pub fn get_index_net_data_size(&self, ctx: &PlanCtx<'_>) -> f64 {
+        let index_plan = self
+            .index_plan
+            .as_deref()
+            .expect("runtime error: invalid memory address or nil pointer dereference");
+        let default_coll = HistColl::default();
+        let tbl_stats = get_tbl_stats(index_plan);
+        let coll = tbl_stats.map_or(&default_coll, |v| &**v);
+        crate::cardinality::row_size::get_avg_row_size(
+            ctx,
+            coll,
+            &index_plan.schema().columns,
+            true,
+            false,
+        ) * index_plan.stats_count()
+    }
+
+    /// GetAvgTableRowSize return the average row size of each final row.
+    // go: PhysicalIndexLookUpReader.GetAvgTableRowSize L1 [M-CTX]
+    pub fn get_avg_table_row_size(&self, ctx: &PlanCtx<'_>) -> f64 {
+        let table_plan = self
+            .table_plan
+            .as_deref()
+            .expect("runtime error: invalid memory address or nil pointer dereference");
+        let default_coll = HistColl::default();
+        let tbl_stats = get_tbl_stats(table_plan);
+        let coll = tbl_stats.map_or(&default_coll, |v| &**v);
+        crate::cardinality::row_size::get_avg_row_size(
+            ctx,
+            coll,
+            &table_plan.schema().columns,
+            false,
+            false,
+        )
+    }
+
+    /// LoadTableStats preloads the stats data for the physical table.
+    // glue: stub of PhysicalIndexLookUpReader.LoadTableStats, blocked-by:D10.2 (loadTableStats of stats.go, the sync stats load of FindBestTask)
+    pub fn load_table_stats(&self) -> Result<(), Error> {
+        Err(blocked(
+            "D10.2",
+            "PhysicalIndexLookUpReader.LoadTableStats (loadTableStats)",
+        ))
+    }
+
+    /// tryPushDownLookUp tries to push down the index lookup to TiKV.
+    // go: PhysicalIndexLookUpReader.tryPushDownLookUp L1 [M-CTX]
+    pub fn try_push_down_look_up(&mut self, ctx: &PlanCtx<'_>, tp: IndexLookUpPushDownByType) {
+        debug_assert!(!self.index_look_up_push_down);
+        if tp == INDEX_LOOK_UP_PUSH_DOWN_NONE {
+            // util.IndexLookUpPushDownNone indicates no index lookup push-down.
+            return;
+        }
+
+        if self.keep_order {
+            // Though most of the index-lookup push-down constraints should be checked in
+            // `checkIndexLookUpPushDownSupported` if possible,
+            // however, the keep order cannot be determined until the final plan is constructed.
+            // So we have to check the keep order here, and if it is required, we should not push down it and use
+            // the normal index-lookup instead.
+            if tp == INDEX_LOOK_UP_PUSH_DOWN_BY_HINT {
+                // only append warning when the push-down is forced by hint.
+                ctx.vars.stmt_ctx().set_hint_warning(
+                    "hint INDEX_LOOKUP_PUSHDOWN is inapplicable, keep order is not supported.",
+                );
+            }
+            return;
+        }
+
+        let index_plan = Arc::clone(
+            self.index_plan
+                .as_ref()
+                .expect("runtime error: invalid memory address or nil pointer dereference"),
+        );
+        let table_plan = self
+            .table_plan
+            .as_ref()
+            .expect("runtime error: invalid memory address or nil pointer dereference");
+        let index_look_up_plan = match build_push_down_index_look_up_plan(
+            ctx,
+            index_plan,
+            table_plan,
+            !self.common_handle_cols.is_empty(),
+        ) {
+            Ok(p) => p,
+            Err(err) => {
+                // This should not happen, but if it happens, we just log a warning and continue to use the original plan.
+                log::warn!("try to push down index lookup failed: {err}");
+                return;
+            }
+        };
+        let new_stats = index_look_up_plan.stats_info().map(Arc::clone);
+        self.index_plan = Some(index_look_up_plan);
+        // Currently, it's hard to estimate how many rows can be looked up locally when push-down.
+        // So we just use the row count as 0 of tablePlan in TiDB side which displays all lookup
+        // can be performed in the TiKV side.
+        reset_row_count_as_zero_recursively(
+            self.table_plan
+                .as_mut()
+                .expect("runtime error: invalid memory address or nil pointer dereference"),
+        );
+        // The status info of IndexLookupReader should be the same as indexPlan in the push-down mode if
+        // all lookup can be performed in the TiKV side.
+        self.set_stats(new_stats);
+        self.index_look_up_push_down = true;
+    }
+}
+
+impl PhysicalPlan for PhysicalIndexLookUpReader {
+    crate::physical_plan_boilerplate!(IndexLookUpReader, sp);
+
+    /// `ResolveIndices` (`resolve_indices.go`).
+    // glue: dispatch (Go PhysicalIndexLookUpReader.ResolveIndices, ported in core/resolve_indices.rs)
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        PhysicalIndexLookUpReader::resolve_indices(self, ctx)
+    }
+
+    /// CloneForPlanCache of the instance plan cache: the children, index plan, and table plan must
+    /// be cacheable (A3 spec §3.3).
+    // glue: A3 spec §3.3 (whether Go's PhysicalIndexLookUpReader.CloneForPlanCache succeeds; nothing is cloned)
+    fn instance_cacheable(&self) -> bool {
+        crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+            && self
+                .index_plan
+                .as_ref()
+                .is_none_or(|p| p.instance_cacheable())
+            && self
+                .table_plan
+                .as_ref()
+                .is_none_or(|p| p.instance_cacheable())
+    }
+
+    /// `GetPlanCostVer2` (`plan_cost_ver2.go`).
+    // glue: dispatch (Go PhysicalIndexLookUpReader.GetPlanCostVer2, ported in core/plan_cost_ver2.rs)
+    fn get_plan_cost_ver2(
+        &self,
+        ctx: &PlanCtx<'_>,
+        task_type: TaskType,
+        option: &PlanCostOption,
+    ) -> Result<CostVer2, Error> {
+        PhysicalIndexLookUpReader::get_plan_cost_ver2(self, ctx, task_type, option)
+    }
+
+    /// MemoryUsage return the memory usage of PhysicalIndexLookUpReader.
+    // go: PhysicalIndexLookUpReader.MemoryUsage L1
+    fn memory_usage(&self) -> i64 {
+        let mut sum = self.sp.memory_usage()
+            + SIZE_OF_BOOL * 3
+            + PhysPlanPartInfo::memory_usage(self.plan_part_info.as_deref())
+            + SIZE_OF_UINT64
+            + SIZE_OF_INT * (self.index_plans_un_nature_orders.len() as i64);
+        if let Some(p) = &self.index_plan {
+            sum += p.memory_usage();
+        }
+        if let Some(p) = &self.table_plan {
+            sum += p.memory_usage();
+        }
+        if let Some(col) = &self.extra_handle_col {
+            sum += col.memory_usage();
+        }
+        if let Some(lim) = &self.pushed_limit {
+            sum += PushedDownLimit::memory_usage(Some(lim));
+        }
+        // since IndexPlans and TablePlans are the flats of indexPlan and tablePlan, so we don't count it
+        for col in &self.common_handle_cols {
+            sum += col.memory_usage();
+        }
+        sum
+    }
+
+    /// Clone implements op.PhysicalPlan interface.
+    // go: PhysicalIndexLookUpReader.Clone L1 [M-CTX]
+    fn clone_plan(&self) -> Result<PhysicalPlanRef, Error> {
+        let sp = self.sp.clone_with_self()?;
+        let index_plans_un_nature_orders = self.index_plans_un_nature_orders.clone();
+        let index_plans = clone_physical_plan(&self.index_plans)?;
+        let table_plans = clone_physical_plan(&self.table_plans)?;
+        let index_plan = self
+            .index_plan
+            .as_ref()
+            .expect("runtime error: invalid memory address or nil pointer dereference")
+            .clone_plan()?;
+        let table_plan = self
+            .table_plan
+            .as_ref()
+            .expect("runtime error: invalid memory address or nil pointer dereference")
+            .clone_plan()?;
+        let extra_handle_col = self
+            .extra_handle_col
+            .as_ref()
+            .map(|c| Arc::new(Column::clone(c)));
+        let pushed_limit = PushedDownLimit::clone_limit(self.pushed_limit.as_ref());
+        let common_handle_cols = if self.common_handle_cols.is_empty() {
+            Vec::new()
+        } else {
+            clone_cols(&self.common_handle_cols)
+        };
+        let cloned = PhysicalIndexLookUpReader {
+            sp,
+            index_look_up_push_down: self.index_look_up_push_down,
+            index_plan: Some(index_plan),
+            table_plan: Some(table_plan),
+            index_plans,
+            index_plans_un_nature_orders,
+            table_plans,
+            paging: AtomicBool::new(false),
+            extra_handle_col,
+            pushed_limit,
+            common_handle_cols,
+            plan_part_info: None,
+            expected_cnt: 0,
+            keep_order: false,
+        };
+        Ok(Arc::new(cloned))
+    }
+
+    /// ExtractCorrelatedCols implements op.PhysicalPlan interface.
+    // go: PhysicalIndexLookUpReader.ExtractCorrelatedCols L1
+    fn extract_correlated_cols(&self) -> Vec<Arc<CorrelatedColumn>> {
+        let mut cor_cols = Vec::new();
+        for child in &self.table_plans {
+            cor_cols.extend(extract_correlated_cols4_physical_plan(child.as_ref()));
+        }
+        for child in &self.index_plans {
+            cor_cols.extend(extract_correlated_cols4_physical_plan(child.as_ref()));
+        }
+        cor_cols
+    }
+
+    /// BuildPlanTrace implements op.PhysicalPlan interface.
+    // go: PhysicalIndexLookUpReader.BuildPlanTrace L1 [M-SELF]
+    fn build_plan_trace(&self) -> PlanTrace {
+        let mut rp = base_physical_plan::build_plan_trace(self);
+        if let Some(index_plan) = &self.index_plan {
+            rp.children.push(index_plan.build_plan_trace());
+        }
+        if let Some(table_plan) = &self.table_plan {
+            rp.children.push(table_plan.build_plan_trace());
+        }
+        rp
+    }
+
+    /// AppendChildCandidate implements PhysicalPlan interface.
+    // go: PhysicalIndexLookUpReader.AppendChildCandidate L1 [M-SELF]
+    fn append_child_candidate(&self, op: &PhysicalOptimizeOp) {
+        base_physical_plan::append_child_candidate(self, op);
+        if let Some(index_plan) = &self.index_plan {
+            append_child_candidate(self, index_plan.as_ref(), op);
+        }
+        if let Some(table_plan) = &self.table_plan {
+            append_child_candidate(self, table_plan.as_ref(), op);
+        }
+    }
+
+    /// ExplainInfo implements Plan interface.
+    // glue: dispatch (Go PhysicalIndexLookUpReader.ExplainInfo, explain.go: a boundary stub of block D10.9)
+    fn explain_info(&self) -> String {
+        crate::core::explain::explain_stub("PhysicalIndexLookUpReader.ExplainInfo")
+    }
+}
+
+/// PhysicalLocalIndexLookUp is the local index look up operator pushed down to TiKV.
+/// It contains two parts: indexPlan and tablePlan.
+#[derive(Clone, Debug, Default)]
+pub struct PhysicalLocalIndexLookUp {
+    /// The embedded `physicalSchemaProducer`.
+    pub sp: PhysicalSchemaProducer,
+    /// Handle offsets in the indexPlan's output schema.
+    pub index_handle_offsets: Vec<u32>,
+}
+
+/// `unsafe.Sizeof(PhysicalLocalIndexLookUp{}) - unsafe.Sizeof(physicalSchemaProducer{})` on 64-bit
+/// Go (`216 - 192 = 24`, the slice header of `IndexHandleOffsets`).
+const PHYSICAL_LOCAL_INDEX_LOOKUP_STRUCT_SIZE: i64 = SIZE_OF_SLICE;
+
+impl PhysicalLocalIndexLookUp {
+    /// Init initializes PhysicalLocalIndexLookUp.
+    // go: PhysicalLocalIndexLookUp.Init L1 [M-SELF, M-CTX]
+    pub fn init(
+        mut self,
+        ctx: &PlanCtx<'_>,
+        index_plan: PhysicalPlanRef,
+        mut table_scan: PhysicalTableScan,
+        offset: isize,
+    ) -> PhysicalLocalIndexLookUp {
+        self.sp.base = new_base_physical_plan(ctx, TypeLocalIndexLookUp, offset);
+        table_scan.set_is_child_of_index_look_up(true);
+        let stats = table_scan.stats_info().map(Arc::clone);
+        let schema = table_scan.schema().clone_schema();
+        let table_scan_ref: PhysicalPlanRef = Arc::new(table_scan);
+        self.set_children(vec![index_plan, table_scan_ref]);
+        self.set_stats(stats);
+        self.set_schema(schema);
+        self
+    }
+}
+
+impl PhysicalPlan for PhysicalLocalIndexLookUp {
+    crate::physical_plan_boilerplate!(LocalIndexLookUp, sp);
+
+    /// `ResolveIndices` (inherits `BasePhysicalPlan.ResolveIndices`, plus N1 §3.3 schema sync
+    /// from `children[1]`, ported in `core/resolve_indices.rs`).
+    // glue: dispatch (Go PhysicalLocalIndexLookUp inherits BasePhysicalPlan.ResolveIndices)
+    fn resolve_indices(&mut self, ctx: &PlanCtx<'_>) -> Result<(), Error> {
+        PhysicalLocalIndexLookUp::resolve_indices(self, ctx)
+    }
+
+    /// `ToPB` (`physical_plans.go:3204`, ported in `core/plan_to_pb.rs`).
+    // glue: dispatch (Go PhysicalLocalIndexLookUp.ToPB, ported in core/plan_to_pb.rs)
+    fn to_pb(&self, ctx: &BuildPBContext, store_type: StoreType) -> Result<tipb::Executor, Error> {
+        PhysicalLocalIndexLookUp::to_pb(self, ctx, store_type)
+    }
+
+    /// ExplainInfo implements PhysicalPlan ExplainInfo interface.
+    // go: PhysicalLocalIndexLookUp.ExplainInfo L1
+    fn explain_info(&self) -> String {
+        let offsets = self
+            .index_handle_offsets
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("index handle offsets:[{offsets}]")
+    }
+
+    // glue: A3 instance plan cache admissibility for PhysicalLocalIndexLookUp
+    fn instance_cacheable(&self) -> bool {
+        crate::core::plan_cache_heap_size::children_instance_cacheable(self)
+    }
+
+    /// MemoryUsage return the memory usage of PhysicalLocalIndexLookUp.
+    // go: PhysicalLocalIndexLookUp.MemoryUsage L1
+    fn memory_usage(&self) -> i64 {
+        self.sp.memory_usage()
+            + PHYSICAL_LOCAL_INDEX_LOOKUP_STRUCT_SIZE
+            + SIZE_OF_INT32 * (self.index_handle_offsets.len() as i64)
+    }
+
+    /// Clone implements op.PhysicalPlan interface.
+    // go: PhysicalLocalIndexLookUp.Clone L1 [M-CTX]
+    fn clone_plan(&self) -> Result<PhysicalPlanRef, Error> {
+        let sp = self.sp.clone_with_self()?;
+        Ok(Arc::new(PhysicalLocalIndexLookUp {
+            sp,
+            index_handle_offsets: self.index_handle_offsets.clone(),
+        }))
+    }
+}
+
+/// AddExtraPhysTblIDColumn appends the extra physical table ID column if not already present.
+// go: AddExtraPhysTblIDColumn L1 [M-CTX]
+pub fn add_extra_phys_tbl_id_column(
+    ctx: &PlanCtx<'_>,
+    mut columns: Vec<Arc<ColumnInfo>>,
+    mut schema: Schema,
+) -> (Vec<Arc<ColumnInfo>>, Schema, bool) {
+    if find_column_info_by_id(&columns, ExtraPhysTblID as i64).is_some() {
+        return (columns, schema, false);
+    }
+    columns.push(Arc::new(new_extra_phys_tbl_id_col_info()));
+    schema.append([Arc::new(Column {
+        ret_type: Arc::new(new_field_type(tidb_base::mysql::TypeLonglong)),
+        unique_id: ctx.vars.alloc_plan_column_id(),
+        id: ExtraPhysTblID as i64,
+        ..Default::default()
+    })]);
+    (columns, schema, true)
 }
 
 /// PhysicalIndexScan represents an index scan plan.
@@ -1769,7 +2216,19 @@ pub fn collect_plan_stats_version(plan: &dyn PhysicalPlan, stats_infos: &mut Has
                 stats_infos,
             );
         }
-        // *PhysicalIndexLookUpReader: part 2B.
+        PhysicalKind::IndexLookUpReader => {
+            let cop_plan = plan
+                .as_any()
+                .downcast_ref::<PhysicalIndexLookUpReader>()
+                .expect("PhysicalIndexLookUpReader");
+            collect_plan_stats_version(
+                cop_plan
+                    .index_plan
+                    .as_deref()
+                    .expect("runtime error: invalid memory address or nil pointer dereference"),
+                stats_infos,
+            );
+        }
         PhysicalKind::IndexScan => {
             let cop_plan = plan
                 .as_any()
@@ -1865,14 +2324,98 @@ pub fn reset_plan_id_recursively(ctx: &PlanCtx<'_>, p: &mut PhysicalPlanRef) {
     });
 }
 
-/// `detachRootTableScanPlan` returns Go's pointer to the parent of the leaf scan after
-/// emptying its children; only the index lookup push down (`buildPushDownIndexLookUpPlan`,
-/// outside the first slice) calls it, and a pointer into a shared `Arc` tree needs a design
-/// of its own.
-// glue: stub of detachRootTableScanPlan, blocked-by:D10.1 (the index lookup push down is outside the first slice)
-pub fn detach_root_table_scan_plan() -> Result<(), Error> {
-    Err(blocked(
-        "D10.1",
-        "detachRootTableScanPlan (the index lookup push down)",
-    ))
+/// `buildPushDownIndexLookUpPlan` clones `table_plan`, resets its plan IDs, computes the handle
+/// column offset in `index_plan`'s schema (empty for common handle), and replaces the leaf
+/// `PhysicalTableScan` in place via [`replace_leaf_table_scan_with_local_lookup`].
+// go: buildPushDownIndexLookUpPlan L2 (N1 §3.4 pure Arc leaf replacement instead of detachRootTableScanPlan mutable parent pointer)
+pub fn build_push_down_index_look_up_plan(
+    ctx: &PlanCtx<'_>,
+    index_plan: PhysicalPlanRef,
+    table_plan: &PhysicalPlanRef,
+    is_common_handle: bool,
+) -> Result<PhysicalPlanRef, Error> {
+    let mut cloned_table_plan = table_plan.clone_plan()?;
+    reset_plan_id_recursively(ctx, &mut cloned_table_plan);
+
+    let mut index_handle_offsets: Vec<u32> = Vec::new();
+    if !is_common_handle {
+        // - If common handle, we don't need to set the indexHandleOffsets to build the common handle key
+        // which can be read from the index value directly.
+        // - If int handle, it is the last column in the index schema.
+        //   - If the last column is ExtraHandleID, or a non-negative column ID, handle is the last column.
+        //   - Otherwise, we need to find the last column whose ID is not ExtraHandleID and is negative.
+        //     For example, when a partition table needs to append ExtraPhysTblID
+        //     to the end for the upper UnionScanExec.
+        let mut offset = index_plan.schema().len() as isize - 1;
+        while offset >= 0 {
+            let col = &index_plan.schema().columns[offset as usize];
+            if col.id >= 0 || col.id == ExtraHandleID as i64 {
+                break;
+            }
+            offset -= 1;
+        }
+        if offset < 0 {
+            return Err(errors::new("cannot find handle column in index schema"));
+        }
+        index_handle_offsets = vec![offset as u32];
+    }
+
+    let qb_offset = cloned_table_plan.query_block_offset();
+    replace_leaf_table_scan_with_local_lookup(
+        ctx,
+        &mut cloned_table_plan,
+        index_plan,
+        index_handle_offsets,
+        qb_offset,
+    )?;
+    Ok(cloned_table_plan)
+}
+
+/// Pure `Arc` replacement for Go's `detachRootTableScanPlan` + parent re-attachment (N1 §3.4):
+/// walks down `children[0]` to the leaf `PhysicalTableScan` and replaces it with
+/// `PhysicalLocalIndexLookUp` in place without aliasing a detached parent pointer.
+///
+/// Follows Go production behavior (`intest.Assert` is a no-op in release): on a multi-child node
+/// continues along `children[0]`; on a non-`PhysicalTableScan` leaf returns an `Err` rather than
+/// panicking in release.
+// go: detachRootTableScanPlan L2 (N1 §3.4 recursive Arc leaf replacement)
+fn replace_leaf_table_scan_with_local_lookup(
+    ctx: &PlanCtx<'_>,
+    p: &mut PhysicalPlanRef,
+    index_plan: PhysicalPlanRef,
+    index_handle_offsets: Vec<u32>,
+    qb_offset: isize,
+) -> Result<(), Error> {
+    if p.children().is_empty() {
+        let Some(ts) = p.as_any().downcast_ref::<PhysicalTableScan>() else {
+            return Err(errors::new(
+                "expected PhysicalTableScan at leaf of tablePlan for index lookup push down",
+            ));
+        };
+        let mut table_scan_owned = ts.clone();
+        // Set on the leaf before wrapping into LocalIndexLookUp (same as Init calling setTableScanToTableRowIDScan).
+        let mut ts_ref: PhysicalPlanRef = Arc::new(table_scan_owned);
+        set_table_scan_to_table_row_id_scan(&mut ts_ref);
+        table_scan_owned = ts_ref
+            .as_any()
+            .downcast_ref::<PhysicalTableScan>()
+            .expect("PhysicalTableScan")
+            .clone();
+        let local_lookup = PhysicalLocalIndexLookUp {
+            index_handle_offsets,
+            ..Default::default()
+        }
+        .init(ctx, index_plan, table_scan_owned, qb_offset);
+        *p = Arc::new(local_lookup);
+        return Ok(());
+    }
+    debug_assert_eq!(p.children().len(), 1);
+    let child_mut = &mut make_mut_plan(p).children_mut()[0];
+    replace_leaf_table_scan_with_local_lookup(
+        ctx,
+        child_mut,
+        index_plan,
+        index_handle_offsets,
+        qb_offset,
+    )
 }

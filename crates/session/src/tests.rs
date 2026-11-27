@@ -3584,16 +3584,88 @@ fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
     assert_eq!(got, vec![20, 30, 40]);
     assert!(s.is_idle(), "{}", s.state_snapshot());
 
-    // Unported double-read (needs column c not in index k_1) stops before any executor opens
-    // without mutating StatementContext.
-    let double_read_sql = "SELECT c FROM sbtest1 WHERE k BETWEEN 20 AND 40";
+    // Double-read IndexLookUp query (needs column c not in index k_1): planned as
+    // Projection(PhysicalIndexLookUpReader) in D10.2 part 2B, stops cleanly at
+    // executor/builder.rs `blocked-by:D12.1` before any executor opens and without
+    // mutating StatementContext.
+    let double_read_sql = "SELECT c FROM sbtest1 WHERE k = 20";
+    {
+        block_on(s.finish_unfinished_stmt());
+        block_on(s.core.prepare_txn_ctx()).unwrap();
+        let node = parse(double_read_sql);
+        reset_context_of_stmt(&mut s.core, &node, double_read_sql).unwrap();
+        s.core
+            .txn_manager
+            .on_stmt_start(&mut s.core.sctx, Some(&node))
+            .unwrap();
+        let stmt = tidb_executor::compiler::Compiler
+            .compile(&mut s.core, node, double_read_sql)
+            .unwrap_or_else(|e| panic!("{double_read_sql}: {e}"));
+        let plan = stmt.plan.as_ref().expect("compiled plan");
+        let has_lookup = plan.kind() == PhysicalKind::IndexLookUpReader
+            || plan
+                .children()
+                .iter()
+                .any(|c| c.kind() == PhysicalKind::IndexLookUpReader);
+        assert!(
+            has_lookup,
+            "expected IndexLookUpReader, got {:?}",
+            plan.kind()
+        );
+        let warnings_before = s.vars().stmt_ctx().warning_count();
+        let table_ids_before = s.vars().stmt_ctx().related_table_ids.clone();
+        let mut b = tidb_executor::builder::new_executor_builder(
+            &s.core,
+            None,
+            Arc::new(tidb_executor::adapter::TelemetryInfo::default()),
+        );
+        assert!(block_on(b.build(&mut s.core, Some(plan))).is_none());
+        let err = b.err.expect("executor boundary error");
+        assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
+        assert_eq!(s.vars().stmt_ctx().warning_count(), warnings_before);
+        assert_eq!(s.vars().stmt_ctx().related_table_ids, table_ids_before);
+        assert!(!s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed));
+        assert!(s.vars().stmt_ctx().index_names.is_empty());
+        s.core.rollback_on_error();
+        s.core.txn_manager.on_stmt_end();
+        assert!(s.is_idle(), "{}", s.state_snapshot());
+    }
     let err = block_on(s.execute_stmt(parse(double_read_sql), double_read_sql))
         .err()
         .unwrap();
-    assert!(blocked_by(&err).is_some(), "{err}");
+    assert_eq!(blocked_by(&err), Some("D12.1"), "{err}");
     assert!(!s.vars().stmt_ctx().is_tikv.load(Ordering::Relaxed));
     assert!(s.vars().stmt_ctx().index_names.is_empty());
     assert!(s.is_idle(), "{}", s.state_snapshot());
+
+    // Pinned field-by-field against Go TiDB v8.5.8 COM_STMT_PREPARE metadata for a
+    // double-read IndexLookUp query on sbtest1 (`SELECT c FROM sbtest1 WHERE k BETWEEN ? AND ?`):
+    //   num_params=2, num_cols=1
+    //   col[0]: schema=test, table=sbtest1, org_table=sbtest1, name=c, org_name=c,
+    //           type=254 (TypeString), flen=120, decimal=0, flags=1 (NotNullFlag),
+    //           charset=utf8mb4, collate=utf8mb4_bin.
+    {
+        let _serial = PREPARED_COUNT.lock();
+        let info =
+            block_on(s.prepare_stmt("SELECT c FROM sbtest1 WHERE k BETWEEN ? AND ?")).unwrap();
+        assert_eq!(info.param_count, 2);
+        assert_eq!(info.fields.len(), 1);
+        let f = &info.fields[0];
+        assert_eq!(f.db_name.o, "test");
+        assert_eq!(f.table_name.o, "sbtest1");
+        assert_eq!(f.table_as_name.o, "sbtest1");
+        assert_eq!(f.column_name.o, "c");
+        assert_eq!(f.column_as_name.o, "c");
+        assert_eq!(f.column_type.get_type(), 254);
+        assert_eq!(f.column_type.get_flag(), 1);
+        assert_eq!(f.column_type.get_flen(), 120);
+        assert_eq!(f.column_type.get_decimal(), 0);
+        assert_eq!(f.column_type.get_charset(), "utf8mb4");
+        assert_eq!(f.column_type.get_collate(), "utf8mb4_bin");
+        s.drop_prepared_stmt(info.stmt_id).unwrap();
+        s.clean_closed_prepared_stmts();
+        assert!(s.is_idle(), "{}", s.state_snapshot());
+    }
 }
 
 /// Multi-group `GroupRangesByCols` on a clustered common-handle `TableReader` produces
