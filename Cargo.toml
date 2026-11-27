@@ -209,6 +209,11 @@ raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 # Parser table generation runs in build.rs; unoptimised it is very slow.
 opt-level = 3
 
+[profile.release]
+# Keep line tables in release builds so Backtrace / errorVerbose frames include `\n\t<file>:<line>`
+# as required by specs/D00.3-logging/spec.md §2.1.
+debug = "line-tables-only"
+
 [profile.release.build-override]
 opt-level = 3
 

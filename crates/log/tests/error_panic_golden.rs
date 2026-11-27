@@ -372,3 +372,27 @@ fn matrix2_unhandled_panic_subprocess_single_line() {
         "stderr must not contain raw multiline backtrace:\n{stderr}"
     );
 }
+
+/// Regression test for #462 live release check: `Error::error_verbose` / `format_backtrace_frames`
+/// MUST include Go-style `\n\t<file>:<line>` locations (including in `--release`, guaranteed by
+/// `[profile.release] debug = "line-tables-only"` in Cargo.toml, spec §2.1).
+#[test]
+fn error_stack_frames_include_file_and_line() {
+    let err = errors::new("BIGINT value is out of range");
+    let verbose = String::from_utf8(err.error_verbose()).unwrap();
+    let loc_lines: Vec<&str> = verbose.lines().filter(|l| l.starts_with('\t')).collect();
+    assert!(
+        !loc_lines.is_empty(),
+        "stack trace must contain \\t<file>:<line> lines (check release debuginfo):\n{verbose}"
+    );
+    assert!(
+        loc_lines.iter().any(|l| {
+            let trimmed = l.trim_start_matches('\t');
+            trimmed.contains(".rs:")
+                && trimmed.rsplit_once(':').is_some_and(|(_, line)| {
+                    !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit())
+                })
+        }),
+        "expected at least one .rs:<line> frame location:\n{verbose}"
+    );
+}

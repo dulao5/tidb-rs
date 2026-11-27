@@ -58,6 +58,7 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
         }
         Err(e) => warn!(error = %e, "status server address unknown"),
     }
+    let local_addr = listener.local_addr().ok();
     let info = Arc::new(info);
     let mut conns = JoinSet::new();
     tokio::pin!(shutdown);
@@ -97,10 +98,15 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
     }
     conns.shutdown().await;
     // Emit the three Go status/RPC shutdown WARNs (pkg/server/http_status.go:535,540,545,
-    // spec §4.2) when the status/gRPC server stops.
+    // spec §4.2) when the status/gRPC server stops. Match Go's `net.OpError` format:
+    // `accept tcp <addr>: use of closed network connection`.
+    let accept_err = match local_addr {
+        Some(addr) => format!("accept tcp {addr}: use of closed network connection"),
+        None => "use of closed network connection".to_owned(),
+    };
     tidb_base::log_warn!("grpc server error", "error" => "mux: server closed");
     tidb_base::log_warn!("http server error", "error" => "http: Server closed");
-    tidb_base::log_warn!("start status/rpc server error", "error" => "use of closed network connection");
+    tidb_base::log_warn!("start status/rpc server error", "error" => &accept_err);
 }
 
 async fn handle(req: Request<Incoming>, info: &StatusInfo) -> Response<Body> {
@@ -644,5 +650,47 @@ mod tests {
             }
         }
         let _ = stop.send(());
+    }
+
+    #[tokio::test]
+    async fn status_shutdown_warns_include_bound_addr() {
+        let sink = tidb_log::MemorySink::new();
+        let cfg = tidb_base::config::LogConfig {
+            level: "info".to_owned(),
+            format: "text".to_owned(),
+            disable_error_verbose: true,
+            ..tidb_base::config::LogConfig::default()
+        };
+        tidb_log::init_logger_with_sinks(&cfg, "", sink.clone(), None).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let info = StatusInfo {
+            version: "8.5.8-TiDB-v8.5.8".into(),
+            git_hash: "test".into(),
+        };
+        let handle = tokio::spawn(async move {
+            serve(listener, info, async move {
+                let _ = stop_rx.await;
+            })
+            .await;
+        });
+        let _ = stop_tx.send(());
+        handle.await.unwrap();
+
+        let captured = String::from_utf8(sink.take()).unwrap();
+        assert!(
+            captured.contains(r#"["grpc server error"] [error="mux: server closed"]"#),
+            "{captured}"
+        );
+        assert!(
+            captured.contains(r#"["http server error"] [error="http: Server closed"]"#),
+            "{captured}"
+        );
+        let want = format!(
+            r#"["start status/rpc server error"] [error="accept tcp {addr}: use of closed network connection"]"#
+        );
+        assert!(captured.contains(&want), "missing {want} in:\n{captured}");
     }
 }

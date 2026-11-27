@@ -353,11 +353,11 @@ pub(crate) fn log_and_wrap_parse_error(
     err: SqlError,
 ) -> SqlError {
     let src = err.source_err.clone().unwrap_or_else(|| {
-        // MySQL ErrParse template is "%s %s" (two %s args); pass empty 2nd arg unless message
-        // already ends with the near-clause.
+        // `err.message` is already formatted by the parser; use "%s" instead of ErrParse's
+        // "%s %s" template so we do not append an extra trailing space.
         tidb_base::terror::ClassParser
             .new_std(tidb_base::errno::ErrParse)
-            .fast_gen_by_args(tidb_base::go_args![&err.message, ""])
+            .fast_gen("%s", tidb_base::go_args![&err.message])
     });
     let sql_log = tidb_base::redact::string(redact_mode, sql);
     tidb_base::log_warn!(
@@ -452,9 +452,10 @@ impl Router {
         r
     }
 
-    /// The connection's id (the route trace records under it).
+    /// The connection's id (the route trace and new-stack SessionVars record under it).
     pub fn set_connection_id(&mut self, id: u64) {
         self.conn_id = id;
+        self.new.session_mut().vars_mut().connection_id = id;
     }
 
     /// A routing decision: `tidbrs_route_total{engine, reason}` and the route trace.

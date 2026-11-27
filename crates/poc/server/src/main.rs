@@ -486,17 +486,20 @@ fn main() {
         }
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let (stop_status, status_stopped) = tokio::sync::oneshot::channel::<()>();
+        let (status_done_tx, status_done_rx) = tokio::sync::oneshot::channel::<()>();
+        let has_status_server = status_listener.is_some();
         if let Some(status_listener) = status_listener {
             let info = status::StatusInfo {
                 version: config.server_version.clone(),
                 git_hash: tidb_log::TIDB_GIT_HASH.to_owned(),
             };
-            pool.spawn(
-                "status-server",
+            pool.spawn("status-server", async move {
                 status::serve(status_listener, info, async move {
                     let _ = status_stopped.await;
-                }),
-            );
+                })
+                .await;
+                let _ = status_done_tx.send(());
+            });
         }
         let shutdown = async {
             let mut sig_term =
@@ -522,11 +525,16 @@ fn main() {
                 warn!(error = %e, "signal handling failed; shutting down");
             }
             tidb_base::log_info!("setting tidb-server to report unhealthy (shutting-down)");
-            // Leave the cluster first, so DDL stops waiting for this node at once.
+            // Stop the status/RPC server and wait for its shutdown WARNs before draining
+            // client connections (matches Go shutdown ordering, spec §4.2).
+            let _ = stop_status.send(());
+            if has_status_server {
+                let _ = tokio::time::timeout(Duration::from_secs(5), status_done_rx).await;
+            }
+            // Leave the cluster before draining clients, so DDL stops waiting for this node at once.
             if let Some(sync) = &sync {
                 sync.shutdown().await;
             }
-            let _ = stop_status.send(());
         };
         let serve_res = Server::new(config, factory)
             .with_runtime(pool, admission)
