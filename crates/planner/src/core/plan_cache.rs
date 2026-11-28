@@ -78,6 +78,7 @@ pub fn plan_cache_preprocess(
     is_non_prepared: bool,
     is: &dyn InfoSchemaLookup,
     domain_is: Option<&dyn InfoSchemaLookup>,
+    pm: Option<&tidb_privilege::PrivilegeManagerRef>,
     stmt: &mut PlanCacheStmt,
     params: &[Datum],
 ) -> Result<(), Error> {
@@ -169,6 +170,11 @@ pub fn plan_cache_preprocess(
         if let Some(d) = domain_is {
             opts.push(with_domain_info_schema(d.snapshot()));
         }
+        if let Some(pm) = pm {
+            opts.push(crate::core::preprocess::with_privilege_manager(Arc::clone(
+                pm,
+            )));
+        }
         let (_, res) = preprocess(vars, &mut node_w, opts);
         if let Err(err) = res {
             if blocked_by(&err).is_some() {
@@ -216,7 +222,15 @@ pub fn get_plan_from_plan_cache(
     params: &[Datum],
     optimize_ast_node: OptimizeAstNodeFn<'_>,
 ) -> Result<(PhysicalPlanRef, NameSlice), Error> {
-    plan_cache_preprocess(vars, is_non_prepared, is, domain_is, stmt, params)?;
+    plan_cache_preprocess(
+        vars,
+        is_non_prepared,
+        is,
+        domain_is,
+        parts.privilege_manager.as_ref(),
+        stmt,
+        params,
+    )?;
 
     let cache_enabled;
     {
@@ -252,8 +266,15 @@ pub fn get_plan_from_plan_cache(
     parse_param_types(params, &mut param_types);
     if vars.stmt_ctx().plan_cache_tracker.use_cache()
         && let Some(cached_val) = lookup_plan_cache(parts, stmt, &param_types)
-        && let Some(res) =
-            adjust_cached_plan(parts, vars, &cached_val, is_non_prepared, &binding, stmt)?
+        && let Some(res) = adjust_cached_plan(
+            parts,
+            vars,
+            is,
+            &cached_val,
+            is_non_prepared,
+            &binding,
+            stmt,
+        )?
     {
         return Ok(res);
     }
@@ -308,15 +329,18 @@ fn lookup_plan_cache(
 /// cannot be used (the caller optimizes a new one). The plan digest (`SetPlanDigest`) is not
 /// kept: `NormalizePlan` is not ported (plan digests, D14.x), as on the miss path.
 // go: adjustCachedPlan L2 (the plan digest is not kept, as generateNewPlan)
+#[allow(clippy::too_many_arguments)]
 fn adjust_cached_plan(
     parts: &SessionPlanCtx,
     vars: &mut SessionVars,
+    is: &dyn InfoSchemaLookup,
     cached_val: &PlanCacheValue,
     is_non_prepared: bool,
     bind_sql: &str,
     stmt: &PlanCacheStmt,
 ) -> Result<Option<(PhysicalPlanRef, NameSlice)>, Error> {
-    check_prepared_priv(stmt)?;
+    vars.found_in_plan_cache = false;
+    check_prepared_priv(vars, is, parts.privilege_manager.as_deref(), stmt)?;
     let plan = {
         let mut ctx = parts.plan_ctx(vars);
         match rebuild_plan4_cached_plan(&mut ctx, &cached_val.plan)? {
@@ -412,12 +436,24 @@ pub fn parameterize_ast() -> Result<(), Error> {
     ))
 }
 
-/// checkPreparedPriv checks the privilege of the prepared statement: no privilege manager
-/// (D04.1, the PoC's single-user model) and no table locks (`CheckTableLock`, the write
-/// path), as Go with neither.
-// go: checkPreparedPriv L2 (no privilege manager: D04.1; CheckTableLock: write path)
-pub fn check_prepared_priv(stmt: &PlanCacheStmt) -> Result<(), Error> {
-    let _ = stmt;
+/// checkPreparedPriv checks the privilege of the prepared statement against the session's live
+/// `PrivilegeManager` and current `active_roles` (no cached boolean decision,
+/// `specs/D04.1-privilege/spec.md` §5.2 item 8). `CheckTableLock` belongs to the write path.
+// go: checkPreparedPriv L2 (CheckTableLock: write path)
+pub fn check_prepared_priv(
+    vars: &SessionVars,
+    is: &dyn InfoSchemaLookup,
+    pm: Option<&dyn tidb_privilege::PrivilegeManager>,
+    stmt: &PlanCacheStmt,
+) -> Result<(), Error> {
+    if let Some(pm) = pm {
+        let visit_info = crate::core::optimizer::visit_info4_priv_check(
+            is,
+            Some(&stmt.prepared_ast.stmt),
+            &stmt.visit_infos,
+        );
+        crate::core::optimizer::check_privilege(&vars.active_roles, pm, &visit_info)?;
+    }
     Ok(())
 }
 

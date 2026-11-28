@@ -742,3 +742,136 @@ async fn raw_native_client_with_sha2_server_is_switched() {
     io.flush().await.unwrap();
     assert_eq!(io.read_packet().await.unwrap(), [0, 0, 0, 2, 0, 0, 0]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_locked_returns_3118_after_password_check() {
+    struct LockedFactory;
+    struct BoundSession {
+        bound: String,
+    }
+    impl SessionFactory for LockedFactory {
+        type Session = BoundSession;
+
+        async fn lookup_user(&self, _user: &str, _host: &str) -> Option<Credential> {
+            None
+        }
+
+        async fn lookup_account(
+            &self,
+            user: &str,
+            _host: &str,
+        ) -> Option<tidb_mysql_protocol::AccountAuth> {
+            match user {
+                "u_locked" => Some(tidb_mysql_protocol::AccountAuth {
+                    credential: Credential::native_from_password(PASSWORD),
+                    auth_user: Some("u_locked".to_owned()),
+                    auth_host: Some("127.0.%".to_owned()),
+                    account_locked: true,
+                }),
+                "u_ok" => Some(tidb_mysql_protocol::AccountAuth {
+                    credential: Credential::native_from_password(PASSWORD),
+                    auth_user: Some("u_ok".to_owned()),
+                    auth_host: Some("127.0.%".to_owned()),
+                    account_locked: false,
+                }),
+                _ => None,
+            }
+        }
+
+        fn open_session(&self, info: &ConnectionInfo) -> Result<BoundSession, SqlError> {
+            let au = info
+                .auth_user
+                .as_deref()
+                .ok_or_else(|| SqlError::access_denied(&info.user, "127.0.0.1", false))?;
+            let ah = info
+                .auth_host
+                .as_deref()
+                .ok_or_else(|| SqlError::access_denied(&info.user, "127.0.0.1", false))?;
+            Ok(BoundSession {
+                bound: format!("{au}@{ah}"),
+            })
+        }
+    }
+    impl SessionHandler for BoundSession {
+        async fn query(&mut self, sql: &str) -> Result<Response, SqlError> {
+            match sql.trim().to_ascii_lowercase().as_str() {
+                "select @@max_allowed_packet,@@wait_timeout" => {
+                    Ok(Response::ResultSet(ResultSet {
+                        columns: vec![
+                            ColumnDef::new("@@max_allowed_packet", ColumnType::LongLong),
+                            ColumnDef::new("@@wait_timeout", ColumnType::LongLong),
+                        ],
+                        rows: vec![vec![Value::Int(64 << 20), Value::Int(28800)]],
+                        warnings: 0,
+                    }))
+                }
+                _ => Ok(Response::ResultSet(ResultSet {
+                    columns: vec![ColumnDef::new("cu", ColumnType::VarString)],
+                    rows: vec![vec![Value::from(self.bound.as_str())]],
+                    warnings: 0,
+                })),
+            }
+        }
+
+        async fn prepare(&mut self, _stmt_id: u32, _sql: &str) -> Result<PreparedInfo, SqlError> {
+            Err(SqlError::not_supported("prepare"))
+        }
+
+        async fn execute(
+            &mut self,
+            _stmt_id: u32,
+            _params: Vec<Param>,
+        ) -> Result<Response, SqlError> {
+            Err(SqlError::not_supported("execute"))
+        }
+
+        fn close(&mut self, _stmt_id: u32) {}
+
+        async fn use_db(&mut self, _db: &str) -> Result<(), SqlError> {
+            Ok(())
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::new(ServerConfig::default(), LockedFactory)
+            .serve(listener, std::future::pending())
+            .await
+            .unwrap();
+    });
+
+    // Locked account + valid password -> 3118 (HY000) matching Go TiDB's ConnectionVerification.
+    match mysql_async::Conn::new(opts(addr, "u_locked", Some(PASSWORD), None)).await {
+        Err(mysql_async::Error::Server(e)) => {
+            assert_eq!((e.code, e.state.as_str()), (3118, "HY000"));
+            assert_eq!(
+                e.message,
+                "Access denied for user 'u_locked'@'127.0.0.1'. Account is locked."
+            );
+        }
+        other => panic!(
+            "expected 3118 for locked account, got {:?}",
+            other.map(|_| ())
+        ),
+    }
+
+    // Locked account + wrong password -> 1045 (28000) (password checked before lock status).
+    match mysql_async::Conn::new(opts(addr, "u_locked", Some("wrong"), None)).await {
+        Err(mysql_async::Error::Server(e)) => {
+            assert_eq!((e.code, e.state.as_str()), (1045, "28000"));
+        }
+        other => panic!(
+            "expected 1045 for wrong password, got {:?}",
+            other.map(|_| ())
+        ),
+    }
+
+    // Unlocked account -> succeeds and receives the exact matched (auth_user, auth_host).
+    let mut conn = mysql_async::Conn::new(opts(addr, "u_ok", Some(PASSWORD), None))
+        .await
+        .unwrap();
+    let cu: Option<String> = conn.query_first("SELECT CURRENT_USER()").await.unwrap();
+    assert_eq!(cu.as_deref(), Some("u_ok@127.0.%"));
+    conn.disconnect().await.unwrap();
+}

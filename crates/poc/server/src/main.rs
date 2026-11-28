@@ -62,10 +62,12 @@ struct Args {
     /// Port to listen on (4001 avoids clashing with a Go TiDB on 4000).
     #[arg(short = 'P', long, default_value_t = 4001)]
     port: u16,
-    /// The single account accepted until users are read from the cluster.
+    /// Legacy single-account username flag (kept for CLI compatibility; authentication reads
+    /// `mysql.user` from the cluster).
     #[arg(long, default_value = "root")]
     user: String,
-    /// Password of `--user` (empty = no password).
+    /// Legacy password flag for `--user` (kept for CLI compatibility; authentication reads
+    /// `mysql.user` from the cluster).
     #[arg(long, default_value = "")]
     password: String,
     /// Auth plugin advertised in the handshake (TiDB's default_authentication_plugin).
@@ -452,11 +454,17 @@ fn main() {
             info!("schema sync is off: every statement checks the schema version (ADR 0003)");
             None
         };
+        let priv_sync = poc_domain::PrivilegeSync::start(kv.clone(), args.pd.clone())
+            .await
+            .map_err(|e| std::io::Error::other(format!("load mysql.* privilege tables: {e}")))?;
         let factory = Factory::new(Shared {
             kv,
             schema,
             dag,
             sync: sync.clone(),
+            privileges: Some(poc_session::privilege::PrivilegeSource::from_sync(
+                priv_sync.clone(),
+            )),
             user: args.user.clone(),
             credential: Credential::native_from_password(&args.password),
             server_version: config.server_version.clone(),
@@ -533,6 +541,7 @@ fn main() {
                 let _ = tokio::time::timeout(Duration::from_secs(5), status_done_rx).await;
             }
             // Leave the cluster before draining clients, so DDL stops waiting for this node at once.
+            priv_sync.shutdown();
             if let Some(sync) = &sync {
                 sync.shutdown().await;
             }

@@ -96,6 +96,10 @@ pub struct SessionVars {
     pub hypo_tiflash_replicas: Option<crate::sessionstates::HypoTiFlashReplicas>,
     /// SQLCPUUsages records per-SQL TiDB and TiKV CPU usage (Go `SessionVars.SQLCPUUsages`).
     pub sql_cpu_usages: Arc<tidb_execdetails::ppcpuusage::SQLCPUUsages>,
+    /// User is the user identity with which the session login (`SessionVars.User`).
+    pub user: Option<tidb_parser::auth::UserIdentity>,
+    /// ActiveRoles are active roles for current session (`SessionVars.ActiveRoles`).
+    pub active_roles: Vec<tidb_parser::auth::RoleIdentity>,
 }
 
 /// The value type of the session's statement caches (Go `any`: planner objects).
@@ -372,6 +376,8 @@ impl SessionVars {
             hypo_indexes: None,
             hypo_tiflash_replicas: None,
             sql_cpu_usages: Arc::new(tidb_execdetails::ppcpuusage::SQLCPUUsages::default()),
+            user: None,
+            active_roles: Vec::new(),
         }
     }
 

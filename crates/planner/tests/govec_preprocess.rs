@@ -29,7 +29,7 @@ use tidb_planner::core::resolve::new_node_w;
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 
 /// The number of records answered by each boundary stub.
-const EXPECTED_BLOCKED: [(&str, usize); 3] = [("D02.2", 4), ("D04.1", 2), ("D09.5", 3)];
+const EXPECTED_BLOCKED: [(&str, usize); 2] = [("D02.2", 4), ("D09.5", 3)];
 
 const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
     "amd64"
@@ -53,10 +53,12 @@ impl InfoSchemaLookup for GeneratorTables {
                 ..Default::default()
             }));
         }
-        Err(tidb_base::errors::new(format!(
-            "no table {}.{}",
-            schema.o, table.o
-        )))
+        Err(
+            tidb_infoschema::error::ErrTableNotExists.fast_gen_by_args(vec![
+                tidb_base::gofmt::Arg::from(schema.o.clone()),
+                tidb_base::gofmt::Arg::from(table.o.clone()),
+            ]),
+        )
     }
     fn table_by_id(&self, _: i64) -> Result<Option<Arc<TableInfo>>, Error> {
         Ok(None)
