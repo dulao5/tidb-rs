@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 """The weekly / nightly build report (#128): one Markdown page from the parts' JSON.
 
-    report.py --in DIR [--previous DIR] [--title T] [--commit SHA] --out report.md
+    report.py --in DIR [--previous DIR] [--baseline DIR] [--title T] [--commit SHA] --out report.md
 
 DIR holds what tools/weekly/run.sh wrote for each part (ab.json, ab-classified.json, the
 strict new-stack round's ab-strict-classified.json / ab-strict-routes.txt / ab-strict-*/,
 sysbench.json, faults.json, faults-raw.json, locks.json, locks-raw.json, integrationtest.json and
 ab-integrationtest/results.jsonl), possibly in
-sub-directories (one per CI job). --previous is the same for last week's run: the report then
-shows what changed (newly executable operators, agreement, QPS ratios).
+sub-directories (one per CI job). --previous is the same for the previous run of the same mode,
+whatever its verdict: the report then shows what changed since it (newly executable operators,
+agreement, QPS ratios, "Against the last run"). --baseline is the last GREEN (or accepted) run:
+what is still worse than it is listed too ("Against the baseline") and keeps the run REGRESSED,
+so a regression stays reported until it is fixed or accepted (#140 review). Each is named in
+the report by the title and verdict of its report.md (and --previous-run / --baseline-run, the
+workflow run ids) (#510).
+
+When the run is RED and the previous run was not (or there is none), turned-red.md is written
+next to --out: a short notice the workflow posts on #54 for a scheduled run that is not
+published in full (#510).
 
 Verdict (the report's first line, and the exit status):
 - RED (1): a part found a wrong result, a mismatch or a new inconsistency;
 - INCOMPLETE (2): a part did not run fully (skipped, failed to set up, missing);
-- REGRESSED (2): against the previous run, an operator or a TPC-H query tidb-rs executed is no
+- REGRESSED (2): against the previous run or the baseline, an operator or a TPC-H query tidb-rs executed is no
   longer executable, `unsupported` statements increased (tidb-ab workloads, or the integration
   tests both runs ran), the new stack (VS1, strict round) executed fewer statements of a
   workload both runs ran, or a
@@ -147,7 +156,8 @@ def integration(base, expected=None):
     (in `expected`), "fixed": [(key, verdict)] (in `expected`, ran on tidb-rs, no longer a mismatch),
     "rejected": Counter (normalized session statements tidb-rs rejected: `b_set_rejected` records
     and `USE` counted as b_error), "causes": Counter (normalized causing statement -> reads
-    skipped as "session diverged")}, or None when there is none. Per test, "skipped" counts the
+    skipped as "session diverged"), "a_only": Counter (the same for statements that ran on A only:
+    a session binding, which hides the plan-source reads after it)}, or None when there is none. Per test, "skipped" counts the
     reads skipped as "session diverged"."""
     expected = expected or {}
     if not base:
@@ -156,7 +166,7 @@ def integration(base, expected=None):
     if not hits:
         return None
     totals, tests, reasons, errors, mismatches, known = Counter(), defaultdict(Counter), Counter(), Counter(), [], []
-    ran, rejected, causes = {}, Counter(), Counter()
+    ran, rejected, causes, a_only = {}, Counter(), Counter(), Counter()
     with open(hits[0]) as f:
         for line in f:
             if not line.strip():
@@ -170,7 +180,10 @@ def integration(base, expected=None):
             if v == "b_set_rejected" or (v == "b_error" and r.get("kind") == "use rejected"):
                 rejected[norm_sql(r.get("query", ""))] += 1
             elif v == "skipped":
-                causes[norm_sql((r.get("cause") or {}).get("sql", "?"))] += 1
+                cause = r.get("cause") or {}
+                # A session binding ran on A only (a write B never runs): not a rejection.
+                target = a_only if cause.get("var") == A_ONLY_CAUSE else causes
+                target[norm_sql(cause.get("sql", "?"))] += 1
             if v == "unsupported":
                 reasons[reason(r.get("detail") or r.get("kind") or "")] += 1
             elif v == "b_error":
@@ -182,11 +195,15 @@ def integration(base, expected=None):
     fixed = sorted((k, ran[k]) for k in expected if k in ran and k not in seen)
     return {"totals": totals, "tests": tests, "reasons": reasons, "errors": errors,
             "mismatches": mismatches, "known": known, "fixed": fixed, "rejected": rejected,
-            "causes": causes,
+            "causes": causes, "a_only": a_only,
             # Results written before ab recorded rejected session statements have none; every
             # real run has some (the tests set plan variables tidb-rs does not know).
             "records_rejected": bool(rejected)}
 
+
+# The `cause.var` of a read skipped after a statement that ran on A only, not one tidb-rs
+# rejected (tools/ab/src/integration.rs SESSION_BINDING).
+A_ONLY_CAUSE = "session binding"
 
 # results.jsonl verdicts of reads sent to tidb-rs (the others: "b_set_rejected", a session
 # statement tidb-rs rejected; "skipped", a read not sent because the session diverged).
@@ -341,6 +358,56 @@ def regressions(cur_ab, prev_ab, cur_sb, prev_sb, cur_tpch=None, prev_tpch=None,
                 if r and p and r < p * (1 - PERF_DROP):
                     out.append(f"{w} {t} threads: B/A {p:.2f} → {r:.2f} (more than {PERF_DROP:.0%} lower)")
     return out
+
+
+def run_name(base, run_id=None):
+    """How the report names an earlier run: the title and verdict of its report.md (and the
+    workflow run id), e.g. "tidb-rs weekly build 2026-W47 (2026-11-20), REGRESSED, run 123"."""
+    if not base:
+        return None
+    title, verdict = None, None
+    paths = [os.path.join(base, "report.md")] + sorted(glob.glob(os.path.join(base, "**", "report.md"),
+                                                                recursive=True))
+    for path in paths:
+        if os.path.isfile(path):
+            with open(path) as f:
+                for line in f:
+                    m = re.match(r"\*\*([A-Z]+)\*\*", line)
+                    if m and verdict is None:
+                        verdict = m.group(1)
+                    if line.startswith("# ") and title is None:
+                        title = line[2:].strip()
+                    if title and verdict:
+                        break
+            break
+    parts = [title or "an earlier run", verdict, f"run {run_id}" if run_id else None]
+    return ", ".join(p for p in parts if p)
+
+
+def run_verdict(base):
+    """The verdict of an earlier run's report.md (RED, REGRESSED, ...), or None."""
+    path = os.path.join(base, "report.md") if base else ""
+    if not os.path.isfile(path):
+        hits = sorted(glob.glob(os.path.join(base, "**", "report.md"), recursive=True)) if base else []
+        if not hits:
+            return None
+        path = hits[0]
+    with open(path) as f:
+        m = re.match(r"\*\*([A-Z]+)\*\*", f.readline())
+    return m.group(1) if m else None
+
+
+def turned_red_notice(title, status, wrong, prev_name):
+    """The short #54 notice for a run that turned RED (the workflow adds the run's link)."""
+    failing = [p for p, s in status.items() if s == "fail"]
+    wrong = {p: why for p, why in wrong.items() if p in status}
+    lines = [f"**RED**: {title} turned red"
+             + (f" (the last run, {prev_name}, was not)." if prev_name else " (no earlier run to compare with)."),
+             "",
+             "Failing parts: " + (", ".join(f"`{p}`" for p in failing) or "none") + "."]
+    lines += [f"- `{p}`: {why}" for p, why in sorted(wrong.items())]
+    lines += ["", "The full report is in the run's summary and its results artifact."]
+    return "\n".join(lines) + "\n"
 
 
 def section_ab(cur, prev, lines):
@@ -633,12 +700,18 @@ def section_rulings(ledger, cur, records, errors, warnings, table, full, lines):
 
 def section_diverged(cur, prev, lines):
     """Session statements tidb-rs rejected and the reads skipped because of them."""
-    rejected, causes = cur["rejected"], cur["causes"]
+    rejected, causes, a_only = cur["rejected"], cur["causes"], cur.get("a_only") or Counter()
     lines.append(
         f"Session statements tidb-rs rejected: {sum(rejected.values())} ({len(rejected)} distinct; "
         f"a rejected `USE` also counts as a tidb-rs error). Reads skipped because a rejected "
         f"statement left tidb-rs's session answering differently (`session diverged`): "
         f"**{sum(causes.values())}**.\n")
+    if a_only:
+        lines.append(
+            f"Plan-source reads (`@@last_plan_from_cache` / `@@last_plan_from_binding`) skipped as "
+            f"`session diverged` after a session binding that ran on A only (not rejected: tidb-rs "
+            f"never runs writes): **{sum(a_only.values())}**, after {len(a_only)} distinct "
+            f"statements.\n")
     g = it_diverged_growth(cur, prev)
     if g:
         lines.append(f"Skipped as `session diverged` over the tests both runs ran: {g[0]} last run, "
@@ -762,7 +835,10 @@ def section_locks(raw, lines):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="inp", required=True)
-    ap.add_argument("--previous")
+    ap.add_argument("--previous", help="the previous run's results (any verdict)")
+    ap.add_argument("--previous-run", help="its workflow run id, to name it")
+    ap.add_argument("--baseline", help="the last GREEN (or accepted) run's results")
+    ap.add_argument("--baseline-run", help="its workflow run id, to name it")
     ap.add_argument("--title", default="tidb-rs weekly build")
     ap.add_argument("--commit", default="")
     ap.add_argument("--parts", default=",".join(PARTS), help="parts expected in this run")
@@ -786,7 +862,8 @@ def main():
     # ones not accepted in the expected list do.
     if status.get("integrationtest") == "fail" and integration(args.inp) is not None:
         status["integrationtest"] = "ok"
-    for p, why in wrong_results(args.inp, accepted).items():
+    wrong = wrong_results(args.inp, accepted)
+    for p, why in wrong.items():
         if p in status:
             status[p] = "fail"
             print(f"{p}: {why}")
@@ -803,6 +880,13 @@ def main():
             status[p] = "fail"
         print(f"census: {why}")
     prev_cen = census_totals(census(args.previous)[0])
+    # The baseline only counts when it is another run than the previous one.
+    baseline = args.baseline
+    if baseline and args.previous and (
+            os.path.realpath(baseline) == os.path.realpath(args.previous)
+            or (args.baseline_run and args.baseline_run == args.previous_run)):
+        baseline = None
+    base_cen = census_totals(census(baseline)[0])
     # The divergence ledger's hit audit, over full runs (those with the integrationtest part
     # run to the end: an incomplete one would count missing statements as missing hits).
     ledger, ledger_problems = check_rulings.load(args.rulings)
@@ -835,20 +919,30 @@ def main():
                             load(args.inp, "tpch-time.json"), load(args.previous, "tpch-time.json"),
                             cur_it, prev_it, cur_new, prev_new)
     regressed += census_regressions(census_totals(cen_rows), prev_cen)
+    # Still worse than the last GREEN (or accepted) run: a regression stays reported until it
+    # is fixed or accepted, also when the previous run was already as bad.
+    base_regressed = []
+    if baseline:
+        base_regressed = regressions(cur_ab, load(baseline, "ab-classified.json"),
+                                     cur_sb, load(baseline, "sysbench.json"),
+                                     load(args.inp, "tpch-time.json"), load(baseline, "tpch-time.json"),
+                                     cur_it, integration(baseline, accepted),
+                                     cur_new, strict_new_per_workload(baseline))
+        base_regressed += census_regressions(census_totals(cen_rows), base_cen)
     # An expired cosmetic ruling (still firing or not) is a warning: yellow, not a pass.
     regressed += [f"divergence ledger: {w}" for w in rl_warnings]
     if any(s == "fail" for s in status.values()):
         verdict, code = "RED", 1
     elif any(s in ("incomplete", "missing") for s in status.values()):
         verdict, code = "INCOMPLETE", 2
-    elif regressed:
+    elif regressed or base_regressed:
         verdict, code = "REGRESSED", 2
     else:
         verdict, code = "GREEN", 0
     meaning = {
         "RED": "wrong results, mismatches or new inconsistencies",
         "INCOMPLETE": "some parts did not run fully; this is not a pass",
-        "REGRESSED": "worse than the last run",
+        "REGRESSED": "worse than the last run or the baseline",
         "GREEN": "every part ran; no wrong results, no regressions",
     }[verdict]
 
@@ -861,9 +955,19 @@ def main():
     for p in expected:
         lines.append(f"| {p} | {icon.get(status[p], status[p])} |")
     lines.append("")
+    prev_name = run_name(args.previous, args.previous_run)
+    base_name = run_name(baseline, args.baseline_run)
+    if prev_name:
+        lines.append(f"Compared with the last run: {prev_name}."
+                     + (f" Baseline (the last GREEN or accepted run): {base_name}." if base_name else "")
+                     + "\n")
     if regressed:
-        lines.append("Against the last run:")
+        lines.append(f"Against the last run ({prev_name or 'none'}):")
         lines += [f"- {r}" for r in regressed]
+        lines.append("")
+    if base_regressed:
+        lines.append(f"Against the baseline ({base_name}):")
+        lines += [f"- {r}" for r in base_regressed]
         lines.append("")
 
     if "ab" in expected:
@@ -890,6 +994,15 @@ def main():
                      args.commit)
     if not args.previous:
         lines.append("_No previous run to compare with._\n")
+
+    # A run that turned RED: a short notice for #54 (the workflow posts it for a scheduled run
+    # that is not published in full).
+    notice = os.path.join(os.path.dirname(os.path.abspath(args.out)), "turned-red.md")
+    if os.path.exists(notice):
+        os.remove(notice)
+    if verdict == "RED" and run_verdict(args.previous) != "RED":
+        with open(notice, "w") as f:
+            f.write(turned_red_notice(args.title, status, wrong, prev_name))
 
     with open(args.out, "w") as f:
         f.write("\n".join(lines))

@@ -1,0 +1,10 @@
+# T1: A also answers 1235, with another text: neither side runs the statement, and B's answer
+# is a not-implemented one (here a boundary stub's), so it is unsupported, not a mismatch (#510).
+sql: SELECT a FROM t
+tolerance: T1
+class: unordered
+verdict: unsupported
+[a_error]
+1235|42000|This version of TiDB doesn't yet support 'this feature'
+[b_error]
+1235|42000|This version of TiDB doesn't yet support 'x (blocked-by:D09.1)'

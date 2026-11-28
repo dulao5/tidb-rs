@@ -57,8 +57,8 @@ parameters):
   vertical-slice plan §4.7).
 - errors: both fail with the same code, SQLSTATE and message => `both_error` (counts as
   agreement); B fails with a not-implemented 1235 (a boundary stub's `blocked-by:` answer or one
-  of the prototype's fixed answers in `prototype-not-supported.txt`) while A did not answer 1235
-  => `unsupported` (tolerance T1); any other 1235 is a normal error; anything else (one side errors, another code / SQLSTATE / message, connection errors,
+  of the prototype's fixed answers in `prototype-not-supported.txt`) while A did not answer the
+  same 1235 => `unsupported` (tolerance T1; A answering 1235 with another text counts the same); any other 1235 is a normal error; anything else (one side errors, another code / SQLSTATE / message, connection errors,
   timeouts) => `mismatch`.
 - OK packets: affected rows and warning count. Warnings: when either side reports any, `SHOW
   WARNINGS` runs on both and must be identical, except (tolerance T6, prototype path only) A's
@@ -208,7 +208,11 @@ Outcome per statement:
   `mysqltest::affects_results`), so B's session no longer answers like A's. Reads in that
   connection are skipped until the variable is set again on both sides, or set back to `DEFAULT`
   on A (B never changed it). Rejected settings of other variables (cost model, concurrency,
-  chunk sizes, ...) do not stop the comparison. `SET GLOBAL` is a write, not tracked: B
+  chunk sizes, plan cache switches, ...) do not stop the comparison, except for the reads of
+  where the last plan came from (`@@last_plan_from_cache`, `@@last_plan_from_binding`): those
+  are skipped (`session diverged`) after such a rejected setting, until it is set again on both
+  sides or back to `DEFAULT`, and after a session binding A created (`CREATE [SESSION]
+  BINDING`, a write B never runs). `SET GLOBAL` is a write, not tracked: B
   rejecting one shows up as mismatches in later connections, not as skipped reads.
 - `write`: a session or write statement that A ran as the test expected.
 
