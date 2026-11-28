@@ -221,7 +221,8 @@ impl ArithmeticOp for IntIntMod {
         if *rhs == 0i64 {
             return Ok(None);
         }
-        Ok(Some(lhs % rhs))
+        // `i64::MIN % -1` overflows; the remainder is 0, as in TiDB and MySQL.
+        Ok(Some(lhs.wrapping_rem(*rhs)))
     }
 }
 
@@ -747,6 +748,7 @@ mod tests {
             (Some(-11), Some(0), None),
             (Some(i64::MAX), Some(i64::MIN), Some(i64::MAX)),
             (Some(i64::MIN), Some(i64::MAX), Some(-1)),
+            (Some(i64::MIN), Some(-1), Some(0)),
         ];
 
         for (lhs, rhs, expected) in tests {
