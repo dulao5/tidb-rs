@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tracing::warn;
 
 use crate::constants::{
     DEFAULT_MAX_ALLOWED_PACKET, DEFAULT_SERVER_VERSION, auth_plugin, capability,
@@ -123,13 +122,16 @@ impl<F: SessionFactory> Server<F> {
                         Ok(a) => a,
                         Err(e) => {
                             // E.g. EMFILE: back off instead of spinning.
-                            warn!(error = %e, "accept failed");
+                            let err_str = e.to_string();
+                            tidb_base::log_error!("accept failed", "error" => err_str.as_str());
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             continue;
                         }
                     };
+                    tidb_base::log_debug!("accept new connection success");
                     if let Err(e) = stream.set_nodelay(true) {
-                        warn!(error = %e, "set TCP_NODELAY failed");
+                        let err_str = e.to_string();
+                        tidb_base::log_warn!("set TCP_NODELAY failed", "error" => err_str.as_str());
                     }
                     let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
                     let config = Arc::clone(&self.config);

@@ -513,8 +513,9 @@ impl Router {
         let globals_loaded = match new.session_mut().load_common_global_variables_if_needed() {
             Ok(()) => true,
             Err(e) => {
-                log::error!(
-                    "VS1 router bug: loading the global variables of the new session failed, the session stays on the PoC: {e}"
+                tidb_base::log_error!(
+                    "VS1 router bug: loading the global variables of the new session failed, the session stays on the PoC",
+                    "error" => &e,
                 );
                 false
             }
@@ -715,8 +716,8 @@ impl Router {
         // The checkpoint can only restore an idle session (§4.6): check before the attempt
         // writes anything. Step 0 should make this impossible, so it is a router bug.
         if !self.new.session().is_idle() {
-            log::error!(
-                "VS1 router bug: the new session is not idle at the start of a statement; the PoC runs it"
+            tidb_base::log_error!(
+                "VS1 router bug: the new session is not idle at the start of a statement; the PoC runs it",
             );
             let label = Reason::NotIdle.label();
             if fallback {
@@ -746,8 +747,9 @@ impl Router {
                     // again on the PoC is not allowed. A boundary stub there is a bug of the
                     // new stack: the client gets its 1235 (constitution article 5), the
                     // statement ends on the new stack.
-                    log::error!(
-                        "VS1 router bug: blocked-by:{block} after the new stack's executors opened"
+                    tidb_base::log_error!(
+                        "VS1 router bug: blocked after the new stack's executors opened",
+                        "block" => block,
                     );
                     self.note(Engine::New.label(), "bug_blocked_after_open");
                     drop(cp);
@@ -785,8 +787,8 @@ impl Router {
     async fn try_prepare_new(&mut self, sql: &str) -> Result<Result<NewPrepared, Error>, NotRun> {
         self.new.session_mut().finish_unfinished_stmt().await;
         if !self.new.session().is_idle() {
-            log::error!(
-                "VS1 router bug: the new session is not idle at a PREPARE; only the PoC prepares it"
+            tidb_base::log_error!(
+                "VS1 router bug: the new session is not idle at a PREPARE; only the PoC prepares it",
             );
             return Err(NotRun::NotIdle);
         }
@@ -797,8 +799,12 @@ impl Router {
                 Some(block) => {
                     let block = block.to_owned();
                     if let Err(e) = self.new.session_mut().restore(cp) {
-                        log::error!("VS1 router bug: checkpoint of PREPARE not restorable: {e}");
-                        return Err(NotRun::Unrestorable(SqlError::unknown(e.to_string())));
+                        let err_str = e.to_string();
+                        tidb_base::log_error!(
+                            "VS1 router bug: checkpoint of PREPARE not restorable",
+                            "error" => err_str.as_str(),
+                        );
+                        return Err(NotRun::Unrestorable(SqlError::unknown(err_str)));
                     }
                     Err(NotRun::Blocked(block))
                 }

@@ -10,6 +10,8 @@ use crate::constants::MAX_PAYLOAD_LEN;
 /// Errors from reading a packet.
 #[derive(Debug)]
 pub enum PacketError {
+    /// Clean EOF at a packet boundary (0 bytes read; Go `io.EOF`).
+    Eof,
     Io(io::Error),
     /// The client used an unexpected sequence id.
     BadSequence {
@@ -18,6 +20,26 @@ pub enum PacketError {
     },
     /// The logical payload exceeds `max_allowed_packet`.
     TooLarge,
+}
+
+impl PacketError {
+    /// Format this error for structured logs matching Go `packetio.go:163-177` and `io.EOF` /
+    /// `io.ErrUnexpectedEOF`.
+    pub fn log_string(&self) -> String {
+        match self {
+            PacketError::Eof => "EOF".to_owned(),
+            PacketError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                "unexpected EOF".to_owned()
+            }
+            PacketError::Io(e) => e.to_string(),
+            PacketError::BadSequence { expected, got } => {
+                format!("[server:8052]invalid sequence, received {got} while expecting {expected}")
+            }
+            PacketError::TooLarge => {
+                "[server:1153]Got a packet bigger than 'max_allowed_packet' bytes".to_owned()
+            }
+        }
+    }
 }
 
 impl From<io::Error> for PacketError {
@@ -29,6 +51,7 @@ impl From<io::Error> for PacketError {
 impl std::fmt::Display for PacketError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PacketError::Eof => f.write_str("EOF"),
             PacketError::Io(e) => write!(f, "{e}"),
             PacketError::BadSequence { expected, got } => {
                 write!(
@@ -133,7 +156,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PacketIo<S> {
         let mut payload = Vec::new();
         loop {
             let mut header = [0u8; 4];
-            self.stream.read_exact(&mut header).await?;
+            let first = self.stream.read(&mut header[..1]).await?;
+            if first == 0 {
+                if payload.is_empty() {
+                    return Err(PacketError::Eof);
+                }
+                return Err(PacketError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unexpected EOF",
+                )));
+            }
+            self.stream
+                .read_exact(&mut header[1..])
+                .await
+                .map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        PacketError::Io(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "unexpected EOF",
+                        ))
+                    } else {
+                        PacketError::Io(e)
+                    }
+                })?;
             let len =
                 usize::from(header[0]) | usize::from(header[1]) << 8 | usize::from(header[2]) << 16;
             if header[3] != self.seq {
@@ -148,7 +193,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PacketIo<S> {
             }
             let start = payload.len();
             payload.resize(start + len, 0);
-            self.stream.read_exact(&mut payload[start..]).await?;
+            self.stream
+                .read_exact(&mut payload[start..])
+                .await
+                .map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        PacketError::Io(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "unexpected EOF",
+                        ))
+                    } else {
+                        PacketError::Io(e)
+                    }
+                })?;
             if len < MAX_PAYLOAD_LEN {
                 // Go counts the payload of the logical packet, without headers.
                 self.counts.read += payload.len() as u64;

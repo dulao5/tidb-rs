@@ -35,8 +35,6 @@ use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
-use tracing::debug;
-use tracing::warn;
 
 /// What `/status` reports.
 #[derive(Clone, Debug)]
@@ -87,7 +85,8 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
             Some(format_go_accept_addr(addr))
         }
         Err(e) => {
-            warn!(error = %e, "status server address unknown");
+            let err_str = e.to_string();
+            tidb_base::log_warn!("status server address unknown", "error" => err_str.as_str());
             None
         }
     };
@@ -101,7 +100,8 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
             accepted = listener.accept() => match accepted {
                 Ok(a) => a,
                 Err(e) => {
-                    warn!(error = %e, "status server accept failed");
+                    let err_str = e.to_string();
+                    tidb_base::log_warn!("status server accept failed", "error" => err_str.as_str());
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     continue;
                 }
@@ -124,7 +124,13 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
                 .serve_connection(TokioIo::new(stream), service)
                 .await
             {
-                debug!(%peer, error = %e, "status connection ended with an error");
+                let peer_str = peer.to_string();
+                let err_str = e.to_string();
+                tidb_base::log_debug!(
+                    "status connection ended with an error",
+                    "peer" => peer_str.as_str(),
+                    "error" => err_str.as_str(),
+                );
             }
         });
     }
@@ -422,7 +428,26 @@ mod tests {
         out
     }
 
-    async fn start() -> (std::net::SocketAddr, tokio::sync::oneshot::Sender<()>) {
+    /// Serializes tests that invoke `serve` so `status_shutdown_warns_include_bound_addr`'s
+    /// process-global `MemorySink` never observes log lines from sibling status-server tests.
+    static STATUS_SERVER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct TestServer {
+        addr: std::net::SocketAddr,
+        stop: tokio::sync::oneshot::Sender<()>,
+        handle: tokio::task::JoinHandle<()>,
+        _guard: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TestServer {
+        async fn shutdown(self) {
+            let _ = self.stop.send(());
+            let _ = self.handle.await;
+        }
+    }
+
+    async fn start() -> TestServer {
+        let guard = STATUS_SERVER_LOCK.lock().await;
         tidb_metrics::init(&tidb_metrics::ServerFacts {
             version: "v8.5.8-tidb-rs-test".to_owned(),
             git_hash: "abc".to_owned(),
@@ -436,15 +461,21 @@ mod tests {
             git_hash: "abc".to_owned(),
             listen_host: "127.0.0.1".to_owned(),
         };
-        tokio::spawn(serve(listener, info, async move {
+        let handle = tokio::spawn(serve(listener, info, async move {
             let _ = rx.await;
         }));
-        (addr, tx)
+        TestServer {
+            addr,
+            stop: tx,
+            handle,
+            _guard: guard,
+        }
     }
 
     #[tokio::test]
     async fn serves_metrics_status_and_404() {
-        let (addr, stop) = start().await;
+        let srv = start().await;
+        let addr = srv.addr;
         // Series of labelled families exist once something was recorded (as in Go).
         let d = std::time::Duration::from_millis(1);
         tidb_metrics::statement(tidb_metrics::StmtType::Select);
@@ -471,7 +502,7 @@ mod tests {
             assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "{path}: {resp}");
             assert!(resp.ends_with("404 page not found\n"), "{path}: {resp}");
         }
-        let _ = stop.send(());
+        srv.shutdown().await;
     }
 
     /// An HTTP/2 (prior knowledge) client, as Go TiDB's gRPC clients connect to a status port.
@@ -554,7 +585,8 @@ mod tests {
     async fn grpc_requests_are_routed_to_rpc() {
         use crate::rpc::testdata::*;
         use prost::Message as _;
-        let (addr, stop) = start().await;
+        let srv = start().await;
+        let addr = srv.addr;
 
         let req = crate::rpc::CopRequest {
             tp: 103,
@@ -620,7 +652,7 @@ mod tests {
         }
         let (headers, _, _) = grpc_call(addr, crate::rpc::COPROCESSOR, &[0xff]).await;
         assert_eq!(headers["grpc-status"], "13");
-        let _ = stop.send(());
+        srv.shutdown().await;
     }
 
     /// Go TiDB with `tikv-client.grpc-compression-type = "gzip"` compresses its requests to
@@ -629,7 +661,8 @@ mod tests {
     async fn gzip_grpc_requests_are_answered() {
         use crate::rpc::testdata::*;
         use prost::Message as _;
-        let (addr, stop) = start().await;
+        let srv = start().await;
+        let addr = srv.addr;
         let req = crate::rpc::CopRequest {
             tp: 103,
             data: dag(
@@ -657,14 +690,15 @@ mod tests {
             "grpc: Decompressor is not installed for grpc-encoding \"snappy\""
         );
         assert!(messages.is_empty());
-        let _ = stop.send(());
+        srv.shutdown().await;
     }
 
     /// HTTP/2 without a gRPC content type is still the status API.
     #[tokio::test]
     async fn http2_without_grpc_is_the_status_api() {
         use http_body_util::BodyExt;
-        let (addr, stop) = start().await;
+        let srv = start().await;
+        let addr = srv.addr;
         for (path, status) in [
             ("/status", StatusCode::OK),
             ("/tikvpb.Tikv/Coprocessor", StatusCode::NOT_FOUND),
@@ -682,7 +716,7 @@ mod tests {
                 assert_eq!(&body[..], b"404 page not found\n");
             }
         }
-        let _ = stop.send(());
+        srv.shutdown().await;
     }
 
     fn normalize_status_caller_line(line: &str) -> String {
@@ -703,6 +737,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_shutdown_warns_include_bound_addr() {
+        let _guard = STATUS_SERVER_LOCK.lock().await;
         let sink = tidb_log::MemorySink::new();
         let cfg = tidb_base::config::LogConfig {
             level: "info".to_owned(),
