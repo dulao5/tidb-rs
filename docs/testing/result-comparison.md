@@ -118,6 +118,7 @@ mysqltest 指令 `--sorted_result` 使下一条语句按 unordered 比较（带 
 | T3 | replace-directives | `--replace_regex` / `--replace_column` 同时作用于两边 |
 | T4 | result-log-off | `--disable_result_log` 期间只比形状，错误仍完整比较 |
 | T5 | go-execute-metadata-drift | Go 自己的 EXECUTE/PREPARE 列定义漂移，B 漂移到同一值不算差异 |
+| T6 | prototype-plan-cache-optimizer-reasons | 只限 B 在原型上答复的语句：A 多出的 Go 优化阶段 plan cache 跳过原因 warning（按原因文本逐条匹配）比较前去掉，其余照常比较；新栈完整比较 |
 
 ## 7. fixture
 

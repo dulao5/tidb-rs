@@ -28,6 +28,7 @@ use crate::census::{Census, CensusPath, Control, Record, RouteProbe};
 use crate::compare::{
     Observed, Verdict, charset_name, classify, compare, execute_metadata_diffs, flag_names,
     mismatch_kind, needs_warnings, prepare_diffs, strip_limit, type_name,
+    without_optimizer_skip_warnings,
 };
 use crate::exec::{ColumnMeta, Outcome, PrepareMeta, Side, TlsMode};
 use crate::rulings::Ledger;
@@ -404,6 +405,9 @@ enum Rerun<'a> {
 
 /// Compares through the comparator: fetches `SHOW WARNINGS` on both sides when either
 /// reports warnings, and A's result without the LIMIT when the class asks for it.
+/// `b_on_prototype`: B answered on the prototype (route trace engine `poc`), so tolerance T6
+/// leaves out A's optimizer-time plan-cache skip warnings that B does not report.
+#[allow(clippy::too_many_arguments)]
 async fn judge(
     case: &Case,
     sql: &str,
@@ -412,6 +416,7 @@ async fn judge(
     b: &mut Side,
     oa: &Outcome,
     ob: &Outcome,
+    b_on_prototype: bool,
 ) -> Verdict {
     let (wa, wb) = if needs_warnings(oa, ob) {
         (a.warnings().await, b.warnings().await)
@@ -423,10 +428,15 @@ async fn judge(
         _ => &[],
     };
     let class = classify(sql, cols, case.sorted);
-    let (obs_a, obs_b) = (
-        Observed::new(oa, wa.as_deref()),
-        Observed::new(ob, wb.as_deref()),
-    );
+    let obs_b = Observed::new(ob, wb.as_deref());
+    // T6: on the prototype path only.
+    let tolerated = b_on_prototype
+        .then(|| without_optimizer_skip_warnings(Observed::new(oa, wa.as_deref()), obs_b))
+        .flatten();
+    let obs_a = match &tolerated {
+        Some((o, w)) => Observed::new(o, Some(w)),
+        None => Observed::new(oa, wa.as_deref()),
+    };
     let v = compare(&class, obs_a, obs_b, None);
     if !matches!(v, Verdict::Mismatch(_)) || !class.wants_full() {
         return v;
@@ -499,7 +509,7 @@ async fn run_control(a: &mut Side, b: &mut Side, census: &mut Census) {
     let oa = a.query(&case.sql).await;
     let mut ob = b.query(&case.sql).await;
     census::tamper(&mut ob, census.fault("untampered-negative-control"));
-    let v = judge(&case, &case.sql, Rerun::Text, a, b, &oa, &ob).await;
+    let v = judge(&case, &case.sql, Rerun::Text, a, b, &oa, &ob, false).await;
     census.control = Control::Judged(v.name().to_string());
 }
 
@@ -526,7 +536,17 @@ async fn run_case(
                 b.log_session(&text_sql);
             }
         }
-        let v = judge(case, &text_sql, Rerun::Text, a, b, &oa, &ob).await;
+        let v = judge(
+            case,
+            &text_sql,
+            Rerun::Text,
+            a,
+            b,
+            &oa,
+            &ob,
+            route.on_prototype(),
+        )
+        .await;
         let v = report.rule(case, &text_sql, &oa, &ob, v);
         census.add(census_record(case, "text", route.path(&ob), v.name()));
         let ra = SideResult {
@@ -551,7 +571,17 @@ async fn run_case(
         if cli.plan_cache {
             plan_cache_check(case, &params, a, b, report).await;
         }
-        let mut v = judge(case, &case.sql, Rerun::Prepared(&params), a, b, &oa, &ob).await;
+        let mut v = judge(
+            case,
+            &case.sql,
+            Rerun::Prepared(&params),
+            a,
+            b,
+            &oa,
+            &ob,
+            route.on_prototype(),
+        )
+        .await;
         if let (Some(x), Some(y)) = (&pa, &pb) {
             let mut d = prepare_diffs(x, y);
             d.extend(execute_metadata_diffs((Some(x), &oa), (Some(y), &ob)));
