@@ -2628,4 +2628,66 @@ mod fence_tests {
                 if matches!(sel.fields.fields[0].expr.as_ref(), Some(tidb_parser::ast::Expr::Column(_)))
         ));
     }
+
+    /// #509 / #555 (`--new-stack=off`): `PREPARE -> EXECUTE -> SET sql_mode -> EXECUTE ->
+    /// CLOSE -> re-PREPARE -> EXECUTE` keeps the prepare-time lowered statement for the first
+    /// handle and parses afresh under the updated `sql_mode` on re-prepare.
+    #[test]
+    fn off_mode_prepare_set_sql_mode_execute_reprepare() {
+        let mut s = validation_session(&[]);
+        let opts = |sess: &tidb_session::Session| tidb_parser::ParseOptions {
+            window_functions: sess.vars().enable_window_function,
+            sql_mode: tidb_base::mysql::SQLMode(sess.vars().sql_mode),
+        };
+        let eval_const_select =
+            |sess: &mut tidb_session::Session, lowered: &Lowered| -> Result<Vec<u8>, SqlError> {
+                let Statement::Select(sel) = &lowered.stmt else {
+                    panic!("expected Select");
+                };
+                let mut warnings = Vec::new();
+                let rs = constant::ConstEnv {
+                    server_version: "8.0.11-TiDB-tidb-rs",
+                    current_db: None,
+                    user: "root@127.0.0.1",
+                    current_user: "root@%",
+                    connection_id: 1,
+                    have_ssl: "NO",
+                    autocommit: true,
+                    last_plan_from_cache: false,
+                    last_plan_from_binding: false,
+                    vars: sess.vars_mut(),
+                    warnings: &mut warnings,
+                }
+                .select(sel, &[])?;
+                match &rs.rows[0][0] {
+                    Value::Bytes(b) => Ok(b.clone()),
+                    other => panic!("unexpected value: {other:?}"),
+                }
+            };
+
+        // 1. NO_BACKSLASH_ESCAPES: PREPARE -> EXECUTE -> SET '' -> EXECUTE -> re-PREPARE -> EXECUTE.
+        run_over(&mut s, "SET sql_mode = 'NO_BACKSLASH_ESCAPES'")
+            .1
+            .unwrap();
+        let stmt1 = tidb_sql::parse_and_lower_with(r"SELECT '\n'", &opts(&s)).unwrap();
+        assert_eq!(eval_const_select(&mut s, &stmt1).unwrap(), b"\\n");
+
+        run_over(&mut s, "SET sql_mode = ''").1.unwrap();
+        assert_eq!(eval_const_select(&mut s, &stmt1).unwrap(), b"\\n");
+
+        let stmt2 = tidb_sql::parse_and_lower_with(r"SELECT '\n'", &opts(&s)).unwrap();
+        assert_eq!(eval_const_select(&mut s, &stmt2).unwrap(), b"\n");
+
+        // 2. ANSI_QUOTES: PREPARE `SELECT "abc"` under '' -> EXECUTE ('abc') -> SET ANSI_QUOTES
+        //    -> EXECUTE ('abc') -> re-PREPARE -> 1054 Unknown column 'abc'.
+        let stmt3 = tidb_sql::parse_and_lower_with(r#"SELECT "abc""#, &opts(&s)).unwrap();
+        assert_eq!(eval_const_select(&mut s, &stmt3).unwrap(), b"abc");
+
+        run_over(&mut s, "SET sql_mode = 'ANSI_QUOTES'").1.unwrap();
+        assert_eq!(eval_const_select(&mut s, &stmt3).unwrap(), b"abc");
+
+        let stmt4 = tidb_sql::parse_and_lower_with(r#"SELECT "abc""#, &opts(&s)).unwrap();
+        let err = eval_const_select(&mut s, &stmt4).unwrap_err();
+        assert_eq!(err.code, 1054, "{}", err.message);
+    }
 }

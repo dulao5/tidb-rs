@@ -1061,6 +1061,134 @@ fn prepared_under_sql_mode_uses_prepare_time_mode() {
     assert_eq!(e.code, 1235, "{}", e.message);
 }
 
+/// #509 / #555: `PREPARE -> EXECUTE -> SET sql_mode -> EXECUTE -> CLOSE -> re-PREPARE -> EXECUTE`
+/// with the instance plan cache enabled, in both `fallback` and `strict` modes.
+/// Verifies that executing a statement prepared under one `sql_mode` after `SET sql_mode = ''`
+/// keeps the prepare-time AST (matching Go) without poisoning the instance plan cache entry for
+/// a later `PREPARE` of the same SQL text under the new `sql_mode`.
+#[test]
+fn prepare_set_sql_mode_execute_reprepare_with_plan_cache() {
+    let extract_str = |res: Result<Response, SqlError>| -> Vec<u8> {
+        match res.expect("execute should succeed") {
+            Response::Encoded(rs) => {
+                // Binary protocol single VARCHAR column: 0x00 header, 1-byte null bitmap, lenenc string.
+                let row = &rs.rows[0];
+                let len = row[2] as usize;
+                row[3..3 + len].to_vec()
+            }
+            Response::ResultSet(rs) => match &rs.rows[0][0] {
+                Value::Bytes(b) => b.clone(),
+                other => panic!("unexpected cell: {other:?}"),
+            },
+            other => panic!("unexpected response: {other:?}"),
+        }
+    };
+
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
+        let mut p = poc();
+        p.values.current_db = Some("test".into());
+        let mut r = real(mode, &p);
+        let cache = Arc::new(
+            tidb_planner::core::plan_cache_instance::new_instance_plan_cache(90 << 20, 100 << 20),
+        );
+        r.new
+            .session_mut()
+            .set_instance_plan_cache(Some(cache as _));
+        r.new.session_mut().vars_mut().enable_prepared_plan_cache = true;
+
+        // 1. NO_BACKSLASH_ESCAPES: `SELECT '\n'` returns 2 bytes (`\n` literal) when prepared
+        //    under NO_BACKSLASH_ESCAPES, keeps returning 2 bytes when executed after
+        //    `SET sql_mode = ''`, and returns 1 byte (newline) after close + re-prepare under `''`.
+        block_on(r.query(&mut p, "SET sql_mode = 'NO_BACKSLASH_ESCAPES'")).unwrap();
+        let sql = r"SELECT '\n'";
+        let info1 = block_on(r.prepare(&mut p, 1, sql)).unwrap();
+        p.columns = info1.columns.clone();
+        assert_eq!(extract_str(block_on(r.execute(&mut p, 1, vec![]))), b"\\n");
+
+        block_on(r.query(&mut p, "SET sql_mode = ''")).unwrap();
+        assert_eq!(extract_str(block_on(r.execute(&mut p, 1, vec![]))), b"\\n");
+
+        r.close(&mut p, 1);
+        let info2 = block_on(r.prepare(&mut p, 2, sql)).unwrap();
+        p.columns = info2.columns.clone();
+        assert_eq!(
+            extract_str(block_on(r.execute(&mut p, 2, vec![]))),
+            b"\n",
+            "mode={mode:?}: re-prepared statement must not hit stale NO_BACKSLASH_ESCAPES plan"
+        );
+
+        // 2. ANSI_QUOTES: PREPARE under ANSI_QUOTES records ModeANSIQuotes in PlanCacheStmt,
+        //    whereas re-PREPARE under '' records 0, so their PlanCacheKeys do not collide even
+        //    when the first statement is executed after `SET sql_mode = ''`.
+        block_on(r.query(&mut p, "SET sql_mode = 'ANSI_QUOTES'")).unwrap();
+        let sql_aq = r#"SELECT id FROM sbtest1 WHERE "c" = 'x'"#;
+        let _ = block_on(r.prepare(&mut p, 3, sql_aq)).unwrap();
+        let Owner::Both { new_id: nid3, .. } = r.owner(3).cloned().unwrap() else {
+            panic!("expected Owner::Both for stmt 3");
+        };
+        {
+            let ps_any = r
+                .new
+                .session()
+                .vars()
+                .get_prepared_stmt_by_id(nid3)
+                .unwrap();
+            let ps = ps_any
+                .downcast_ref::<parking_lot::Mutex<tidb_planner::core::plan_cache_utils::PlanCacheStmt>>()
+                .unwrap()
+                .lock();
+            assert_eq!(ps.parse_sql_mode, tidb_base::mysql::ModeANSIQuotes.0);
+        }
+
+        block_on(r.query(&mut p, "SET sql_mode = ''")).unwrap();
+        r.close(&mut p, 3);
+        let _ = block_on(r.prepare(&mut p, 4, sql_aq)).unwrap();
+        let Owner::Both { new_id: nid4, .. } = r.owner(4).cloned().unwrap() else {
+            panic!("expected Owner::Both for stmt 4");
+        };
+        {
+            let ps_any = r
+                .new
+                .session()
+                .vars()
+                .get_prepared_stmt_by_id(nid4)
+                .unwrap();
+            let ps = ps_any
+                .downcast_ref::<parking_lot::Mutex<tidb_planner::core::plan_cache_utils::PlanCacheStmt>>()
+                .unwrap()
+                .lock();
+            assert_eq!(ps.parse_sql_mode, 0);
+        }
+
+        // 3. REAL_AS_FLOAT: PREPARE under REAL_AS_FLOAT -> EXECUTE -> SET '' -> EXECUTE ->
+        //    CLOSE -> re-PREPARE -> EXECUTE returns Float then Double (no stale plan cache hit).
+        block_on(r.query(&mut p, "SET sql_mode = 'REAL_AS_FLOAT'")).unwrap();
+        let sql_real = "SELECT CAST(1.25 AS REAL)";
+        let _ = block_on(r.prepare(&mut p, 5, sql_real)).unwrap();
+        let Ok(Response::Encoded(rs1)) = block_on(r.execute(&mut p, 5, vec![])) else {
+            panic!("expected encoded result");
+        };
+        assert_eq!(rs1.columns[0].column_type, ColumnType::Float);
+
+        block_on(r.query(&mut p, "SET sql_mode = ''")).unwrap();
+        let Ok(Response::Encoded(rs2)) = block_on(r.execute(&mut p, 5, vec![])) else {
+            panic!("expected encoded result");
+        };
+        assert_eq!(rs2.columns[0].column_type, ColumnType::Float);
+
+        r.close(&mut p, 5);
+        let _ = block_on(r.prepare(&mut p, 6, sql_real)).unwrap();
+        let Ok(Response::Encoded(rs3)) = block_on(r.execute(&mut p, 6, vec![])) else {
+            panic!("expected encoded result");
+        };
+        assert_eq!(
+            rs3.columns[0].column_type,
+            ColumnType::Double,
+            "mode={mode:?}: re-prepared CAST(1.25 AS REAL) under '' must be Double, not stale Float"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Step 3: answers, Go-ported errors, fallback (§4.6), strict.
 

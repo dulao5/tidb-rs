@@ -114,6 +114,10 @@ pub struct Side {
     /// Texts prepared on the current connection (the driver's statement cache may still hold
     /// them; see [`Side::prepared`]).
     prepared_texts: HashSet<String>,
+    /// Texts prepared before a session-changing statement (`SET`, `USE`): closed and
+    /// re-prepared on next use even when `fresh == false`, so A and B cannot drift when
+    /// `mysql_async`'s client statement cache evicts entries at different times.
+    stale_prepared_texts: HashSet<String>,
     session_log: Vec<String>,
     /// Whether the current connection uses TLS (for the banner).
     pub using_tls: bool,
@@ -166,6 +170,7 @@ impl Side {
             timeout,
             conn: None,
             prepared_texts: HashSet::new(),
+            stale_prepared_texts: HashSet::new(),
             session_log: Vec::new(),
             using_tls: false,
         })
@@ -203,6 +208,7 @@ impl Side {
         };
         self.conn = Some(conn);
         self.prepared_texts.clear();
+        self.stale_prepared_texts.clear();
         self.using_tls = tls;
         for stmt in self.session_log.clone() {
             // Best effort: it succeeded before on this server.
@@ -223,9 +229,13 @@ impl Side {
         Ok(())
     }
 
-    /// Remembers a session statement that succeeded, for replay after reconnects.
+    /// Remembers a session statement that succeeded, for replay after reconnects, and marks
+    /// previously prepared statement texts stale so they are closed and re-prepared under the
+    /// updated session state (`sql_mode`, `USE db`, etc.) on next use.
     pub fn log_session(&mut self, sql: &str) {
         self.session_log.push(sql.to_string());
+        self.stale_prepared_texts
+            .extend(self.prepared_texts.iter().cloned());
     }
 
     /// Runs `sql` via COM_QUERY.
@@ -277,7 +287,8 @@ impl Side {
         let Some(conn) = self.conn.as_mut() else {
             return (None, Outcome::Client("not connected".into()));
         };
-        if fresh && self.prepared_texts.remove(sql) {
+        let stale = self.stale_prepared_texts.remove(sql);
+        if (fresh || stale) && self.prepared_texts.remove(sql) {
             // From the cache, without a round trip (unless the cache dropped it already: then
             // this prepares it, and the close below drops that one again).
             let close = async {
