@@ -237,13 +237,13 @@ impl LogicalPlan for LogicalSelection {
         ctx: &mut PlanCtx<'_>,
         this: PlanId,
         mut predicates: Vec<ExprRef>,
-    ) -> PlanId {
+    ) -> Result<PlanId, Error> {
         predicates.extend(self.conditions.iter().cloned());
         let combined_cond = predicates;
         let mut child = self.children()[0];
-        child = base::convert_outer_to_inner_join(ctx, child, combined_cond);
+        child = base::convert_outer_to_inner_join(ctx, child, combined_cond)?;
         self.set_children(vec![child]);
-        this
+        Ok(this)
     }
 }
 

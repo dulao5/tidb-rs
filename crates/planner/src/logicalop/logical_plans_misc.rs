@@ -1,12 +1,13 @@
 //! go-file: pkg/planner/core/operator/logicalop/logical_plans_misc.go
 //!
 //! Helpers shared by the logical operators. Go's type switches over `base.LogicalPlan` are
-//! matches on [`LogicalKind`] (`M-IFACE`); the operators not ported yet (join, aggregation,
-//! window, ...) have no kind, so their arms are written as comments where Go has them.
+//! matches on [`LogicalKind`] (`M-IFACE`); the operators not ported yet (apply, union all,
+//! expand, ...) have no kind, so their arms are written as comments where Go has them.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use tidb_base::Error;
 use tidb_base::kv::{self, StoreType};
 use tidb_base::mysql::TypeNull;
 use tidb_expression::constant_propagation::propagate_constant;
@@ -17,7 +18,9 @@ use tidb_model::TableCacheStatusDisable;
 use crate::arena::PlanId;
 use crate::base::{self, LogicalKind, LogicalPlan};
 use crate::core::constraint::delete_true_exprs;
-use crate::logicalop::logical_join::{append_add_selection_trace_step, conds2_table_dual};
+use crate::logicalop::logical_join::{
+    JoinType, append_add_selection_trace_step, conds2_table_dual,
+};
 use crate::logicalop::logical_selection::append_table_dual_trace_step;
 use crate::logicalop::{DataSource, LogicalSelection, LogicalTopN};
 use crate::planctx::PlanCtx;
@@ -27,14 +30,14 @@ use crate::util::optimizetrace::LogicalOptimizeOp;
 
 /// HasMaxOneRow returns if the LogicalPlan will output at most one row.
 // go: HasMaxOneRow L1 [M-IFACE]
-pub fn has_max_one_row(p: LogicalKind, child_max_one_row: &[bool]) -> bool {
+pub fn has_max_one_row<P: LogicalPlan + ?Sized>(p: &P, child_max_one_row: &[bool]) -> bool {
     if child_max_one_row.is_empty() {
         // The reason why we use this check is that, this function
         // is used both in planner/core and planner/cascades.
         // In cascades planner, LogicalPlan may have no `children`.
         return false;
     }
-    match p {
+    match p.kind() {
         // *LogicalLock, *LogicalApply: not ported yet.
         LogicalKind::Limit
         | LogicalKind::Sort
@@ -42,7 +45,20 @@ pub fn has_max_one_row(p: LogicalKind, child_max_one_row: &[bool]) -> bool {
         | LogicalKind::Projection
         | LogicalKind::Aggregation
         | LogicalKind::Window => child_max_one_row[0],
-        // *LogicalMaxOneRow: true; *LogicalJoin: by join type (not ported yet).
+        // *LogicalMaxOneRow: true (not ported yet).
+        LogicalKind::Join => {
+            let x = p
+                .as_any()
+                .downcast_ref::<crate::logicalop::LogicalJoin>()
+                .expect("LogicalJoin");
+            match x.join_type {
+                JoinType::SemiJoin
+                | JoinType::AntiSemiJoin
+                | JoinType::LeftOuterSemiJoin
+                | JoinType::AntiLeftOuterSemiJoin => child_max_one_row[0],
+                _ => child_max_one_row[0] && child_max_one_row[1],
+            }
+        }
         _ => false,
     }
 }
@@ -97,15 +113,15 @@ pub fn push_down_top_n_for_base_logical_plan<P: LogicalPlan + ?Sized>(
     this: PlanId,
     top_n: Option<PlanId>,
     opt: &LogicalOptimizeOp,
-) -> PlanId {
+) -> Result<PlanId, Error> {
     for i in 0..p.children().len() {
         let child = p.children()[i];
-        p.children_mut()[i] = base::push_down_top_n(ctx, child, None, opt);
+        p.children_mut()[i] = base::push_down_top_n(ctx, child, None, opt)?;
     }
     if let Some(top_n) = top_n {
-        return LogicalTopN::attach_child_to(ctx, top_n, this, p, opt);
+        return Ok(LogicalTopN::attach_child_to(ctx, top_n, this, p, opt));
     }
-    this
+    Ok(this)
 }
 
 /// pruneByItems: drops duplicated and constant by-items and returns the columns the kept
@@ -206,8 +222,10 @@ pub fn can_push_to_cop_impl<P: LogicalPlan + ?Sized>(
             LogicalKind::TableDual => {
                 return store_tp == kv::TiFlash && consider_dual;
             }
-            // *LogicalJoin: not ported yet (default arm).
-            LogicalKind::Aggregation | LogicalKind::Selection | LogicalKind::Window => {
+            LogicalKind::Aggregation
+            | LogicalKind::Selection
+            | LogicalKind::Join
+            | LogicalKind::Window => {
                 if store_tp != kv::TiFlash {
                     return false;
                 }

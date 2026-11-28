@@ -182,7 +182,7 @@ pub fn build_key_info<P: LogicalPlan + ?Sized>(p: &mut P, arena: &PlanArena) {
         .iter()
         .map(|&c| arena.get(c).max_one_row())
         .collect();
-    let v = has_max_one_row(p.kind(), &child_max_one_row);
+    let v = has_max_one_row(&*p, &child_max_one_row);
     p.base_mut().max_one_row = v;
 }
 
@@ -194,7 +194,7 @@ pub fn push_down_top_n<P: LogicalPlan + ?Sized>(
     this: PlanId,
     top_n: Option<PlanId>,
     opt: &LogicalOptimizeOp,
-) -> PlanId {
+) -> Result<PlanId, Error> {
     push_down_top_n_for_base_logical_plan(p, ctx, this, top_n, opt)
 }
 
@@ -292,13 +292,13 @@ pub fn convert_outer_to_inner_join<P: LogicalPlan + ?Sized>(
     ctx: &mut PlanCtx<'_>,
     this: PlanId,
     predicates: Vec<ExprRef>,
-) -> PlanId {
+) -> Result<PlanId, Error> {
     for i in 0..p.children().len() {
         let child = p.children()[i];
-        let new_child = base::convert_outer_to_inner_join(ctx, child, predicates.clone());
+        let new_child = base::convert_outer_to_inner_join(ctx, child, predicates.clone())?;
         p.set_child(i, new_child);
     }
-    this
+    Ok(this)
 }
 
 /// The memo of `FindBestTask` (Go's `taskMap`, `taskMapBak` and `taskMapBakTS` fields of

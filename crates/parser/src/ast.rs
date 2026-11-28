@@ -1286,12 +1286,16 @@ impl FromNode for Join {
 pub struct TableSource {
     pub source: ResultSetNode,
     pub as_name: CIStr,
+    /// `Lateral`: a LATERAL derived table. The parser does not build LATERAL yet (the
+    /// `lateral SubSelect ...` rule is a placeholder node, block D02.2), so it is always false.
+    pub lateral: bool,
 }
 impl FromNode for TableSource {
     fn from_node(n: Node) -> Self {
         TableSource {
             source: ResultSetNode::Unported(Box::new(n)),
             as_name: CIStr::default(),
+            lateral: false,
         }
     }
 }

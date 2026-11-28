@@ -10,6 +10,8 @@ pub mod fixcontrol;
 pub mod handle_cols;
 pub mod logicaltrace;
 pub mod misc;
+pub mod null_misc;
+pub mod null_misc_builtins;
 pub mod optimizetrace;
 pub mod path;
 

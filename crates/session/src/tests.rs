@@ -782,6 +782,14 @@ fn every_fallback_point_restores_the_session() {
             assert_eq!(blocked(&e), Some("D09.13"), "{e:?}");
             "D09.13"
         }),
+        ("after Compile (join boundary stub)", |s| {
+            // A join is built on the new stack (the join builder, D09.3 part A) and stops at
+            // the column pruning of the join (D09.7) in logical optimization.
+            let sql = "SELECT s1.c FROM sbtest1 s1 JOIN sbtest1 s2 ON s1.id = s2.id";
+            let e = block_on(s.execute_stmt(parse(sql), sql)).err().unwrap();
+            assert_eq!(blocked(&e), Some("D09.7"), "{e:?}");
+            "D09.7"
+        }),
         ("after the warm-up (TSO pending)", |s| {
             let _ = compile(s, "SELECT a FROM t", 1);
             assert!(s.core.sctx.lazy_txn().pending());

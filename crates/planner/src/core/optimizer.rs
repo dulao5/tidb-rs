@@ -65,6 +65,7 @@ use crate::core::task::get_avg_row_size;
 use crate::core::task_base::Task;
 use crate::logicalop::DataSource;
 use crate::logicalop::base_logical_plan::TaskMap;
+use crate::logicalop::{JoinType, LogicalJoin};
 use crate::physicalop::{PhysicalPlanRef, make_mut_plan, map_children};
 use crate::planctx::PlanCtx;
 use crate::property::{PhysicalProperty, StatsInfo};
@@ -145,17 +146,17 @@ const MAX_MIN_ELIMINATOR: UnportedRule = UnportedRule {
     name: "max_min_eliminate",
     block: "D09.9",
 };
-// glue: blocked-by:D09.3 (ConvertOuterToInnerJoin.Optimize: joins)
-// glue: blocked-by:D09.3 (ConvertOuterToInnerJoin.Name: joins)
+// glue: blocked-by:D09.8 (ConvertOuterToInnerJoin.Optimize: the outer-to-inner join rule of predicate push down)
+// glue: blocked-by:D09.8 (ConvertOuterToInnerJoin.Name: the outer-to-inner join rule of predicate push down)
 const CONVERT_OUTER_TO_INNER_JOIN: UnportedRule = UnportedRule {
     name: "convert_outer_to_inner_joins",
-    block: "D09.3",
+    block: "D09.8",
 };
-// glue: blocked-by:D09.3 (OuterJoinEliminator.Optimize: joins)
-// glue: blocked-by:D09.3 (OuterJoinEliminator.Name: joins)
+// glue: blocked-by:D09.10 (OuterJoinEliminator.Optimize: outer join elimination, with join reorder)
+// glue: blocked-by:D09.10 (OuterJoinEliminator.Name: outer join elimination, with join reorder)
 const OUTER_JOIN_ELIMINATOR: UnportedRule = UnportedRule {
     name: "outer_join_eliminate",
-    block: "D09.3",
+    block: "D09.10",
 };
 // glue: blocked-by:D09.9 (AggregationPushDownSolver.Optimize: aggregation rules)
 // glue: blocked-by:D09.9 (AggregationPushDownSolver.Name: aggregation rules)
@@ -1213,10 +1214,16 @@ fn transform_physical_plan(
     f(p)
 }
 
-/// `existsCartesianProduct`: `LogicalJoin` (D09.3) is not ported, so a plan has no join.
-// go: existsCartesianProduct L2 (the LogicalJoin arm comes with joins, D09.3)
+/// existsCartesianProduct reports whether the plan has a join without equal conditions.
+// go: existsCartesianProduct L1 [M-PLAN]
 fn exists_cartesian_product(ctx: &PlanCtx<'_>, p: PlanId) -> bool {
-    // if join, ok := p.(*logicalop.LogicalJoin): not a ported operator.
+    if let Some(join) = ctx.arena.downcast_ref::<LogicalJoin>(p)
+        && join.equal_conditions.is_empty()
+    {
+        return join.join_type == JoinType::InnerJoin
+            || join.join_type == JoinType::LeftOuterJoin
+            || join.join_type == JoinType::RightOuterJoin;
+    }
     for &child in ctx.arena.get(p).children() {
         if exists_cartesian_product(ctx, child) {
             return true;
@@ -1449,7 +1456,7 @@ pub fn dispatch_constant_propagation(
     parent: Option<PlanId>,
     current_child_idx: usize,
     opt: &LogicalOptimizeOp,
-) -> Option<PlanId> {
+) -> Result<Option<PlanId>, Error> {
     with_detached(ctx, p, |node, ctx| {
         node.constant_propagation(ctx, parent, current_child_idx, opt)
     })

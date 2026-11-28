@@ -9,6 +9,84 @@
 //! non-empty hint list) is a boundary stub `blocked-by:D02.2` at the place Go takes the
 //! branch; an empty list gives exactly Go's values.
 
+// The join preference bits of `hint.go`'s `iota` block (`uint`, M-INT: u64), in Go's order;
+// PreferHashAgg / PreferStreamAgg below continue the same block (1 << 25, 1 << 26).
+/// PreferINLJ indicates that the optimizer prefers to use index nested loop join.
+#[allow(non_upper_case_globals)]
+pub const PreferINLJ: u64 = 1 << 0;
+/// PreferINLHJ indicates that the optimizer prefers to use index nested loop hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferINLHJ: u64 = 1 << 1;
+/// PreferINLMJ indicates that the optimizer prefers to use index nested loop merge join.
+#[allow(non_upper_case_globals)]
+pub const PreferINLMJ: u64 = 1 << 2;
+/// PreferHJBuild indicates that the optimizer prefers to use hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferHJBuild: u64 = 1 << 3;
+/// PreferHJProbe indicates that the optimizer prefers to use hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferHJProbe: u64 = 1 << 4;
+/// PreferHashJoin indicates that the optimizer prefers to use hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferHashJoin: u64 = 1 << 5;
+/// PreferNoHashJoin indicates that the optimizer prefers not to use hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferNoHashJoin: u64 = 1 << 6;
+/// PreferMergeJoin indicates that the optimizer prefers to use merge join.
+#[allow(non_upper_case_globals)]
+pub const PreferMergeJoin: u64 = 1 << 7;
+/// PreferNoMergeJoin indicates that the optimizer prefers not to use merge join.
+#[allow(non_upper_case_globals)]
+pub const PreferNoMergeJoin: u64 = 1 << 8;
+/// PreferNoIndexJoin indicates that the optimizer prefers not to use index join.
+#[allow(non_upper_case_globals)]
+pub const PreferNoIndexJoin: u64 = 1 << 9;
+/// PreferNoIndexHashJoin indicates that the optimizer prefers not to use index hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferNoIndexHashJoin: u64 = 1 << 10;
+/// PreferNoIndexMergeJoin indicates that the optimizer prefers not to use index merge join.
+#[allow(non_upper_case_globals)]
+pub const PreferNoIndexMergeJoin: u64 = 1 << 11;
+/// PreferBCJoin indicates that the optimizer prefers to use broadcast join.
+#[allow(non_upper_case_globals)]
+pub const PreferBCJoin: u64 = 1 << 12;
+/// PreferShuffleJoin indicates that the optimizer prefers to use shuffle join.
+#[allow(non_upper_case_globals)]
+pub const PreferShuffleJoin: u64 = 1 << 13;
+/// PreferRewriteSemiJoin indicates that the optimizer prefers to rewrite semi join.
+#[allow(non_upper_case_globals)]
+pub const PreferRewriteSemiJoin: u64 = 1 << 14;
+/// PreferLeftAsINLJInner indicates that the optimizer prefers to use left child as inner child of index nested loop join.
+#[allow(non_upper_case_globals)]
+pub const PreferLeftAsINLJInner: u64 = 1 << 15;
+/// PreferRightAsINLJInner indicates that the optimizer prefers to use right child as inner child of index nested loop join.
+#[allow(non_upper_case_globals)]
+pub const PreferRightAsINLJInner: u64 = 1 << 16;
+/// PreferLeftAsINLHJInner indicates that the optimizer prefers to use left child as inner child of index nested loop hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferLeftAsINLHJInner: u64 = 1 << 17;
+/// PreferRightAsINLHJInner indicates that the optimizer prefers to use right child as inner child of index nested loop hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferRightAsINLHJInner: u64 = 1 << 18;
+/// PreferLeftAsINLMJInner indicates that the optimizer prefers to use left child as inner child of index nested loop merge join.
+#[allow(non_upper_case_globals)]
+pub const PreferLeftAsINLMJInner: u64 = 1 << 19;
+/// PreferRightAsINLMJInner indicates that the optimizer prefers to use right child as inner child of index nested loop merge join.
+#[allow(non_upper_case_globals)]
+pub const PreferRightAsINLMJInner: u64 = 1 << 20;
+/// PreferLeftAsHJBuild indicates that the optimizer prefers to use left child as build child of hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferLeftAsHJBuild: u64 = 1 << 21;
+/// PreferRightAsHJBuild indicates that the optimizer prefers to use right child as build child of hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferRightAsHJBuild: u64 = 1 << 22;
+/// PreferLeftAsHJProbe indicates that the optimizer prefers to use left child as probe child of hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferLeftAsHJProbe: u64 = 1 << 23;
+/// PreferRightAsHJProbe indicates that the optimizer prefers to use right child as probe child of hash join.
+#[allow(non_upper_case_globals)]
+pub const PreferRightAsHJProbe: u64 = 1 << 24;
+
 /// PreferHashAgg indicates that the optimizer prefers to use hash aggregation.
 #[allow(non_upper_case_globals)]
 pub const PreferHashAgg: u64 = 1 << 25;

@@ -43,9 +43,10 @@ use tidb_planner::core::preprocess::{
 };
 use tidb_planner::core::resolve::new_node_w;
 use tidb_planner::hint::hint::{PreferHashAgg, PreferStreamAgg};
+use tidb_planner::logicalop::logical_join::build_logical_join_schema;
 use tidb_planner::logicalop::{
-    DataSource, FrameBound, LogicalAggregation, LogicalLimit, LogicalProjection, LogicalSelection,
-    LogicalSort, LogicalTableDual, LogicalWindow,
+    DataSource, FrameBound, JoinType, LogicalAggregation, LogicalJoin, LogicalLimit,
+    LogicalProjection, LogicalSelection, LogicalSort, LogicalTableDual, LogicalWindow,
 };
 use tidb_planner::property::{GroupNDV, StatsInfo};
 use tidb_planner::util::optimizetrace::default_logical_optimize_option;
@@ -79,20 +80,18 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D08.9", 65),
     // Virtual generated columns.
     ("D09.1", 2),
-    // Partitioned tables.
-    ("D09.12", 4),
+    // Partitioned tables (2 of them in a join).
+    ("D09.12", 6),
     // The lock operator (SELECT ... FOR UPDATE).
     ("D09.14", 2),
     // System variables in expressions (the rewriter's part 2).
     ("D09.2", 2),
-    // Joins.
-    ("D09.3", 6),
     // GROUP BY ... WITH ROLLUP (D09.4 part C).
     ("D09.4", 2),
     // WITH and set operations.
     ("D09.5", 4),
-    // Subqueries.
-    ("D09.6", 2),
+    // Subqueries (2 of them in the ON condition of a join).
+    ("D09.6", 4),
 ];
 
 fn vectors() -> String {
@@ -455,6 +454,35 @@ fn dump(ctx: &PlanCtx<'_>, p: PlanId) -> Value {
             o.insert("pby".into(), Value::Array(pby));
             o.insert("oby".into(), Value::Array(oby));
             o.insert("frame".into(), frame);
+        }
+        LogicalKind::Join => {
+            let x = node.as_any().downcast_ref::<LogicalJoin>().unwrap();
+            o.insert("join_type".into(), json!(x.join_type as i32));
+            o.insert("reordered".into(), json!(x.reordered));
+            o.insert("cartesian".into(), json!(x.cartesian_join));
+            o.insert("straight".into(), json!(x.straight_join));
+            o.insert("prefer_join_type".into(), json!(x.prefer_join_type));
+            o.insert("prefer_join_order".into(), json!(x.prefer_join_order));
+            o.insert(
+                "left_prefer_join_type".into(),
+                json!(x.left_prefer_join_type),
+            );
+            o.insert(
+                "right_prefer_join_type".into(),
+                json!(x.right_prefer_join_type),
+            );
+            o.insert("eq".into(), exprs_out(ectx, &x.equal_conditions));
+            o.insert("na_eq".into(), exprs_out(ectx, &x.na_eq_conditions));
+            o.insert("left".into(), exprs_out(ectx, &x.left_conditions));
+            o.insert("right".into(), exprs_out(ectx, &x.right_conditions));
+            o.insert("other".into(), exprs_out(ectx, &x.other_conditions));
+            o.insert(
+                "full_schema".into(),
+                x.full_schema
+                    .as_ref()
+                    .map_or(Value::Null, |fs| cols_out(ectx, &fs.columns)),
+            );
+            o.insert("full_names".into(), names_out(&x.full_names));
         }
         k => panic!("dump {k:?}"),
     }
@@ -1340,13 +1368,269 @@ fn run_winop(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
     }
 }
 
+/// The first LogicalJoin of the plan, with the Selection right above it (the ON conditions of
+/// an inner join), like the Go domain's `sbFindJoin`.
+fn find_join(ctx: &PlanCtx<'_>, p: PlanId) -> Option<(PlanId, Option<PlanId>)> {
+    let node = ctx.arena.get(p);
+    if node.kind() == LogicalKind::Selection {
+        let c = node.children()[0];
+        if ctx.arena.get(c).kind() == LogicalKind::Join {
+            return Some((c, Some(p)));
+        }
+    }
+    if node.kind() == LogicalKind::Join {
+        return Some((p, None));
+    }
+    node.children().iter().find_map(|&c| find_join(ctx, c))
+}
+
+const ALL_JOIN_TYPES: [JoinType; 7] = [
+    JoinType::InnerJoin,
+    JoinType::LeftOuterJoin,
+    JoinType::RightOuterJoin,
+    JoinType::SemiJoin,
+    JoinType::AntiSemiJoin,
+    JoinType::LeftOuterSemiJoin,
+    JoinType::AntiLeftOuterSemiJoin,
+];
+
+fn run_joinop(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
+    collate::set_new_collation_enabled_for_test(true);
+    let sql = args[1].as_str().unwrap();
+    let spec = &args[2];
+    let Ok(out) = parse(sql, &ParseOptions::default()) else {
+        return Outcome::Unparsed;
+    };
+    let Some(mut stmt) = out.stmts.into_iter().next() else {
+        return Outcome::Unparsed;
+    };
+    let mode = tidb_base::mysql::ModeOnlyFullGroupBy.0;
+    let mut vars = SessionVars::new(Box::new(Acc));
+    vars.current_db = "test".to_owned();
+    vars.sql_mode = mode;
+    let is = InfoSchemaHandle(Arc::clone(tables) as Arc<dyn InfoSchemaLookup>);
+    let resolve_ctx = {
+        let mut node = new_node_w(&mut stmt);
+        let (_, res) = preprocess(
+            &mut vars,
+            &mut node,
+            vec![with_preprocessor_return(PreprocessorReturn {
+                info_schema: Some(is.clone()),
+                ..Default::default()
+            })],
+        );
+        if let Err(e) = res {
+            return Outcome::Value(err_out(&e));
+        }
+        node.get_resolve_context()
+    };
+    vars.state.plan_id.0.store(0, Ordering::SeqCst);
+    vars.state.plan_column_id.0.store(0, Ordering::SeqCst);
+    let mut builder = new_plan_builder(&[]);
+    builder.init(&mut vars, Some(is), None);
+    builder.sql_text = sql;
+    builder.resolve_ctx = Some(resolve_ctx);
+
+    let wh = Arc::new(new_static_warn_handler(0));
+    let ev = es::new_eval_context(vec![
+        es::with_type_flags(tidb_types::context::DefaultStmtFlags),
+        es::with_sql_mode(SQLMode(mode)),
+        es::with_location(Some(utc())),
+        es::with_current_db("test".to_owned()),
+        es::with_warn_handler(Some(Arc::clone(&wh) as _)),
+    ]);
+    let expr_ctx = es::new_expr_context(vec![
+        es::with_eval_ctx(ev),
+        es::with_charset("utf8mb4".to_owned(), "utf8mb4_bin".to_owned()),
+        es::with_default_collation_for_utf8mb4("utf8mb4_bin".to_owned()),
+    ]);
+    let mut ctx = PlanCtx::new(&mut vars, expr_ctx);
+    ctx.has_dirty_content = Some(Arc::new(|_| false));
+    ctx.client = Some(Arc::new(MockClient));
+    let lp = match builder.build(&mut ctx, &stmt) {
+        Ok(p) => p,
+        Err(e) => {
+            if let Some(b) = blocked_by(&e) {
+                return Outcome::Blocked(b.to_string());
+            }
+            return Outcome::Value(err_out(&e));
+        }
+    };
+    let (join_id, sel_id) = find_join(&ctx, lp)
+        .unwrap_or_else(|| panic!("no LogicalJoin in {sql} ({spec}): {}", dump(&ctx, lp)));
+    let conds = sel_id.map_or_else(Vec::new, |s| {
+        ctx.arena
+            .downcast_ref::<LogicalSelection>(s)
+            .unwrap()
+            .conditions
+            .clone()
+    });
+    let (left_id, right_id) = {
+        let ch = ctx.arena.get(join_id).children();
+        (ch[0], ch[1])
+    };
+    let spec_join_type = spec["join_type"].as_i64().unwrap_or(0);
+    let kind = spec["kind"].as_str().unwrap();
+    match kind {
+        "inspect" => {
+            let ectx = ctx.eval_ctx();
+            let ectx = &*ectx;
+            let join = ctx.arena.downcast_ref::<LogicalJoin>(join_id).unwrap();
+            let mut types = Vec::new();
+            let mut schemas = Vec::new();
+            for t in ALL_JOIN_TYPES {
+                types.push(json!([t.string(), t.is_outer_join(), t.is_semi_join()]));
+                let schema = build_logical_join_schema(t, join, &ctx.arena);
+                schemas.push(cols_out(ectx, &schema.columns));
+            }
+            let uids = |cs: &[Arc<Column>]| -> Value {
+                Value::Array(cs.iter().map(|c| json!(c.unique_id)).collect())
+            };
+            let (lk, rk, null_eq, has_null_eq) = join.get_join_keys();
+            let (nlk, nrk) = join.get_na_join_keys();
+            let prefer: Vec<Value> = spec["flags"]
+                .as_array()
+                .map(|fs| {
+                    fs.iter()
+                        .map(|f| json!(join.prefer_any(&[f.as_u64().unwrap()])))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (pl, pr) = join.get_potential_partition_keys();
+            let pk = |ks: &[tidb_planner::property::MPPPartitionColumn]| -> Value {
+                Value::Array(
+                    ks.iter()
+                        .map(|k| json!([k.col.unique_id, k.collate_id]))
+                        .collect(),
+                )
+            };
+            Outcome::Value(json!({
+                "types": types,
+                "keys": [uids(&lk), uids(&rk), null_eq, has_null_eq],
+                "na_keys": [uids(&nlk), uids(&nrk)],
+                "naaj": join.is_naaj(),
+                "prefer_any": prefer,
+                "part_keys": [pk(&pl), pk(&pr)],
+                "schemas": schemas,
+            }))
+        }
+        "keyinfo" => {
+            for (child, field) in [(left_id, "left_keys"), (right_id, "right_keys")] {
+                let cols = ctx.arena.get(child).schema(&ctx.arena).columns.clone();
+                let keys: Vec<Vec<Arc<Column>>> = spec[field]
+                    .as_array()
+                    .map(|ks| {
+                        ks.iter()
+                            .map(|k| {
+                                k.as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|i| Arc::clone(&cols[i.as_u64().unwrap() as usize]))
+                                    .collect()
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ctx.arena.schema_mut(child).keys = keys;
+            }
+            let (keys, max_one_row) = with_detached(&mut ctx, join_id, |node, ctx| {
+                let join = node.as_any_mut().downcast_mut::<LogicalJoin>().unwrap();
+                if spec_join_type >= 0 {
+                    join.join_type = ALL_JOIN_TYPES[spec_join_type as usize];
+                }
+                join.build_key_info(&mut ctx.arena);
+                let keys: Vec<Value> = join
+                    .schema(&ctx.arena)
+                    .keys
+                    .iter()
+                    .map(|k| Value::Array(k.iter().map(|c| json!(c.unique_id)).collect()))
+                    .collect();
+                (keys, join.max_one_row())
+            });
+            Outcome::Value(json!({"keys": keys, "max_one_row": max_one_row}))
+        }
+        "attach" => {
+            let res = with_detached(&mut ctx, join_id, |node, ctx| {
+                let join = node.as_any_mut().downcast_mut::<LogicalJoin>().unwrap();
+                join.join_type = ALL_JOIN_TYPES[spec_join_type as usize];
+                join.attach_on_conds(ctx, &conds)
+            });
+            match res {
+                Ok(()) => Outcome::Value(json!({"plan": dump(&ctx, join_id)})),
+                Err(e) => match blocked_by(&e) {
+                    Some(b) => Outcome::Blocked(b.to_string()),
+                    None => Outcome::Value(err_out(&e)),
+                },
+            }
+        }
+        "extract" => {
+            let derive_left = spec["derive_left"].as_bool().unwrap_or(false);
+            let derive_right = spec["derive_right"].as_bool().unwrap_or(false);
+            let left_schema = ctx.arena.get(left_id).schema(&ctx.arena).clone();
+            let right_schema = ctx.arena.get(right_id).schema(&ctx.arena).clone();
+            let res = with_detached(&mut ctx, join_id, |node, ctx| {
+                let join = node.as_any_mut().downcast_mut::<LogicalJoin>().unwrap();
+                join.extract_on_condition(
+                    ctx,
+                    &conds,
+                    &left_schema,
+                    &right_schema,
+                    derive_left,
+                    derive_right,
+                )
+            });
+            match res {
+                Ok((eq, l, r, o)) => {
+                    let ectx = ctx.eval_ctx();
+                    let ectx = &*ectx;
+                    Outcome::Value(json!({
+                        "eq": exprs_out(ectx, &eq),
+                        "left": exprs_out(ectx, &l),
+                        "right": exprs_out(ectx, &r),
+                        "other": exprs_out(ectx, &o),
+                    }))
+                }
+                Err(e) => match blocked_by(&e) {
+                    Some(b) => Outcome::Blocked(b.to_string()),
+                    None => Outcome::Value(err_out(&e)),
+                },
+            }
+        }
+        "hints" => {
+            let left = spec["left"].as_u64().unwrap_or(0);
+            let right = spec["right"].as_u64().unwrap_or(0);
+            let prefer = with_detached(&mut ctx, join_id, |node, ctx| {
+                let join = node.as_any_mut().downcast_mut::<LogicalJoin>().unwrap();
+                join.left_prefer_join_type = left;
+                join.right_prefer_join_type = right;
+                join.set_preferred_join_type(ctx);
+                join.prefer_join_type
+            });
+            let w = warns(ctx.vars, &wh);
+            Outcome::Value(json!({"prefer": prefer, "w": w}))
+        }
+        "replace" => {
+            let old_col = Arc::clone(&ctx.arena.get(left_id).schema(&ctx.arena).columns[0]);
+            let mut new_col = (*old_col).clone();
+            new_col.unique_id = 9999;
+            let mut replace = std::collections::HashMap::new();
+            replace.insert(old_col.hash_code().to_vec(), Arc::new(new_col));
+            ctx.arena.get_mut(join_id).replace_expr_columns(&replace);
+            Outcome::Value(json!({"plan": dump(&ctx, join_id)}))
+        }
+        other => panic!("joinop: unknown kind {other}"),
+    }
+}
+
 /// Records in `selectbuild` whose `.vi` differs from Go v8.5.8 strictly because of owner-approved
 /// ruling `R29` (`specs/D04.1-privilege/spec.md` §5.1–§5.2, §6.1 D1 option A): `tidb-rs` registers
 /// table-read `SelectPriv` (`column = "*"`, error `1142`) at `build_data_source` and removes Go's
 /// case-sensitive `collectPrivsForCount` patch. Pinned so any unexpected drift fails CI.
 /// Includes the 2 records of `SELECT a FROM t2 USE INDEX (ia)`, which build now that the index
-/// hint loop of `getPossibleAccessPaths` is ported, and read a base table like the others.
-const EXPECTED_R29_NORMALIZED: usize = 2323;
+/// hint loop of `getPossibleAccessPaths` is ported, and read a base table like the others,
+/// and the 165 join statements that build (join plan building part A, D09.3): one exact `R29`
+/// entry per base table of the join.
+const EXPECTED_R29_NORMALIZED: usize = 2488;
 
 /// Checks whether `got` equals Go's `out` once the exact `R29` table-read `("*", 1142)` entries
 /// for the statement's resolved base tables (including those folded into `TableDual` by
@@ -1529,6 +1813,10 @@ fn govec_selectbuild() {
                 args,
             ),
             "winop" => run_winop(
+                tables.as_ref().expect("the tables record comes first"),
+                args,
+            ),
+            "joinop" => run_joinop(
                 tables.as_ref().expect("the tables record comes first"),
                 args,
             ),

@@ -99,14 +99,14 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D09.14", 2),
     // System variables in expressions.
     ("D09.2", 2),
-    // Joins.
-    ("D09.3", 6),
     // GROUP BY ... WITH ROLLUP (D09.4 part C).
     ("D09.4", 2),
     // WITH and set operations.
     ("D09.5", 4),
     // Subqueries.
     ("D09.6", 2),
+    // Joins: logical optimization stops at the column pruning of a join (LogicalJoin.PruneColumns).
+    ("D09.7", 6),
 ];
 
 fn vectors() -> String {
