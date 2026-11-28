@@ -159,8 +159,9 @@ async fn handshake_eof_auth_failure_and_lifecycle_logs_match_go() {
         ]
     );
 
-    // 2. Authentication failure (unknown user): both conn.go:677 WARN and server.go:712 WARN
-    //    must be emitted with `[privilege:1045]` RFC prefix.
+    // 2. Unknown user (mysql_async sets CLIENT_PLUGIN_AUTH): Go rejects in checkAuthPlugin
+    //    before any auth switch with `[server:1045]` and logs `"failed to check the user
+    //    authplugin"` + `"Server.onConn handshake"` (never `:677`).
     let bad_opts = Opts::from(
         OptsBuilder::default()
             .ip_or_hostname("127.0.0.1")
@@ -169,17 +170,39 @@ async fn handshake_eof_auth_failure_and_lifecycle_logs_match_go() {
     );
     assert!(mysql_async::Conn::new(bad_opts).await.is_err());
 
-    let auth_lines = take_lines(&sink, 3).await;
+    let unknown_user_lines = take_lines(&sink, 3).await;
     assert_eq!(
-        auth_lines,
+        unknown_user_lines,
         vec![
             "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]",
-            "[WARN] [conn.rs:LINE] [\"open new session or authentication failure\"] [conn=2] [error=\"[privilege:1045]Access denied for user 'nobody'@'127.0.0.1' (using password: NO)\"]",
-            "[WARN] [conn.rs:LINE] [\"Server.onConn handshake\"] [conn=2] [error=\"[privilege:1045]Access denied for user 'nobody'@'127.0.0.1' (using password: NO)\"] [\"remote addr\"=127.0.0.1:PORT]",
+            "[WARN] [conn.rs:LINE] [\"failed to check the user authplugin\"] [conn=2] [error=\"[server:1045]Access denied for user 'nobody'@'127.0.0.1' (using password: NO)\"]",
+            "[WARN] [conn.rs:LINE] [\"Server.onConn handshake\"] [conn=2] [error=\"[server:1045]Access denied for user 'nobody'@'127.0.0.1' (using password: NO)\"] [\"remote addr\"=127.0.0.1:PORT]",
         ]
     );
 
-    // 3. Handshake use_db failure: `[schema:1049]` RFC prefix on both WARN lines.
+    // 3. Existing user with wrong password: passes checkAuthPlugin and fails openSessionAndDoAuth
+    //    with `[privilege:1045]` on both `"open new session or authentication failure"` and
+    //    `"Server.onConn handshake"`.
+    let wrong_pw_opts = Opts::from(
+        OptsBuilder::default()
+            .ip_or_hostname("127.0.0.1")
+            .tcp_port(addr.port())
+            .user(Some("root"))
+            .pass(Some("wrong-password")),
+    );
+    assert!(mysql_async::Conn::new(wrong_pw_opts).await.is_err());
+
+    let wrong_pw_lines = take_lines(&sink, 3).await;
+    assert_eq!(
+        wrong_pw_lines,
+        vec![
+            "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]",
+            "[WARN] [conn.rs:LINE] [\"open new session or authentication failure\"] [conn=3] [error=\"[privilege:1045]Access denied for user 'root'@'127.0.0.1' (using password: YES)\"]",
+            "[WARN] [conn.rs:LINE] [\"Server.onConn handshake\"] [conn=3] [error=\"[privilege:1045]Access denied for user 'root'@'127.0.0.1' (using password: YES)\"] [\"remote addr\"=127.0.0.1:PORT]",
+        ]
+    );
+
+    // 4. Handshake use_db failure: `[schema:1049]` RFC prefix on both WARN lines.
     let bad_db_opts = Opts::from(
         OptsBuilder::default()
             .ip_or_hostname("127.0.0.1")
@@ -194,12 +217,31 @@ async fn handshake_eof_auth_failure_and_lifecycle_logs_match_go() {
         db_lines,
         vec![
             "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]",
-            "[WARN] [conn.rs:LINE] [\"open new session or authentication failure\"] [conn=3] [error=\"[schema:1049]Unknown database 'no_such_db'\"]",
-            "[WARN] [conn.rs:LINE] [\"Server.onConn handshake\"] [conn=3] [error=\"[schema:1049]Unknown database 'no_such_db'\"] [\"remote addr\"=127.0.0.1:PORT]",
+            "[WARN] [conn.rs:LINE] [\"open new session or authentication failure\"] [conn=4] [error=\"[schema:1049]Unknown database 'no_such_db'\"]",
+            "[WARN] [conn.rs:LINE] [\"Server.onConn handshake\"] [conn=4] [error=\"[schema:1049]Unknown database 'no_such_db'\"] [\"remote addr\"=127.0.0.1:PORT]",
         ]
     );
 
-    // 4. Successful connection + clean disconnect.
+    // 5. Partial header during handshake: Go `io.ErrUnexpectedEOF` ("unexpected EOF") ->
+    //    DEBUG `"wait handshake response fail"` + WARN `"Server.onConn handshake"` (not EOF DEBUG).
+    let mut partial = TcpStream::connect(addr).await.unwrap();
+    let _ = partial.read(&mut buf).await.unwrap();
+    tokio::io::AsyncWriteExt::write_all(&mut partial, &[0x05, 0x00])
+        .await
+        .unwrap();
+    drop(partial);
+
+    let partial_lines = take_lines(&sink, 3).await;
+    assert_eq!(
+        partial_lines,
+        vec![
+            "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]",
+            "[DEBUG] [conn.rs:LINE] [\"wait handshake response fail\"] [conn=5] [error=\"unexpected EOF\"]",
+            "[WARN] [conn.rs:LINE] [\"Server.onConn handshake\"] [conn=5] [error=\"unexpected EOF\"] [\"remote addr\"=127.0.0.1:PORT]",
+        ]
+    );
+
+    // 6. Successful connection + clean disconnect.
     let ok_opts = Opts::from(
         OptsBuilder::default()
             .ip_or_hostname("127.0.0.1")
@@ -214,8 +256,8 @@ async fn handshake_eof_auth_failure_and_lifecycle_logs_match_go() {
         ok_lines,
         vec![
             "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]",
-            "[DEBUG] [conn.rs:LINE] [\"new connection\"] [conn=4] [remoteAddr=127.0.0.1:PORT]",
-            "[DEBUG] [conn.rs:LINE] [\"connection closed\"] [conn=4]",
+            "[DEBUG] [conn.rs:LINE] [\"new connection\"] [conn=6] [remoteAddr=127.0.0.1:PORT]",
+            "[DEBUG] [conn.rs:LINE] [\"connection closed\"] [conn=6]",
         ]
     );
 

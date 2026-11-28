@@ -292,14 +292,14 @@ impl From<io::Error> for HandshakeError {
 impl From<PacketError> for HandshakeError {
     fn from(e: PacketError) -> Self {
         match e {
-            PacketError::Io(io_err) => Self::from(io_err),
-            other => Self::Other(other.to_string()),
+            PacketError::Eof => Self::Eof,
+            other => Self::Other(other.log_string()),
         }
     }
 }
 
 fn is_packet_eof(e: &PacketError) -> bool {
-    matches!(e, PacketError::Io(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof)
+    matches!(e, PacketError::Eof)
 }
 
 /// Performs the connection phase, including the TLS upgrade after an SSLRequest. Returns the
@@ -335,7 +335,15 @@ where
             let tls_stream = acceptor
                 .accept(Rewind::new(buffered, stream))
                 .await
-                .map_err(|e| HandshakeError::Other(format!("TLS handshake failed: {e}")))?;
+                .map_err(|e| {
+                    // Go pkg/server/conn.go:2584-2586: return raw TLS error (no invented prefix);
+                    // client hangup mid-TLS-handshake routes to DEBUG "EOF".
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        HandshakeError::Eof
+                    } else {
+                        HandshakeError::Other(e.to_string())
+                    }
+                })?;
             let mut io = PacketIo::new(
                 MaybeTls::Tls(Box::new(tls_stream)),
                 config.max_allowed_packet,
@@ -343,7 +351,7 @@ where
             io.set_sequence(seq);
             let data = io.read_packet().await.map_err(|e| {
                 // Go pkg/server/conn.go:613-616: WARN for any read error after TLS upgrade.
-                let err_str = e.to_string();
+                let err_str = e.log_string();
                 tidb_base::log_warn!(
                     "read handshake response failure after upgrade to TLS",
                     "conn" => connection_id,
@@ -420,7 +428,7 @@ where
                 "conn" => connection_id,
             );
         } else {
-            let err_str = e.to_string();
+            let err_str = e.log_string();
             tidb_base::log_debug!(
                 "wait handshake response fail",
                 "conn" => connection_id,
@@ -439,9 +447,11 @@ where
             });
         }
         // TLS is not advertised, so a conforming client never asks for it.
+        // Keep the wire ERR 1235 while matching Go's final `Server.onConn handshake` log error
+        // text (`malform packet error`; Go's panic/recover lines are not reproduced).
         let e = SqlError::not_supported("SSL");
         write_handshake_err(io, CLIENT_PROTOCOL_41, connection_id, &e).await;
-        return Err(HandshakeError::Other(e.error_for_log()));
+        return Err(HandshakeError::Other("malform packet error".into()));
     }
     authenticate(io, &data, &salt, peer, connection_id, config, factory)
         .await
@@ -462,6 +472,20 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     F: SessionFactory,
 {
+    // Go pkg/server/conn.go:574-583: log malformed response / missing ClientProtocol41 before parse.
+    if data.len() < 2 {
+        let packet_data = String::from_utf8_lossy(data);
+        tidb_base::log_warn!(
+            "got malformed handshake response",
+            "conn" => connection_id,
+            "packetData" => packet_data.as_ref(),
+        );
+    } else if u32::from(u16::from_le_bytes([data[0], data[1]])) & CLIENT_PROTOCOL_41 == 0 {
+        tidb_base::log_warn!(
+            "ClientProtocol41 flag is not set, please upgrade client",
+            "conn" => connection_id,
+        );
+    }
     let resp = match HandshakeResponse::parse(data) {
         Ok(r) => r,
         Err(e) => {
@@ -470,62 +494,97 @@ where
         }
     };
     let capability = resp.capability & config.advertised_capability();
+    let host = peer_host(peer);
 
-    // Only mysql_native_password is verified; any other plugin the client picked (typically
-    // caching_sha2_password, libmysqlclient 8.x's default) is switched to it, which is what
-    // TiDB does for accounts using mysql_native_password. Like TiDB (`checkAuthPlugin`), also
-    // switch when the handshake advertised another plugin: libmysqlclient then answers
-    // mysql_native_password with *empty* data, since the salt was offered to another plugin.
+    // Go pkg/server/conn.go:682-691 (`handleAuthPlugin`) -> `checkAuthPlugin` (`conn.go:886-930`):
+    // when CLIENT_PLUGIN_AUTH is set, MatchIdentity runs BEFORE any auth switch or
+    // openSessionAndDoAuth; an unknown user is rejected with `[server:1045]` and logs
+    // `"failed to check the user authplugin"`, returning without logging `:677`.
     let mut auth = resp.auth_response.clone();
-    if resp.capability & CLIENT_PLUGIN_AUTH != 0
-        && (resp.auth_plugin.as_deref() != Some(auth_plugin::MYSQL_NATIVE_PASSWORD)
-            || config.default_auth_plugin != auth_plugin::MYSQL_NATIVE_PASSWORD)
-    {
-        // Go pkg/server/conn.go:287-306.
-        if let Err(e) = io
-            .write_packet(&auth_switch_request(
-                auth_plugin::MYSQL_NATIVE_PASSWORD,
-                salt,
-            ))
-            .await
+    let cred = if resp.capability & CLIENT_PLUGIN_AUTH != 0 {
+        let Some(cred) = factory.lookup_user(&resp.user, host).await else {
+            let e = SqlError::access_denied(&resp.user, host, !auth.is_empty());
+            let err_str = format!("[server:{}]{}", e.code, e.message);
+            tidb_base::log_warn!(
+                "failed to check the user authplugin",
+                "conn" => connection_id,
+                "error" => err_str.as_str(),
+            );
+            write_handshake_err(io, capability, connection_id, &e).await;
+            return Err(HandshakeError::Other(err_str));
+        };
+
+        // Only mysql_native_password is verified; any other plugin the client picked (typically
+        // caching_sha2_password, libmysqlclient 8.x's default) is switched to it, which is what
+        // TiDB does for accounts using mysql_native_password. Like TiDB (`checkAuthPlugin`), also
+        // switch when the handshake advertised another plugin: libmysqlclient then answers
+        // mysql_native_password with *empty* data, since the salt was offered to another plugin.
+        if resp.auth_plugin.as_deref() != Some(auth_plugin::MYSQL_NATIVE_PASSWORD)
+            || config.default_auth_plugin != auth_plugin::MYSQL_NATIVE_PASSWORD
         {
-            let err_str = e.to_string();
-            tidb_base::log_debug!(
-                "write response to client failed",
-                "conn" => connection_id,
-                "error" => err_str.as_str(),
-            );
-            return Err(HandshakeError::from(e));
-        }
-        if let Err(e) = io.flush().await {
-            let err_str = e.to_string();
-            tidb_base::log_debug!(
-                "flush response to client failed",
-                "conn" => connection_id,
-                "error" => err_str.as_str(),
-            );
-            return Err(HandshakeError::from(e));
-        }
-        auth = io.read_packet().await.map_err(|e| {
-            if is_packet_eof(&e) {
-                tidb_base::log_warn!(
-                    "authSwitchRequest response fail due to connection has be closed by client-side",
-                    "conn" => connection_id,
-                );
-            } else {
+            // Go pkg/server/conn.go:287-306 + 686.
+            if let Err(e) = io
+                .write_packet(&auth_switch_request(
+                    auth_plugin::MYSQL_NATIVE_PASSWORD,
+                    salt,
+                ))
+                .await
+            {
                 let err_str = e.to_string();
-                tidb_base::log_warn!(
-                    "authSwitchRequest response fail",
+                tidb_base::log_debug!(
+                    "write response to client failed",
                     "conn" => connection_id,
                     "error" => err_str.as_str(),
                 );
+                tidb_base::log_warn!(
+                    "failed to check the user authplugin",
+                    "conn" => connection_id,
+                    "error" => err_str.as_str(),
+                );
+                return Err(HandshakeError::from(e));
             }
-            HandshakeError::from(e)
-        })?;
-    }
+            if let Err(e) = io.flush().await {
+                let err_str = e.to_string();
+                tidb_base::log_debug!(
+                    "flush response to client failed",
+                    "conn" => connection_id,
+                    "error" => err_str.as_str(),
+                );
+                tidb_base::log_warn!(
+                    "failed to check the user authplugin",
+                    "conn" => connection_id,
+                    "error" => err_str.as_str(),
+                );
+                return Err(HandshakeError::from(e));
+            }
+            auth = io.read_packet().await.map_err(|e| {
+                let err_str = e.log_string();
+                if is_packet_eof(&e) {
+                    tidb_base::log_warn!(
+                        "authSwitchRequest response fail due to connection has be closed by client-side",
+                        "conn" => connection_id,
+                    );
+                } else {
+                    tidb_base::log_warn!(
+                        "authSwitchRequest response fail",
+                        "conn" => connection_id,
+                        "error" => err_str.as_str(),
+                    );
+                }
+                tidb_base::log_warn!(
+                    "failed to check the user authplugin",
+                    "conn" => connection_id,
+                    "error" => err_str.as_str(),
+                );
+                HandshakeError::from(e)
+            })?;
+        }
+        Some(cred)
+    } else {
+        factory.lookup_user(&resp.user, host).await
+    };
 
-    let host = peer_host(peer);
-    let verified = match factory.lookup_user(&resp.user, host).await {
+    let verified = match cred {
         Some(cred @ Credential::NativePassword(_)) => cred.verify_native(salt, &auth),
         None => false,
     };
@@ -579,8 +638,25 @@ where
     let mut ok = vec![header::OK, 0, 0];
     ok.extend_from_slice(&handler.status_flags().to_le_bytes());
     ok.extend_from_slice(&[0, 0]);
-    io.write_packet(&ok).await?;
-    io.flush().await?;
+    // Go pkg/server/conn.go:350-363.
+    if let Err(e) = io.write_packet(&ok).await {
+        let err_str = e.to_string();
+        tidb_base::log_debug!(
+            "write response to client failed",
+            "conn" => connection_id,
+            "error" => err_str.as_str(),
+        );
+        return Err(HandshakeError::from(e));
+    }
+    if let Err(e) = io.flush().await {
+        let err_str = e.to_string();
+        tidb_base::log_debug!(
+            "flush response to client failed",
+            "conn" => connection_id,
+            "error" => err_str.as_str(),
+        );
+        return Err(HandshakeError::from(e));
+    }
     Ok((handler, capability, resp.user))
 }
 
@@ -849,7 +925,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                     self.status.set_reading(false, in_txn);
                     d
                 }
-                Err(PacketError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                Err(PacketError::Eof) => {
                     // Go: any read failure, a client closing without COM_QUIT included.
                     tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
                     return;
@@ -864,7 +940,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                     return;
                 }
                 Err(e) => {
-                    let err_str = e.to_string();
+                    let err_str = e.log_string();
                     if !err_str.contains("use of closed network connection") {
                         tidb_base::log_warn!(
                             "read packet failed, close this connection",

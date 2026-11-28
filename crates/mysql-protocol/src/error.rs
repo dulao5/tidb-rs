@@ -107,9 +107,7 @@ impl SqlError {
         match self.code {
             code::ER_ACCESS_DENIED => format!("[privilege:{}]{}", self.code, self.message),
             code::ER_BAD_DB => format!("[schema:{}]{}", self.code, self.message),
-            code::ER_NOT_SUPPORTED_YET | code::ER_NOT_SUPPORTED_AUTH_MODE => {
-                format!("[server:{}]{}", self.code, self.message)
-            }
+            code::ER_NOT_SUPPORTED_AUTH_MODE => format!("[server:{}]{}", self.code, self.message),
             _ => self.message.clone(),
         }
     }
