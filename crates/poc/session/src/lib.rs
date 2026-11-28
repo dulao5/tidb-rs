@@ -105,6 +105,12 @@ pub struct Factory {
     /// The ported store driver the new stack's sessions read through (`None` with
     /// `--new-stack=off`: nothing of the new stack is built).
     new_store: Option<Arc<tidb_store::driver::TikvStore>>,
+    /// The sysvar cache of `mysql.global_variables` the sessions read their global values
+    /// from (the loader's, `poc_domain::sysvar_loader`; D06.5 spec §8), in every mode.
+    /// `None` without a loader: the new sessions' global values are unknown and they stay
+    /// on the PoC (step 0, "global variables not loaded"); with `off`, the plan-cache
+    /// decision uses the compiled defaults.
+    new_globals: Option<Arc<tidb_systable::sysvar_cache::SysVarCache>>,
 }
 
 impl Factory {
@@ -113,6 +119,7 @@ impl Factory {
             shared: Arc::new(shared),
             new_stack: NewStackMode::Off,
             new_store: None,
+            new_globals: None,
         }
     }
 
@@ -130,6 +137,16 @@ impl Factory {
             self.new_store = Some(Arc::new(store));
         }
         Ok(self)
+    }
+
+    /// The sessions read their global variables from `cache`, the sysvar cache the loader
+    /// keeps in step with `mysql.global_variables` (D06.5 spec §8).
+    pub fn with_sys_var_cache(
+        mut self,
+        cache: Arc<tidb_systable::sysvar_cache::SysVarCache>,
+    ) -> Factory {
+        self.new_globals = Some(cache);
+        self
     }
 
     /// The state shared by this factory's sessions.
@@ -152,6 +169,7 @@ impl SessionFactory for Factory {
                 auth_user: Some(self.shared.user.clone()),
                 auth_host: Some("%".to_owned()),
                 account_locked: false,
+                password_expired: false,
             });
         };
         // Read directly from the in-memory cache (same as Go's `ConnectionVerification`).
@@ -224,6 +242,8 @@ impl SessionFactory for Factory {
             stmts: HashMap::new(),
             warnings: Vec::new(),
             default_vars: None,
+            globals: self.new_globals.clone(),
+            default_vars_loaded: false,
             timer: Timer::default(),
             mdl: None,
             stmt: StmtMetrics::default(),
@@ -241,6 +261,11 @@ impl SessionFactory for Factory {
                 domain,
                 self.new_store.clone(),
                 self.shared.kv.exec_pool(),
+                // Without a loader the cache is never built: the global values are unknown,
+                // so the router keeps the session on the PoC.
+                self.new_globals
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(tidb_systable::sysvar_cache::SysVarCache::new())),
             ));
             if let Some(pm) = privilege_manager {
                 let ns = router::NewStack::session_mut(&mut *new);
@@ -295,10 +320,16 @@ pub struct Session {
     /// one the prototype reports. Cleared when a statement other than SHOW WARNINGS / SHOW
     /// ERRORS starts, as Go's `ResetContextOfStmt` does.
     warnings: Vec<SQLWarn>,
-    /// With `--new-stack=off` (no router, no new session): a session with Go's default
-    /// variables, the input of a PREPARE's plan-cache decision ([`plan_cache`]); made at the
-    /// first PREPARE.
+    /// A session with the cluster's global values (Go's default variables until the sysvar
+    /// cache is built): with `--new-stack=off` (no router, no new session), the input of a
+    /// PREPARE's plan-cache decision ([`plan_cache`]); in every mode, the session the
+    /// prototype's `SET` validates its values against. Made at the first PREPARE or SET.
     default_vars: Option<Box<tidb_session::Session>>,
+    /// The sysvar cache `default_vars` takes the cluster's global values from (the
+    /// factory's; D06.5 spec §8).
+    globals: Option<Arc<tidb_systable::sysvar_cache::SysVarCache>>,
+    /// `default_vars` holds the cluster's global values (not the compiled defaults).
+    default_vars_loaded: bool,
     /// Phase timing (`timing`), off by default.
     timer: Timer,
     /// Metadata-lock entry of the current synced statement, released once its response has
@@ -493,14 +524,21 @@ fn autocommit_fence(normalized: Option<&str>) -> Result<(), SqlError> {
 /// cannot make the text (an expression, a float or decimal literal).
 ///
 /// The SET executor (`SetExecutor.setSysVariable`) is D12.12 and not ported: the prototype
-/// runs SET, so the validation runs here, against a session with the compiled defaults
-/// (the prototype keeps no `SessionVars`; the variables it accepts validate the same in any
-/// session). Warnings a validation appends (a truncated number) are dropped: the only
+/// runs SET, so the validation runs here, against `vars`: the session `Session::default_session`
+/// makes with the cluster's global values (the loader's sysvar cache, D06.5 spec §8), or the
+/// compiled defaults while the cache is not built yet. Validations that read another
+/// variable (`tidb_skip_isolation_level_check` for `transaction_isolation`,
+/// `tidb_enable_noop_functions` for `transaction_read_only`) read the cluster's value, as Go's
+/// session does; the prototype accepts no session SET of those switches, so the session value
+/// is the global one. Warnings a validation appends (a truncated number) are dropped: the only
 /// warning the prototype reports is the plan cache's (`Session::warnings`).
 // glue: the validation step of SetExecutor.setSysVariable → SessionVars.SetSystemVar (D12.12) on the prototype's SET
-fn validated_session_value(name: &str, value: &SetValue) -> Result<Option<String>, SqlError> {
-    use tidb_sessionctx::variable::session::SessionVars;
-    let Some(text) = router::sync::value_text(name, value) else {
+fn validated_session_value(
+    vars: &mut tidb_sessionctx::variable::session::SessionVars,
+    name: &str,
+    value: &SetValue,
+) -> Result<Option<String>, SqlError> {
+    let Some(text) = router::sync::value_text(vars, name, value) else {
         return Ok(None);
     };
     let Some(sys_var) = tidb_sessionctx::variable::get_sys_var(name) else {
@@ -509,9 +547,10 @@ fn validated_session_value(name: &str, value: &SetValue) -> Result<Option<String
                 .gen_with_stack_by_args(tidb_base::go_args![name.to_owned()]),
         ));
     };
-    let mut vars = SessionVars::new(Box::new(router::newstack::DefaultGlobals));
+    let warnings = i64::from(vars.stmt_ctx().warning_count());
     let (normalized, validated) =
-        sys_var.validate(&mut vars, &text, tidb_sessionctx::variable::ScopeSession);
+        sys_var.validate(vars, &text, tidb_sessionctx::variable::ScopeSession);
+    vars.stmt_ctx().truncate_warnings(warnings);
     validated.map_err(|e| router::sql_error(&e))?;
     Ok(Some(normalized))
 }
@@ -866,12 +905,18 @@ impl Session {
     }
 
     fn set(&mut self, assignments: &[SetAssignment]) -> Result<(), SqlError> {
+        self.default_session()?;
+        let vars = self
+            .default_vars
+            .as_mut()
+            .expect("made by default_session")
+            .vars_mut();
         let (charset, collation, results_charset) = (
             &mut self.charset,
             &mut self.collation,
             &mut self.results_charset,
         );
-        let (applied, result) = run_set(assignments, |change| {
+        let (applied, result) = run_set(vars, assignments, |change| {
             if let Some((cs, coll)) = change.names {
                 *charset = cs;
                 *collation = coll;
@@ -900,11 +945,12 @@ struct SetChange {
 /// assignments were applied, and the statement's result.
 // glue: the assignment loop of SetExecutor.Next (D12.12) on the prototype's SET
 fn run_set(
+    vars: &mut tidb_sessionctx::variable::session::SessionVars,
     assignments: &[SetAssignment],
     mut apply: impl FnMut(SetChange),
 ) -> (usize, Result<(), SqlError>) {
     for (i, a) in assignments.iter().enumerate() {
-        match check_set(std::slice::from_ref(a)) {
+        match check_set(vars, std::slice::from_ref(a)) {
             Ok(change) => apply(change),
             Err(e) => return (i, Err(e)),
         }
@@ -914,8 +960,12 @@ fn run_set(
 
 /// The checks of `SET assignments` on the prototype, in order, before anything is applied:
 /// the change to apply, or the first assignment's error. `run_set` calls it for one
-/// assignment at a time.
-fn check_set(assignments: &[SetAssignment]) -> Result<SetChange, SqlError> {
+/// assignment at a time; `vars` is the session the values are validated against
+/// ([`validated_session_value`]).
+fn check_set(
+    vars: &mut tidb_sessionctx::variable::session::SessionVars,
+    assignments: &[SetAssignment],
+) -> Result<SetChange, SqlError> {
     let mut names = None;
     let mut results = None;
     for a in assignments {
@@ -971,7 +1021,7 @@ fn check_set(assignments: &[SetAssignment]) -> Result<SetChange, SqlError> {
                 }
                 // Go validates the value before anything uses it (`SetSystemVar`).
                 let normalized = if router::sync::is_synced(name) {
-                    validated_session_value(name, value)?
+                    validated_session_value(vars, name, value)?
                 } else {
                     None
                 };
@@ -1302,20 +1352,45 @@ impl Session {
         }
     }
 
-    /// The variables of the off-mode plan-cache decision: a new session's, Go's defaults.
+    /// The variables of the off-mode plan-cache decision: a new session's, with the
+    /// cluster's global values once the sysvar cache is built. Before that, the compiled
+    /// defaults, logged once per process (maintainer decision on #521, D06.5 spec §8.3); a
+    /// session made from them is made again once the cache is built (as the router loads a
+    /// new session's values late, #539 review).
     fn default_vars(
         &mut self,
     ) -> Result<&tidb_sessionctx::variable::session::SessionVars, SqlError> {
+        Ok(self.default_session()?.vars())
+    }
+
+    /// The session behind [`Session::default_vars`], also the one the prototype's `SET`
+    /// validates its values against ([`validated_session_value`]): the cluster's global values
+    /// once the sysvar cache is built, the compiled defaults before.
+    fn default_session(&mut self) -> Result<&mut tidb_session::Session, SqlError> {
+        let built = self.globals.as_ref().is_some_and(|c| !c.needs_rebuild());
+        if built && !self.default_vars_loaded {
+            self.default_vars = None;
+        }
         if self.default_vars.is_none() {
-            let mut s = tidb_session::Session::new(
-                tidb_session::Dialect::MySQL,
-                Box::new(router::newstack::DefaultGlobals),
-            );
+            self.default_vars_loaded = built;
+            let globals = match &self.globals {
+                Some(cache) if built => router::newstack::ClusterGlobals::new(Arc::clone(cache)),
+                _ => {
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| {
+                        tidb_base::log_warn!(
+                            "the global variables of the cluster are not loaded yet (mysql.global_variables); the prototype uses the compiled defaults until they are"
+                        );
+                    });
+                    router::newstack::ClusterGlobals::compiled_defaults()
+                }
+            };
+            let mut s = tidb_session::Session::new(tidb_session::Dialect::MySQL, Box::new(globals));
             s.load_common_global_variables_if_needed()
                 .map_err(|e| router::sql_error(&e))?;
             self.default_vars = Some(Box::new(s));
         }
-        Ok(self.default_vars.as_ref().expect("set above").vars())
+        Ok(self.default_vars.as_deref_mut().expect("set above"))
     }
 
     async fn prepare_lowered(
@@ -1582,16 +1657,107 @@ mod fence_tests {
         assert!(txn_fence(&select.stmt).is_none());
     }
 
-    /// `SET` on the prototype as `Session::set` runs it: the change of each applied
-    /// assignment, in order, and the statement's result.
-    fn run(sql: &str) -> (Vec<SetChange>, Result<(), SqlError>) {
+    /// The session the prototype's `SET` validates against, as `Session::default_session`
+    /// makes it: over a sysvar cache built from these rows of `mysql.global_variables` (the
+    /// loader's rebuild), or over the compiled defaults when there are none.
+    fn validation_session(rows: &[(&str, &str)]) -> tidb_session::Session {
+        let globals = if rows.is_empty() {
+            router::newstack::ClusterGlobals::compiled_defaults()
+        } else {
+            let table: HashMap<String, String> = rows
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            let cache = tidb_systable::sysvar_cache::SysVarCache::new();
+            cache.rebuild(None, &mut || Ok(table.clone())).unwrap();
+            router::newstack::ClusterGlobals::new(Arc::new(cache))
+        };
+        let mut s = tidb_session::Session::new(tidb_session::Dialect::MySQL, Box::new(globals));
+        s.load_common_global_variables_if_needed().unwrap();
+        s
+    }
+
+    /// `SET` on the prototype as `Session::set` runs it, validated against `session`: the
+    /// change of each applied assignment, in order, and the statement's result.
+    fn run_over(
+        session: &mut tidb_session::Session,
+        sql: &str,
+    ) -> (Vec<SetChange>, Result<(), SqlError>) {
         let Statement::Set(a) = tidb_sql::parse_and_lower(sql).unwrap().stmt else {
             panic!("{sql}");
         };
         let mut changes = Vec::new();
-        let (applied, result) = run_set(&a, |c| changes.push(c));
+        let (applied, result) = run_set(session.vars_mut(), &a, |c| changes.push(c));
         assert_eq!(applied, changes.len(), "{sql}");
         (changes, result)
+    }
+
+    /// `run_over` with the compiled defaults (the cache not built yet).
+    fn run(sql: &str) -> (Vec<SetChange>, Result<(), SqlError>) {
+        run_over(&mut validation_session(&[]), sql)
+    }
+
+    /// Validations that read another variable read the cluster's global value (the loader's
+    /// sysvar cache), as Go's session does: with `tidb_skip_isolation_level_check` and
+    /// `tidb_enable_noop_functions` ON on the cluster, Go accepts these SETs; with the
+    /// defaults, both are rejected with Go's errors.
+    #[test]
+    fn validation_reads_the_cluster_global_values() {
+        let isolation = "SET transaction_isolation = 'SERIALIZABLE'";
+        let read_only = "SET transaction_read_only = 1";
+        let whole = |r: Result<(), SqlError>| {
+            let e = r.unwrap_err();
+            (e.code, e.state.to_string(), e.message)
+        };
+        let mut defaults = validation_session(&[]);
+        assert_eq!(
+            whole(run_over(&mut defaults, isolation).1),
+            (
+                8048,
+                "HY000".to_owned(),
+                "The isolation level 'SERIALIZABLE' is not supported. Set tidb_skip_isolation_level_check=1 to skip this error".to_owned()
+            )
+        );
+        assert_eq!(
+            whole(run_over(&mut defaults, read_only).1),
+            (
+                1235,
+                "42000".to_owned(),
+                "function READ ONLY has only noop implementation in tidb now, use tidb_enable_noop_functions to enable these functions".to_owned()
+            )
+        );
+        // The same with a built cache whose rows leave the switches at their defaults.
+        let mut cluster_off = validation_session(&[("sql_mode", "")]);
+        assert_eq!(
+            run_over(&mut cluster_off, isolation).1.unwrap_err().code,
+            8048
+        );
+        assert_eq!(
+            run_over(&mut cluster_off, read_only).1.unwrap_err().code,
+            1235
+        );
+
+        let mut skip_on = validation_session(&[("tidb_skip_isolation_level_check", "ON")]);
+        let (changes, result) = run_over(&mut skip_on, isolation);
+        result.unwrap();
+        assert_eq!(changes, vec![SetChange::default()]);
+        assert!(
+            run_over(
+                &mut skip_on,
+                "SET transaction_isolation = 'READ-UNCOMMITTED'"
+            )
+            .1
+            .is_ok()
+        );
+        assert_eq!(run_over(&mut skip_on, read_only).1.unwrap_err().code, 1235);
+        // The validation warning is dropped (only the plan cache's is reported).
+        assert_eq!(skip_on.vars().stmt_ctx().warning_count(), 0);
+
+        let mut noop_on = validation_session(&[("tidb_enable_noop_functions", "ON")]);
+        let (changes, result) = run_over(&mut noop_on, read_only);
+        result.unwrap();
+        assert_eq!(changes, vec![SetChange::default()]);
+        assert_eq!(run_over(&mut noop_on, isolation).1.unwrap_err().code, 8048);
     }
 
     /// A `SET` that succeeds: what it changes in the session; or its error.

@@ -12,8 +12,9 @@
 //!
 //! Inputs (maintainer decision on #512): with `fallback` / `strict` the router passes the new
 //! session's synced variables and the ported domain's InfoSchema; with `off` there is neither,
-//! so the prototype uses a session with Go's default variables (the prototype rejects every
-//! `SET` of a variable the decision reads) and no InfoSchema, which leaves out the table checks
+//! so the prototype uses a session with the cluster's global variables (the sysvar cache of
+//! `mysql.global_variables`, D06.5 spec §8; Go's defaults until it is first built; the
+//! prototype rejects every `SET` of a variable the decision reads) and no InfoSchema, which leaves out the table checks
 //! of `checkTableCacheable` (partitioned, generated-column and temporary tables). That is a
 //! listed known difference of the prototype path.
 
@@ -100,16 +101,33 @@ impl WarnAppender for Sink {
     }
 }
 
+/// A session with the compiled default global values (Go's defaults): the input of the
+/// plan-cache decision while the cluster's global variables are not loaded (D06.5 spec
+/// §8.3), and of the router's probe of a rejected value.
+// glue: a session over ClusterGlobals::compiled_defaults (D06.5 spec §8.3)
+pub(crate) fn compiled_defaults_session() -> Result<tidb_session::Session, SqlError> {
+    let mut s = tidb_session::Session::new(
+        tidb_session::Dialect::MySQL,
+        Box::new(crate::router::newstack::ClusterGlobals::compiled_defaults()),
+    );
+    s.load_common_global_variables_if_needed()
+        .map_err(|e| crate::router::sql_error(&e))?;
+    Ok(s)
+}
+
 #[cfg(test)]
 mod tests {
     use tidb_session::{Dialect, Session};
 
     use super::*;
-    use crate::router::newstack::DefaultGlobals;
+    use crate::router::newstack::ClusterGlobals;
 
     /// A session with Go's default variables, as the off-mode PREPARE uses.
     fn defaults() -> Session {
-        let mut s = Session::new(Dialect::MySQL, Box::new(DefaultGlobals));
+        let mut s = Session::new(
+            Dialect::MySQL,
+            Box::new(ClusterGlobals::compiled_defaults()),
+        );
         s.load_common_global_variables_if_needed().unwrap();
         s
     }
@@ -232,5 +250,107 @@ mod tests {
         );
         assert_eq!(rs.columns.len(), 3);
         assert!(crate::warnings_result_set(&w, true).rows.is_empty());
+    }
+
+    /// The statements of the prototype's corpora: the ab workloads and the parser's
+    /// prototype list (one statement per line there; `;`-separated in the workloads).
+    fn corpus() -> Vec<String> {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../..");
+        let mut out = Vec::new();
+        let workloads = format!("{root}/tools/ab/workloads");
+        let mut files: Vec<_> = std::fs::read_dir(&workloads)
+            .expect("tools/ab/workloads")
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "sql"))
+            .collect();
+        files.sort();
+        assert!(!files.is_empty(), "no workload in {workloads}");
+        let code = |l: &&str| {
+            let t = l.trim_start();
+            !(t.is_empty() || t.starts_with('#') || t.starts_with("--"))
+        };
+        for f in files {
+            let text = std::fs::read_to_string(&f).unwrap();
+            let body: Vec<&str> = text.lines().filter(code).collect();
+            out.extend(
+                body.join("\n")
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        let proto =
+            std::fs::read_to_string(format!("{root}/crates/parser/tests/data/prototype.sql"))
+                .unwrap();
+        out.extend(
+            proto
+                .lines()
+                .filter(code)
+                .map(|l| l.trim().trim_end_matches(';').to_owned()),
+        );
+        out
+    }
+
+    /// Statements that reach the decision's boundary stubs (optimizer hints D13.3; DML and
+    /// nodes the Rust AST does not have, D02.2).
+    const BOUNDARY: &[&str] = &[
+        "SELECT /*+ USE_INDEX(t, i) */ c FROM t WHERE id = ?",
+        "SELECT /*+ IGNORE_PLAN_CACHE() */ c FROM t WHERE id = ?",
+        "UPDATE t SET c = 1 WHERE id = ?",
+        "INSERT INTO t VALUES (?)",
+        "DELETE FROM t WHERE id = ?",
+    ];
+
+    /// In `--new-stack=off` the decision runs after the prototype accepted a PREPARE: it
+    /// must never turn that PREPARE into a 1235. So every statement whose decision hits a
+    /// boundary stub is one the prototype's lowering refuses, over the prototype's corpora
+    /// and the known boundary statements: the PoC's refusal list and the decision's
+    /// boundary list are pinned to each other. A PoC change that starts accepting, say,
+    /// optimizer hints fails here instead of breaking PREPARE.
+    #[test]
+    fn decision_never_blocks_a_statement_the_prototype_prepares() {
+        let s = defaults();
+        let mut accepted = 0;
+        let mut boundary = 0;
+        let mut unparsed = Vec::new();
+        let corpus = corpus();
+        let all = corpus
+            .iter()
+            .map(String::as_str)
+            .chain(BOUNDARY.iter().copied());
+        for sql in all {
+            let Ok(stmt) = tidb_sql::ir::parse_one(sql) else {
+                unparsed.push(sql);
+                continue;
+            };
+            let lowered = tidb_sql::ir::lower_statement(&stmt, sql);
+            let decision = prepare_time_cacheability(s.vars(), &stmt, None);
+            if let Err(e) = &decision {
+                boundary += 1;
+                assert!(
+                    lowered.is_err(),
+                    "{sql}: the prototype prepares it, but the plan-cache decision fails: {} {}",
+                    e.code,
+                    e.message
+                );
+            }
+            if lowered.is_ok() {
+                accepted += 1;
+            }
+        }
+        // Only statements a single-statement PREPARE never sees are skipped: a parser
+        // regression must not shrink the corpus unnoticed.
+        assert_eq!(
+            unparsed,
+            ["begin; select c from sbtest1 where id = 1; commit"],
+            "statements the parser no longer takes as one statement"
+        );
+        // The pin means something only while both sides are exercised.
+        assert!(accepted >= 100, "only {accepted} accepted statements");
+        assert!(
+            boundary >= BOUNDARY.len(),
+            "only {boundary} statements reach a boundary stub"
+        );
     }
 }

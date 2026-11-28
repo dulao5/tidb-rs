@@ -174,6 +174,13 @@ pub trait NewStack: Send {
     /// is then the one the statement plans with (§4.1: compared once, fixed for the
     /// statement).
     fn refresh_info_schema(&mut self) {}
+    /// The cluster's global variables can be loaded into the new session: the loader's
+    /// sysvar cache was built (D06.5 spec §8.3). Until then the router does not load them
+    /// (Go's load would block on a rebuild of the cache; the read-only node does not block
+    /// a session on TiKV) and keeps the session's statements on the PoC.
+    fn globals_ready(&self) -> bool {
+        true
+    }
     /// `COM_QUERY`. The statement is handed over: the new session's `Compile` writes to it
     /// (D05.3 spec §9.2).
     fn execute<'a>(
@@ -383,9 +390,16 @@ pub struct Router {
     diverged: BTreeSet<String>,
     /// `tidb_txn_mode` when the session opened (step 0 compares with it).
     initial_txn_mode: String,
-    /// The new session's global variables were loaded when it opened (step 0 keeps a session
-    /// whose load failed on the PoC).
+    /// The new session's global variables were loaded from the cluster's
+    /// `mysql.global_variables` (step 0 keeps the session's statements on the PoC until then:
+    /// the fail-safe of D06.5 spec §8.3).
     globals_loaded: bool,
+    /// Loading them failed (a SetSession hook rejected a value of the table): Go's load runs
+    /// once per session, so the session stays on the PoC.
+    globals_failed: bool,
+    /// The input of the PoC's plan-cache decision while the global variables are not loaded:
+    /// a session with the compiled defaults (made at the first such PREPARE).
+    default_vars: Option<Box<tidb_session::Session>>,
     /// `COM_STMT_EXECUTE` of the current command asked for a cursor.
     cursor: bool,
     /// The raw parameter section of the current `COM_STMT_EXECUTE`.
@@ -503,26 +517,48 @@ fn check_columns(prepared: &[ColumnDef], resp: &Response) -> Result<(), SqlError
     Ok(())
 }
 
+/// A SetSession hook rejected a value of `mysql.global_variables` while a new session loaded
+/// it: logged once per process for each error, with the variables whose value is rejected
+/// (found by setting each value of the session map on a session with the compiled
+/// defaults), so that an operator sees why sessions stay on the PoC.
+// glue: the router's log of a failed loadCommonGlobalVariablesIfNeeded (D06.5 spec §8.3)
+fn log_rejected_globals(session: &tidb_session::Session, err: &Error) {
+    static LOGGED: std::sync::LazyLock<parking_lot::Mutex<BTreeSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let key = err.to_string();
+    {
+        let mut logged = LOGGED.lock();
+        if logged.len() >= 64 || !logged.insert(key) {
+            return;
+        }
+    }
+    let mut rejected = Vec::new();
+    if let Some(Ok(cache)) = session.vars().global_vars_accessor.session_cache()
+        && let Ok(mut probe) = crate::plan_cache::compiled_defaults_session()
+    {
+        let mut names: Vec<_> = cache.into_iter().collect();
+        names.sort();
+        for (name, value) in names {
+            if let Err(e) = probe
+                .vars_mut()
+                .set_system_var_with_relaxed_validation(&name, &value)
+                && !tidb_sessionctx::variable::error::ErrUnknownSystemVar.equal(&e)
+            {
+                rejected.push(name);
+            }
+        }
+    }
+    let rejected = rejected.join(",");
+    tidb_base::log_warn!(
+        "VS1 router: a value of mysql.global_variables is rejected by its hook, sessions stay on the PoC (logged once)",
+        "variables" => rejected.as_str(),
+        "error" => err,
+    );
+}
+
 impl Router {
     /// A router for a session whose PoC state is `poc` (the handshake's charset).
-    pub fn new(mode: NewStackMode, mut new: Box<dyn NewStack>, poc: &PocValues) -> Router {
-        // Go's session loads the global values of its variables at its first statement
-        // (`loadCommonGlobalVariablesIfNeeded`); loaded now, step 0 compares
-        // `tidb_txn_mode` with the value the session has then (its default). Go's load skips
-        // the variables already set; the synced ones below are set after it and win the same
-        // way. The values are the compiled defaults, whose hooks do not fail; if loading
-        // does fail (a bug), the session's variables are only partly set, so the session is
-        // pinned to the PoC (step 0, `global variables not loaded`) instead of running
-        // statements on the new stack with them.
-        let globals_loaded = match new.session_mut().load_common_global_variables_if_needed() {
-            Ok(()) => true,
-            Err(e) => {
-                log::error!(
-                    "VS1 router bug: loading the global variables of the new session failed, the session stays on the PoC: {e}"
-                );
-                false
-            }
-        };
+    pub fn new(mode: NewStackMode, new: Box<dyn NewStack>, poc: &PocValues) -> Router {
         let initial_txn_mode = new.session().vars().txn_mode.clone();
         let mut r = Router {
             mode,
@@ -531,7 +567,9 @@ impl Router {
             last: LastStmtInfo::default(),
             diverged: BTreeSet::new(),
             initial_txn_mode,
-            globals_loaded,
+            globals_loaded: false,
+            globals_failed: false,
+            default_vars: None,
             cursor: false,
             raw_params: RawParams::default(),
             closed: Vec::new(),
@@ -539,6 +577,7 @@ impl Router {
             poc_warnings_stale: false,
             conn_id: 0,
         };
+        r.ensure_globals();
         let names = [tidb_sql::ir::SetAssignment::Names {
             charset: None,
             collation: None,
@@ -547,6 +586,38 @@ impl Router {
         sync::sync_set(vars, &mut r.diverged, &names, poc);
         sync::sync_db(vars, poc);
         r
+    }
+
+    /// Go's session loads the global values of its variables at its first statement
+    /// (`loadCommonGlobalVariablesIfNeeded`); the router loads them when the session opens
+    /// and, while the loader's sysvar cache is not built yet, retries at the start of each
+    /// command until it is (Go's load would block on `rebuildSysVarCacheIfNeeded`; D06.5
+    /// spec §8.3). Until then step 0 keeps the session's statements on the PoC. Go's load
+    /// skips the variables already set: the synced ones are set before or after it and win
+    /// the same way. Once loaded, step 0 compares `tidb_txn_mode` with the value the session
+    /// has then (the cluster's global value; the router syncs no `tidb_txn_mode`). If a
+    /// SetSession hook rejects a value of the table, the session's variables are not the
+    /// cluster's, so the session stays on the PoC for its lifetime (Go's load does not run
+    /// twice either).
+    // glue: when the router runs loadCommonGlobalVariablesIfNeeded (D06.5 spec §8.3)
+    fn ensure_globals(&mut self) {
+        if self.globals_loaded || self.globals_failed || !self.new.globals_ready() {
+            return;
+        }
+        match self
+            .new
+            .session_mut()
+            .load_common_global_variables_if_needed()
+        {
+            Ok(()) => {
+                self.globals_loaded = true;
+                self.initial_txn_mode = self.new.session().vars().txn_mode.clone();
+            }
+            Err(e) => {
+                self.globals_failed = true;
+                log_rejected_globals(self.new.session(), &e);
+            }
+        }
     }
 
     /// The connection's id (the route trace and new-stack SessionVars record under it).
@@ -614,6 +685,16 @@ impl Router {
             return Some("cursor");
         }
         None
+    }
+
+    /// Step 0 for a PREPARE: the new session's global variables are loaded (the other session
+    /// conditions do not apply to a PREPARE, §4.7: both sides prepare it).
+    fn globals_check(&self) -> Result<(), Reason> {
+        if self.globals_loaded {
+            Ok(())
+        } else {
+            Err(Reason::Session("global variables not loaded"))
+        }
     }
 
     /// Step 0: the session's `sql_mode` (the new session's copy, synced from every `SET` the
@@ -719,8 +800,8 @@ impl Router {
         // The checkpoint can only restore an idle session (§4.6): check before the attempt
         // writes anything. Step 0 should make this impossible, so it is a router bug.
         if !self.new.session().is_idle() {
-            log::error!(
-                "VS1 router bug: the new session is not idle at the start of a statement; the PoC runs it"
+            tidb_base::log_error!(
+                "VS1 router bug: the new session is not idle at the start of a statement; the PoC runs it",
             );
             let label = Reason::NotIdle.label();
             if fallback {
@@ -750,8 +831,9 @@ impl Router {
                     // again on the PoC is not allowed. A boundary stub there is a bug of the
                     // new stack: the client gets its 1235 (constitution article 5), the
                     // statement ends on the new stack.
-                    log::error!(
-                        "VS1 router bug: blocked-by:{block} after the new stack's executors opened"
+                    tidb_base::log_error!(
+                        "VS1 router bug: blocked after the new stack's executors opened",
+                        "block" => block,
                     );
                     self.note(Engine::New.label(), "bug_blocked_after_open");
                     drop(cp);
@@ -789,8 +871,8 @@ impl Router {
     async fn try_prepare_new(&mut self, sql: &str) -> Result<Result<NewPrepared, Error>, NotRun> {
         self.new.session_mut().finish_unfinished_stmt().await;
         if !self.new.session().is_idle() {
-            log::error!(
-                "VS1 router bug: the new session is not idle at a PREPARE; only the PoC prepares it"
+            tidb_base::log_error!(
+                "VS1 router bug: the new session is not idle at a PREPARE; only the PoC prepares it",
             );
             return Err(NotRun::NotIdle);
         }
@@ -801,8 +883,12 @@ impl Router {
                 Some(block) => {
                     let block = block.to_owned();
                     if let Err(e) = self.new.session_mut().restore(cp) {
-                        log::error!("VS1 router bug: checkpoint of PREPARE not restorable: {e}");
-                        return Err(NotRun::Unrestorable(SqlError::unknown(e.to_string())));
+                        let err_str = e.to_string();
+                        tidb_base::log_error!(
+                            "VS1 router bug: checkpoint of PREPARE not restorable",
+                            "error" => err_str.as_str(),
+                        );
+                        return Err(NotRun::Unrestorable(SqlError::unknown(err_str)));
                     }
                     Err(NotRun::Blocked(block))
                 }
@@ -836,6 +922,7 @@ impl Router {
         sql: &str,
     ) -> Result<Response, SqlError> {
         self.new.refresh_info_schema();
+        self.ensure_globals();
         let r = self.query_inner(poc, sql).await;
         self.flush_poc_warnings(poc);
         self.end_of_command(poc);
@@ -998,6 +1085,7 @@ impl Router {
         sql: &str,
     ) -> Result<PreparedInfo, SqlError> {
         self.new.refresh_info_schema();
+        self.ensure_globals();
         let r = self.prepare_inner(poc, stmt_id, sql).await;
         self.stmt_ended = true;
         self.end_of_command(poc);
@@ -1019,7 +1107,10 @@ impl Router {
         // statement once, at PREPARE, with the `sql_mode` of that moment (`PrepareExec.Next`
         // → `session.ParseSQL`), so an EXECUTE does
         // not check it again (the AST both sides prepared was built without such a bit).
+        // Nor before the session's global variables are loaded (step 0): its variables,
+        // `sql_mode` included, are not the cluster's.
         let candidate = Self::candidate(&stmt, true)
+            .and_then(|()| self.globals_check())
             .and_then(|()| self.sql_mode_check())
             .and_then(|()| self.schema_check(poc));
         let new = match candidate {
@@ -1110,12 +1201,22 @@ impl Router {
         self.decide_cacheability(with_is, stmt)
     }
 
-    /// [`Router::prepare_cacheability`] after the table loads.
+    /// [`Router::prepare_cacheability`] after the table loads. Before the session's global
+    /// variables are loaded, the variables are the compiled defaults' (as with
+    /// `--new-stack=off` before the sysvar cache is built), not the new session's unloaded
+    /// ones.
     fn decide_cacheability(
-        &self,
+        &mut self,
         with_is: bool,
         stmt: &ast::Stmt,
     ) -> Result<crate::plan_cache::PrepareCacheability, SqlError> {
+        if !self.globals_loaded {
+            if self.default_vars.is_none() {
+                self.default_vars = Some(Box::new(crate::plan_cache::compiled_defaults_session()?));
+            }
+            let vars = self.default_vars.as_ref().expect("set above").vars();
+            return crate::plan_cache::prepare_time_cacheability(vars, stmt, None);
+        }
         let session = self.new.session();
         if !with_is {
             return crate::plan_cache::prepare_time_cacheability(session.vars(), stmt, None);
@@ -1136,6 +1237,7 @@ impl Router {
         params: Vec<Param>,
     ) -> Result<Response, SqlError> {
         self.new.refresh_info_schema();
+        self.ensure_globals();
         let r = self.execute_inner(poc, stmt_id, params).await;
         self.flush_poc_warnings(poc);
         self.end_of_command(poc);

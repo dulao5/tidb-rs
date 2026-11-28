@@ -61,7 +61,9 @@ parameters):
   => `unsupported` (tolerance T1); any other 1235 is a normal error; anything else (one side errors, another code / SQLSTATE / message, connection errors,
   timeouts) => `mismatch`.
 - OK packets: affected rows and warning count. Warnings: when either side reports any, `SHOW
-  WARNINGS` runs on both and must be identical.
+  WARNINGS` runs on both and must be identical, except (tolerance T6, prototype path only) A's
+  optimizer-time `skip prepared plan-cache: <reason>` warnings that B does not report, when the
+  route trace says B answered on the prototype (`--b-status` given, engine `poc`).
 
 A mismatch that an approved ruling of the divergence ledger covers (`docs/testing/rulings.toml`,
 spec `docs/testing/rulings.md`) is `ruled` instead: never a match, still counted, listed in

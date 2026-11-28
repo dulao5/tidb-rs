@@ -185,13 +185,34 @@ fn build_fixture() -> Arc<Handle> {
     snap.push_user(UserRecord::new("%", "u_broken_gp", SelectPriv).with_auth_string(pw.clone()));
     snap.push_global_priv(GlobalPrivRecord::new("u_broken_gp", "%", false, true));
 
+    let local_loc = tidb_base::gostd::time::local();
+    let now = tidb_base::gostd::time::now().in_loc(&local_loc);
+
     snap.push_user(
         UserRecord::new("%", "u_expired", SelectPriv)
             .with_auth_string(pw.clone())
             .with_password_expired(true),
     );
     snap.push_user(
-        UserRecord::new("%", "u_lifetime", SelectPriv)
+        UserRecord::new("%", "u_expired_locked", SelectPriv)
+            .with_auth_string(pw.clone())
+            .with_account_locked(true)
+            .with_password_expired(true),
+    );
+    snap.push_user(
+        UserRecord::new("%", "u_lifetime_fresh", SelectPriv)
+            .with_auth_string(pw.clone())
+            .with_password_lifetime(Some(30))
+            .with_password_last_changed(Some(now.add_date(0, 0, -5))),
+    );
+    snap.push_user(
+        UserRecord::new("%", "u_lifetime_expired", SelectPriv)
+            .with_auth_string(pw.clone())
+            .with_password_lifetime(Some(30))
+            .with_password_last_changed(Some(now.add_date(0, 0, -31))),
+    );
+    snap.push_user(
+        UserRecord::new("%", "u_lifetime_null_ts", SelectPriv)
             .with_auth_string(pw.clone())
             .with_password_lifetime(Some(30)),
     );
@@ -231,7 +252,39 @@ async fn wire_handshake_enforces_locked_plugins_restrictions_and_use_db() {
     let (code, state, _) = parse_err_packet(&reply);
     assert_eq!((code, state.as_str()), (1045, "28000"));
 
-    // Non-native plugins & restricted accounts -> fail closed with 1045 (28000).
+    // Locked AND expired account + right password -> 3118 (locked precedes expired, matching Go).
+    let (_, reply) = raw_handshake(addr, "u_expired_locked", PASSWORD, None).await;
+    let (code, state, msg) = parse_err_packet(&reply);
+    assert_eq!((code, state.as_str()), (3118, "HY000"));
+    assert_eq!(
+        msg,
+        "Access denied for user 'u_expired_locked'@'127.0.0.1'. Account is locked."
+    );
+
+    // Expired accounts + right password -> 1862 (HY000) with exact Go message (also precedes use_db 1044).
+    const EXPIRED_MSG: &str = "Your password has expired. To log in you must change it using a client that supports expired passwords.";
+    for (user, db) in [
+        ("u_expired", None),
+        ("u_expired", Some("forbidden")),
+        ("u_lifetime_expired", None),
+        ("u_lifetime_null_ts", None),
+    ] {
+        let (_, reply) = raw_handshake(addr, user, PASSWORD, db).await;
+        let (code, state, msg) = parse_err_packet(&reply);
+        assert_eq!(
+            (code, state.as_str()),
+            (1862, "HY000"),
+            "expired user {user} (db={db:?}) must return 1862: {msg}"
+        );
+        assert_eq!(msg, EXPIRED_MSG);
+    }
+
+    // Expired account + wrong password -> 1045 (28000) (password check precedes 1862).
+    let (_, reply) = raw_handshake(addr, "u_expired", "wrong", None).await;
+    let (code, state, _) = parse_err_packet(&reply);
+    assert_eq!((code, state.as_str()), (1045, "28000"));
+
+    // Non-native plugins & unported restrictions -> fail closed with 1045 (28000).
     for (user, pw) in [
         ("u_token", ""),
         ("u_socket", ""),
@@ -239,8 +292,6 @@ async fn wire_handshake_enforces_locked_plugins_restrictions_and_use_db() {
         ("u_sha2_empty", ""),
         ("u_ssl", PASSWORD),
         ("u_broken_gp", PASSWORD),
-        ("u_expired", PASSWORD),
-        ("u_lifetime", PASSWORD),
         ("u_lockout", PASSWORD),
     ] {
         let (_, reply) = raw_handshake(addr, user, pw, None).await;
@@ -251,6 +302,13 @@ async fn wire_handshake_enforces_locked_plugins_restrictions_and_use_db() {
             "user {user} must fail closed: {msg}"
         );
     }
+
+    // Account with explicit 30-day lifetime rotated 5 days ago -> OK.
+    let (_, reply) = raw_handshake(addr, "u_lifetime_fresh", PASSWORD, None).await;
+    assert_eq!(
+        reply[0], 0x00,
+        "fresh lifetime account must succeed: {reply:?}"
+    );
 
     // Handshake with unauthorized default database -> 1044 (42000).
     let (_, reply) = raw_handshake(addr, "u_ok", PASSWORD, Some("secret")).await;
@@ -278,16 +336,31 @@ async fn wire_handshake_enforces_locked_plugins_restrictions_and_use_db() {
         "Access denied for user 'u_ok'@'127.0.%' to database 'secret'"
     );
 
-    // When `@@global.default_password_lifetime > 0`, accounts with `password_lifetime IS NULL`
-    // fail closed (1045) over the wire, while `PASSWORD EXPIRE NEVER` (`Some(0)`) still logs in.
+    // When `@@global.default_password_lifetime = 90`:
+    // - fresh account with `password_lifetime IS NULL` logs in (OK),
+    // - expired (100d old) or NULL-timestamp account with `password_lifetime IS NULL` returns 1862,
+    // - 100d old `PASSWORD EXPIRE NEVER` (`Some(0)`) still logs in (OK).
+    let local_loc = tidb_base::gostd::time::local();
+    let now = tidb_base::gostd::time::now().in_loc(&local_loc);
     let pw = native_hash(PASSWORD);
     let mut snap2 = MySQLPrivilege::default();
     snap2.set_default_password_lifetime(90);
-    snap2.push_user(UserRecord::new("%", "u_null_lt", SelectPriv).with_auth_string(pw.clone()));
+    snap2.push_user(
+        UserRecord::new("%", "u_default_fresh", SelectPriv)
+            .with_auth_string(pw.clone())
+            .with_password_last_changed(Some(now.add_date(0, 0, -10))),
+    );
+    snap2.push_user(
+        UserRecord::new("%", "u_default_expired", SelectPriv)
+            .with_auth_string(pw.clone())
+            .with_password_last_changed(Some(now.add_date(0, 0, -100))),
+    );
+    snap2.push_user(UserRecord::new("%", "u_null_ts", SelectPriv).with_auth_string(pw.clone()));
     snap2.push_user(
         UserRecord::new("%", "u_never_lt", SelectPriv)
             .with_auth_string(pw)
-            .with_password_lifetime(Some(0)),
+            .with_password_lifetime(Some(0))
+            .with_password_last_changed(Some(now.add_date(0, 0, -100))),
     );
     snap2.sort_all();
     let handle2 = Arc::new(Handle::new(snap2));
@@ -299,9 +372,21 @@ async fn wire_handshake_enforces_locked_plugins_restrictions_and_use_db() {
             .await
             .unwrap();
     });
-    let (_, reply) = raw_handshake(addr2, "u_null_lt", PASSWORD, None).await;
-    let (code, state, _) = parse_err_packet(&reply);
-    assert_eq!((code, state.as_str()), (1045, "28000"));
+    let (_, reply) = raw_handshake(addr2, "u_default_fresh", PASSWORD, None).await;
+    assert_eq!(
+        reply[0], 0x00,
+        "fresh default-lifetime account must succeed: {reply:?}"
+    );
+    for expired in ["u_default_expired", "u_null_ts"] {
+        let (_, reply) = raw_handshake(addr2, expired, PASSWORD, None).await;
+        let (code, state, msg) = parse_err_packet(&reply);
+        assert_eq!(
+            (code, state.as_str()),
+            (1862, "HY000"),
+            "{expired} must return 1862: {msg}"
+        );
+        assert_eq!(msg, EXPIRED_MSG);
+    }
     let (_, reply) = raw_handshake(addr2, "u_never_lt", PASSWORD, None).await;
     assert_eq!(
         reply[0], 0x00,

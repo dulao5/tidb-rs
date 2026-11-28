@@ -214,6 +214,8 @@ SetGlobal 钩子由全局缓存重建时调用（N8 §3.3，D06.5）；本块移
 
 **读（T10，先做）**：`GlobalVarsCache`（domain 级，`ArcSwap<Arc<Snapshot>>`）按 §6.1 的 rebuild 逻辑实现，快照 = session map + global map；`GlobalVarAccessor` 的实现读它（替换 PR A 中由调用方提供的 accessor）。读表用 tidb-kv 快照读 + tablecodec 解码：通过 D06.2（meta 读取）拿到 `mysql.global_variables` 的 TableInfo，扫描 record 范围。驱动：启动时一次 + etcd watch + 30 秒定时，与 Go 相同。rebuild 时执行 SetGlobal 钩子（T5 移植完成后生效）。
 
+> 状态（#521，D06.5 spec §8）：读的部分已接入。缓存是已移植的 `tidb_systable::sysvar_cache::SysVarCache`（D06.7），由 `poc_domain::sysvar_loader` 在启动时、etcd watch 事件和 30 秒定时上 rebuild，所有 `--new-stack` 模式都建立。**rebuild 暂不执行 SetGlobal 钩子**（钩子调用的 domain / DDL / executor 回调尚未注册，有的会写 meta 或 PD），见 D06.5 spec §8.4 第 1 条和跟进 issue #537。
+
 **写**：只做 `mysql.global_variables` 这一张表的 REPLACE，不引入通用 DML 执行器：
 0. **前置检查（版本与表结构，弥补没有 schema validator 和 MDL）**：Go 的 DML 由 schema validator（schema 变化是可重试的提交错误）和 MDL（DDL 等待进行中的 DML）保护，专用 writer 两者都没有；滚动升级时 bootstrap 会对 `mysql.*` 执行 DDL。规则：只有当 `mysql.tidb` 中的 `tidb_server_version` 等于本 writer 所针对的 bootstrap 版本，**并且**事务开始时读到的 `mysql.global_variables` 的 TableInfo（列、索引、`UpdateTS` / revision）在提交前没有变化时才写入；否则返回明确的错误（"cluster bootstrap version / table schema changed, SET GLOBAL refused"），不猜测。
 1. 开一个**乐观**事务（client-rust `TransactionClient::begin_optimistic`），request source 标为 `internal_sysvar`（与 Go 的 `InternalTxnSysVar` 一致，便于资源管控和监控对比）。

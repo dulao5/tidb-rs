@@ -46,3 +46,14 @@ scope = "workload 预处理语句"
 rule = "Go 自己的 EXECUTE 列定义与其 PREPARE 不同时，B 在同一字段漂移到与 Go 相同的值不算差异"
 reason = "Go 对选择列表中的 ? 在 EXECUTE 时给出不同的列定义，这是 Go 的行为本身"
 since = "2026-11-21"
+
+[[tolerance]]
+id = "T6"
+name = "prototype-plan-cache-optimizer-reasons"
+scope = "workload（tools/ab 的 sysbench / file 运行），只限 B 在原型上答复的语句（路由追踪 engine = poc：--new-stack=off，或路由器交给原型的语句）"
+rule = "B 在原型上答复时，A 的 SHOW WARNINGS 中 Go 优化阶段才给出的 plan cache 跳过原因（Warning | 1105 | skip prepared plan-cache: <原因>，原因逐条按文本匹配：get a TableDual plan（空范围、LIMIT 0）、Batch/PointGet plans may be over-optimized、some parameters may be overwritten、<错误> when converting <值>、NE/INList simplification is triggered、OR predicate simplification is triggered、some parameters may be overwritten when constant propagation、Skip plan cache since mutable constant is restored and propagated、'<值>' may be converted to INT、'<值>' may be converted to datetime、<表达式> affects null check、read-only variables are used、Correlated subquery is not cached currently、in-list is too long）而 B 没有报告的，比较前从 A 去掉、A 的 warning 数相应减少。其余 warning、warning 数和结果照常完整比较；PREPARE 时的原因（原型自己会报）不在此列；新栈答复的语句和路由未知的语句不适用"
+reason = "这些原因是 Go 优化器的决定，原型的规划器是另一套设计，照着造等于发明逻辑（宪章 2.4）；新栈已移植并照常比较。原型退役前它们是已知的 warning 数差异（#512，维护者决定 B 不在范围内）"
+since = "2026-11-28"
+approver = "zhigang-du"
+approved = "2026-11-28"
+# 负责人批准（经维护者转达）：https://github.com/dulao5/tidb-rs/issues/512#issuecomment-7230706889

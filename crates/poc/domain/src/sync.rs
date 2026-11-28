@@ -28,9 +28,6 @@ use tidb_sql::PlanContext;
 use tidb_sql::Statement;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tracing::debug;
-use tracing::info;
-use tracing::warn;
 
 use crate::Error;
 use crate::Result;
@@ -151,11 +148,11 @@ impl SchemaSync {
         let loop_handle = tokio::spawn(inner.clone().sync_loop());
         *inner.sync_loop_handle.lock().await = Some(loop_handle);
         tokio::spawn(inner.clone().watchdog());
-        info!(
-            ddl_id = %inner.cfg.info.ddl_id,
-            ip = %inner.cfg.info.ip,
-            port = inner.cfg.info.listening_port,
-            "schema sync started"
+        tidb_base::log_info!(
+            "schema sync started",
+            "ddl_id" => inner.cfg.info.ddl_id.as_str(),
+            "ip" => inner.cfg.info.ip.as_str(),
+            "port" => inner.cfg.info.listening_port,
         );
         Ok(SchemaSync { inner })
     }
@@ -226,7 +223,11 @@ impl Inner {
         let mut stop = self.stop.subscribe();
         while !self.stopped() {
             if let Err(e) = self.watch_once(&mut stop).await {
-                warn!(error = %e, "watch of global_schema_version failed; retrying");
+                let err_str = e.to_string();
+                tidb_base::log_warn!(
+                    "watch of global_schema_version failed; retrying",
+                    "error" => err_str.as_str(),
+                );
             }
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -271,11 +272,11 @@ impl Inner {
             .and_then(|s| s.parse::<i64>().ok())
         {
             Some(v) => {
-                debug!(version = v, "global schema version");
+                tidb_base::log_debug!("global schema version", "version" => v);
                 self.registry.note_global(v, Instant::now());
                 self.wake.notify_one();
             }
-            None => warn!(value = ?String::from_utf8_lossy(value), "bad global_schema_version"),
+            None => tidb_base::log_warn!("bad global_schema_version", "value" => value),
         }
     }
 
@@ -320,14 +321,21 @@ impl Inner {
             if full {
                 last_full = Some(started);
                 if let Err(e) = self.reload().await {
-                    warn!(error = %e, "schema reload failed");
+                    let err_str = e.to_string();
+                    tidb_base::log_warn!("schema reload failed", "error" => err_str.as_str());
                     continue;
                 }
                 if !self.registry.is_registered() {
                     match self.register().await {
                         // Reload again at a TSO taken after the keys are visible.
                         Ok(()) => force_full = true,
-                        Err(e) => warn!(error = %e, "registering in etcd failed"),
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            tidb_base::log_warn!(
+                                "registering in etcd failed",
+                                "error" => err_str.as_str(),
+                            );
+                        }
                     }
                     self_version_put = self.registry.loaded_version();
                     continue;
@@ -335,7 +343,11 @@ impl Inner {
                 match self.read_mdl_jobs().await {
                     Ok(j) => jobs = j,
                     Err(e) => {
-                        warn!(error = %e, "reading mysql.tidb_mdl_info failed");
+                        let err_str = e.to_string();
+                        tidb_base::log_warn!(
+                            "reading mysql.tidb_mdl_info failed",
+                            "error" => err_str.as_str(),
+                        );
                         continue;
                     }
                 }
@@ -356,7 +368,11 @@ impl Inner {
                         Ok(()) => self_version_put = loaded,
                         Err(e) => {
                             ok = false;
-                            warn!(error = %e, "updating all_schema_versions failed");
+                            let err_str = e.to_string();
+                            tidb_base::log_warn!(
+                                "updating all_schema_versions failed",
+                                "error" => err_str.as_str(),
+                            );
                         }
                     }
                 }
@@ -391,7 +407,11 @@ impl Inner {
             let version = schema.version();
             self.registry.install(Arc::new(schema), Instant::now());
             self.registry.count(|s| s.reloads += 1);
-            info!(version, elapsed = ?started.elapsed(), "schema loaded");
+            tidb_base::log_info!(
+                "schema loaded",
+                "version" => version,
+                "elapsed" => started.elapsed(),
+            );
         }
         self.registry
             .reloaded(ts, requested_at, old_version, full_load);
@@ -403,7 +423,10 @@ impl Inner {
         if let Some(ported) = &self.ported {
             let r = ported.reload_at(ts).await;
             if let Err(e) = &r {
-                warn!(error = %e, "reloading the ported domain's InfoSchema failed");
+                tidb_base::log_warn!(
+                    "reloading the ported domain's InfoSchema failed",
+                    "error" => e,
+                );
             }
             self.registry.ported_reloaded(r.is_ok());
         }
@@ -443,7 +466,8 @@ impl Inner {
         let mut jobs = Vec::new();
         for row in rows {
             let (Some(job_id), Some(version)) = (int(row.first()), int(row.get(1))) else {
-                warn!(?row, "unexpected mysql.tidb_mdl_info row");
+                let row_str = format!("{row:?}");
+                tidb_base::log_warn!("unexpected mysql.tidb_mdl_info row", "row" => row_str.as_str());
                 continue;
             };
             if version > loaded {
@@ -480,18 +504,24 @@ impl Inner {
                 continue;
             }
             let key = keys::job_schema_version(job.job_id, &self.cfg.info.ddl_id);
+            tidb_base::log_info!(
+                "mdl gets lock, update self version to owner",
+                "jobID" => job.job_id,
+                "version" => job.version,
+            );
             match self.put_mono(&key, &job.version.to_string()).await {
                 Ok(()) => {
-                    info!(
-                        job_id = job.job_id,
-                        version = job.version,
-                        "mdl: reported schema version to the DDL owner"
-                    );
                     reported.insert(job.job_id, job.version);
                     self.registry.count(|s| s.mdl_reports += 1);
                 }
                 Err(e) => {
-                    warn!(job_id = job.job_id, error = %e, "mdl: reporting to the DDL owner failed");
+                    let err_str = e.to_string();
+                    tidb_base::log_warn!(
+                        "mdl gets lock, update self version to owner failed",
+                        "jobID" => job.job_id,
+                        "version" => job.version,
+                        "error" => err_str.as_str(),
+                    );
                     pending = true;
                     ok = false;
                 }
@@ -589,11 +619,12 @@ impl Inner {
         let epoch = self.registry.registered(Instant::now(), deadline);
         let keepalive = tokio::spawn(self.clone().keep_alive(lease, epoch));
         *reg = Some(Registration { lease, keepalive });
-        info!(
-            ddl_id = %self.cfg.info.ddl_id,
-            lease = format!("{lease:x}"),
-            version,
-            "registered in etcd"
+        let lease_hex = format!("{lease:x}");
+        tidb_base::log_info!(
+            "registered in etcd",
+            "ddl_id" => self.cfg.info.ddl_id.as_str(),
+            "lease" => lease_hex.as_str(),
+            "version" => version,
         );
         Ok(())
     }
@@ -607,7 +638,11 @@ impl Inner {
             let (mut keeper, mut stream) = match stream {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!(error = %e, "lease keepalive: cannot open stream");
+                    let err_str = e.to_string();
+                    tidb_base::log_warn!(
+                        "lease keepalive: cannot open stream",
+                        "error" => err_str.as_str(),
+                    );
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
@@ -615,7 +650,8 @@ impl Inner {
             loop {
                 let sent = Instant::now();
                 if let Err(e) = keeper.keep_alive().await {
-                    warn!(error = %e, "lease keepalive failed");
+                    let err_str = e.to_string();
+                    tidb_base::log_warn!("lease keepalive failed", "error" => err_str.as_str());
                     break;
                 }
                 match tokio::time::timeout(ETCD_OP_TIMEOUT, stream.message()).await {
@@ -624,20 +660,22 @@ impl Inner {
                         self.registry.lease_renewed(epoch, deadline);
                     }
                     Ok(Ok(Some(_))) => {
-                        warn!(lease = format!("{lease:x}"), "lease expired");
+                        let lease_hex = format!("{lease:x}");
+                        tidb_base::log_warn!("lease expired", "lease" => lease_hex.as_str());
                         self.registry.lease_lost(epoch);
                         return;
                     }
                     Ok(Ok(None)) => {
-                        warn!("lease keepalive stream ended");
+                        tidb_base::log_warn!("lease keepalive stream ended");
                         break;
                     }
                     Ok(Err(e)) => {
-                        warn!(error = %e, "lease keepalive failed");
+                        let err_str = e.to_string();
+                        tidb_base::log_warn!("lease keepalive failed", "error" => err_str.as_str());
                         break;
                     }
                     Err(_) => {
-                        warn!("lease keepalive got no answer");
+                        tidb_base::log_warn!("lease keepalive got no answer");
                         break;
                     }
                 }
@@ -676,7 +714,7 @@ impl Inner {
         let was = self.registry.deregister();
         let Some(r) = reg.take() else {
             if was {
-                warn!(why, "deregistered (no lease held)");
+                tidb_base::log_warn!("deregistered (no lease held)", "why" => why);
             }
             return;
         };
@@ -685,7 +723,11 @@ impl Inner {
         match timeout(self.etcd().lease_revoke(r.lease)).await {
             Ok(_) => {}
             Err(e) => {
-                warn!(error = %e, "lease revoke failed; deleting the keys");
+                let err_str = e.to_string();
+                tidb_base::log_warn!(
+                    "lease revoke failed; deleting the keys",
+                    "error" => err_str.as_str(),
+                );
                 let _ = timeout(self.etcd().delete(self.cfg.info.key(), None)).await;
                 let _ = timeout(
                     self.etcd()
@@ -694,7 +736,11 @@ impl Inner {
                 .await;
             }
         }
-        warn!(why, elapsed = ?started.elapsed(), "deregistered from etcd");
+        tidb_base::log_warn!(
+            "deregistered from etcd",
+            "why" => why,
+            "elapsed" => started.elapsed(),
+        );
         self.wake.notify_one();
     }
 }

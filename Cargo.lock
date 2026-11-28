@@ -1084,7 +1084,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1833,7 +1833,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.3",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2530,6 +2530,7 @@ dependencies = [
  "tidb-infoschema",
  "tidb-kv",
  "tidb-meta",
+ "tidb-metrics",
  "tidb-model",
  "tidb-mysql-protocol",
  "tidb-parser",
@@ -2540,7 +2541,6 @@ dependencies = [
  "tidb-types",
  "tikv-client",
  "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -2581,6 +2581,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "log_wrappers",
  "poc-domain",
  "poc-kv",
  "poc-session",
@@ -2598,7 +2599,6 @@ dependencies = [
  "tikv-jemallocator",
  "tipb",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2606,7 +2606,6 @@ name = "poc-session"
 version = "0.0.0"
 dependencies = [
  "futures",
- "log",
  "parking_lot 0.12.5",
  "poc-domain",
  "poc-executor",
@@ -2631,6 +2630,7 @@ dependencies = [
  "tidb-sessiontxn",
  "tidb-sql",
  "tidb-store",
+ "tidb-systable",
  "tokio",
 ]
 
@@ -3148,7 +3148,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3607,7 +3607,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4013,7 +4013,6 @@ dependencies = [
  "time 0.3.55",
  "tokio",
  "tokio-rustls",
- "tracing",
 ]
 
 [[package]]
@@ -4445,7 +4444,7 @@ dependencies = [
 [[package]]
 name = "tikv-client"
 version = "0.4.0"
-source = "git+https://github.com/dulao5/client-rust.git?rev=5cbc0d7fa3dece01002730d02e4ac3b3d13ab9c0#5cbc0d7fa3dece01002730d02e4ac3b3d13ab9c0"
+source = "git+https://github.com/dulao5/client-rust.git?rev=e210ec757496b23625787a3093b7d7ddec0917d0#e210ec757496b23625787a3093b7d7ddec0917d0"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -5088,7 +5087,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

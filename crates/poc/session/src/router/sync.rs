@@ -56,12 +56,13 @@ fn set(vars: &mut SessionVars, diverged: &mut BTreeSet<String>, name: &str, valu
 /// The text Go's `SetExecutor.getVarValue` (pkg/executor/set.go:304) makes of a session
 /// `SET` value: the literal's `Datum.ToString()` (`TRUE` is the integer 1; a bare identifier is
 /// its original text, `PlanBuilder.buildSet`), the empty string for `NULL`, and for `DEFAULT`
-/// the global value (here the compiled default). `None` when the prototype cannot tell (an
-/// expression, a float or decimal literal): the PoC does not validate it, and the variable
-/// diverges. Used for the PoC's validation of `SET` (`crate::validated_session_value`) and for
-/// the sync.
+/// the global value, read through `vars`'s accessor (the cluster's `mysql.global_variables`,
+/// the loader's sysvar cache, D06.5 spec §8). `None` when the prototype cannot tell (an
+/// expression, a float or decimal literal) or the global value cannot be read: the PoC does
+/// not validate it, and the variable diverges. Used for the PoC's validation of `SET`
+/// (`crate::validated_session_value`) and for the sync.
 // glue: getVarValue of the literal values the prototype's SET lowers (the SET executor is D12.12)
-pub(crate) fn value_text(name: &str, v: &SetValue) -> Option<String> {
+pub(crate) fn value_text(vars: &mut SessionVars, name: &str, v: &SetValue) -> Option<String> {
     match v {
         SetValue::Literal(Literal::Int(i)) => Some(i.to_string()),
         SetValue::Literal(Literal::UInt(u)) => Some(u.to_string()),
@@ -69,9 +70,9 @@ pub(crate) fn value_text(name: &str, v: &SetValue) -> Option<String> {
         SetValue::Literal(Literal::Str(s)) | SetValue::Ident(s) => Some(s.clone()),
         // `if err != nil || nativeVal.IsNull() { return "", err }`.
         SetValue::Literal(Literal::Null) => Some(String::new()),
-        SetValue::Default => {
-            tidb_sessionctx::variable::get_sys_var(name).map(|sv| sv.value.clone())
-        }
+        // `SET x = DEFAULT` of a session variable: the global value (Go
+        // `SetExecutor.getVarValue` with no sysVar: `GetGlobalSystemVar`).
+        SetValue::Default => vars.get_global_system_var(name).ok(),
         _ => None,
     }
 }
@@ -121,7 +122,7 @@ pub(super) fn sync_set(
                 name,
                 global: false,
                 value,
-            } => match value_text(name, value) {
+            } => match value_text(vars, name, value) {
                 Some(v) => set(vars, diverged, name, &v),
                 None => {
                     diverged.insert(name.clone());

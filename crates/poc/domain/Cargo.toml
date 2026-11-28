@@ -33,10 +33,11 @@ tidb-tablecodec = { workspace = true }
 tidb-types = { workspace = true }
 # The ported domain (D06.5 part 1) and the kv.Storage it reads through (ported_domain.rs).
 tidb-domain = { workspace = true }
+# The sysvar cache loader's `tidbrs_sysvar_cache_loaded` gauge (D06.5 spec §8.3).
+tidb-metrics = { workspace = true }
 tidb-kv = { workspace = true }
 tikv-client = { workspace = true }
 parking_lot = "0.12"
-tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
