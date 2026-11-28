@@ -1,5 +1,5 @@
-//! Regression tests for the two fixes that the vendored TiKV fork carries on top of its base
-//! (`third_party/tikv/PROVENANCE.md`, "Fixes for two upstream TiKV panics").
+//! Regression tests for the panic fixes that the vendored TiKV fork carries on top of its base
+//! (`third_party/tikv/PROVENANCE.md`, "Local patches (where the fork differs from TiKV v8.5.8)").
 //!
 //! TiKV v8.5.8 panics on both inputs below. The fork's fixes return what Go
 //! TiDB returns for the same expression: `MinInt64 % -1` is 0, and U+2CEA1 under

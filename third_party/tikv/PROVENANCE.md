@@ -7,10 +7,10 @@ submodules. tidb-rs builds them on stable Rust.
 
 - Repository: https://github.com/dulao5/tikv, the project's fork of https://github.com/tikv/tikv
 - Branch: `rust-tidb/v8.5.8-stable-rpn-fn`
-- Commit: `a87863eb7ce3b848f1d9ea964e4a84c823da2359`
+- Commit: `3b39795daa91b8dadaffea680fa5a99d8a55038c`
 - Base: TiKV `v8.5.8` (tag `v8.5.8`, `a1fdd6a59bb9c8a282c15677e1894501a52425cf`), per owner decision on #530 (2026-11-28)
 
-The branch replays the stable-Rust build commits and the two panic fixes onto `v8.5.8`:
+The branch replays the stable-Rust build commits, the two panic fixes, the patched-binary release workflow, and the Stacked Borrows soundness fixes onto `v8.5.8`:
 
 | Commit | Replayed from | Change |
 |---|---|---|
@@ -20,6 +20,9 @@ The branch replays the stable-Rust build commits and the two panic fixes onto `v
 | `ae9d12f9a` | `abf6df2f4` | `tidb_query_datatype` declares `chrono`'s `clock` feature. |
 | `449b5d2fe` | `c36f47e93` | Cherry-pick of upstream master `19249e66b` (TiKV PR `20206`): `Unicode0900::char_weight` guards with `>=` instead of `>`, plus upstream's regression test (#524). |
 | `a87863eb7` | `7614b0cbb` | `IntIntMod::calc` uses `wrapping_rem`, so `i64::MIN % -1` gives 0 (#523). Not fixed upstream. |
+| `8cc700315` | — | Add `.github/workflows/release-patched-tikv.yml` to build and publish patched `tikv-server` binaries for test clusters (#531). |
+| `5461083e5` | `63dc697eb` | Cherry-pick of upstream master `63dc697eb` (TiKV PR `19939`): derive both pointers from a single `as_mut_ptr()` in `MemComparableByteCodec::try_decode_first_in_place` / `_desc`, plus Miri soundness test (#553). |
+| `3b39795da` | `57f09a343` | Cherry-pick of upstream master `57f09a343` (TiKV PR `19945`): derive both pointers from a single `as_mut_ptr()` in `MemComparableByteCodec::encode_all_in_place`, plus Miri soundness test (#553). |
 
 TiKV turns on `nightly`, `raft` and `coprocessor` through its `[workspace.dependencies]`, so its
 build behaves as before. tidb-rs leaves all three features off.
@@ -49,24 +52,26 @@ local edits: make any change to these crates on the TiKV branch, then re-sync.
 | `tidb_query_aggr` | Aggregate functions |
 | `panic_hook`, `profiler`, `tipb_helper` | Dev-dependencies of the crates above (test helpers) |
 
-## Fixes for two upstream TiKV panics
+## Local patches (where the fork differs from TiKV v8.5.8)
 
-The last two commits of the branch fix two panics in upstream TiKV's coprocessor evaluation:
+In addition to the stable-Rust build commits above, the fork carries three local fixes on top of TiKV `v8.5.8` (two panic fixes and one Stacked Borrows memory-safety fix):
 
 | Issue | File, function | Change | Why |
 |---|---|---|---|
 | #523 | `tidb_query_expr/src/impl_arithmetic.rs`, `IntIntMod::calc` | `lhs % rhs` becomes `lhs.wrapping_rem(*rhs)` | `i64::MIN % -1` panicked ("attempt to calculate the remainder with overflow"). Go TiDB v8.5.8 (`a % b` in `builtinArithmeticModIntSignedSignedSig`) and MySQL give 0. |
 | #524 | `tidb_query_datatype/src/codec/collation/collator/utf8mb4_uca/data_0900.rs`, `Unicode0900::char_weight` | the guard `r > UNICODE_CI_TABLE.len()` becomes `r >= …` | U+2CEA1, the first code point past the 0x2CEA1-entry table, indexed past its end ("index out of bounds: the len is 183969"). This is the same off-by-one that upstream Go fixed after v8.5.8 (`pingcap/tidb#67149`, ruling R3 in `docs/testing/rulings.toml`, #294). With `>=` TiKV gives the implicit weight that tidb-rs's collator gives. |
+| #553 | `codec/src/byte.rs`, `MemComparableByteCodec::{encode_all_in_place, try_decode_first_in_place, try_decode_first_in_place_desc}` | derive both `src` and `dest` raw pointers from one `as_mut_ptr()` call (cherry-picked from upstream master `63dc697eb` / TiKV PR `19939` and `57f09a343` / TiKV PR `19945`) | Calling `as_ptr()` then `as_mut_ptr()` on the same slice invalidates the `SharedReadOnly` provenance tag under Stacked Borrows before `std::ptr::copy` reads through it (UB under Miri, no observable behavior change). |
 
-The project owner, zhigang-du, decided on 2026-11-27 to fix both in the TiKV fork, open an issue
+The project owner, zhigang-du, decided on 2026-11-27 to fix #523 and #524 in the TiKV fork, open an issue
 in this repository recording that upstream TiKV is affected, and leave reporting it to TiKV to the
 owner. On 2026-11-28 the maintainer decided to carry the fixes as fork commits on the vendored base,
-taking upstream's own fix for #524.
+taking upstream's own fix for #524, and on 2026-11-28 (#553) to re-apply upstream master's Stacked
+Borrows fixes in `codec/src/byte.rs` for memory safety.
 
-Upstream status, from reading the source on 2026-11-28 (#523, #524):
+Upstream status, from reading the source on 2026-11-28 (#523, #524, #553):
 
-- TiKV v8.5.8 (tag `v8.5.8`, `a1fdd6a59`, now the vendored base here) and `release-8.5` (`3f4712b`) have both bugs.
-- Upstream master has #524's fix (`19249e66b`), but not a fix for #523.
+- TiKV v8.5.8 (tag `v8.5.8`, `a1fdd6a59`, now the vendored base here) and `release-8.5` (`3f4712b`) have all three bugs.
+- Upstream master has #524's fix (`19249e66b`) and #553's fixes (`63dc697eb`, `57f09a343`), but not a fix for #523.
 
 Where the fixes take effect:
 
@@ -79,13 +84,16 @@ Where the fixes take effect:
   error 1105 there (#294).
 - **#523 is test-only.** `tidb_query_expr` is only a dev-dependency (ADR 0007 point 3, checked by
   `scripts/check_test_only_deps.py`), so the fix changes only the coprocessor evaluation oracle.
-- **Neither fix reaches a cluster's TiKV.** A pushed-down expression is evaluated by the
-  cluster's own TiKV, which still panics on these inputs at v8.5.8, as under Go TiDB.
+- **#553 reaches the `codec` crate** (a normal dependency of `tidb-meta` and `tidb_query_datatype`).
+  No first-party crate currently calls the in-place memcomparable encode/decode methods directly,
+  but fixing them removes library-level Stacked Borrows UB from safe public APIs in the vendored crate.
+- **Patched cluster TiKV (#531).** Stock TiKV `v8.5.8` still panics on #523/#524; test clusters using the patched TiKV release built from this fork branch (`#531`) receive all three fixes.
 
 A re-sync from a TiKV commit without the fixes would drop them.
 `crates/query-smoke/tests/tikv_local_patches.rs` and the coprocessor evaluation oracle
-(`crates/query-smoke/tests/copr_eval_oracle.rs`, `FORK_DIVERGENCES`) fail if either fix is
-lost.
+(`crates/query-smoke/tests/copr_eval_oracle.rs`, `FORK_DIVERGENCES`) fail if #523 or #524 is
+lost; `codec`'s `miri_soundness_encode_all_in_place` and `miri_soundness_try_decode_first_in_place`
+tests verify #553 under Miri.
 
 ## Moving from master `78aedc1c8` to `v8.5.8` (#530)
 
@@ -103,7 +111,7 @@ Where behavior changed vs `78aedc1c8`:
   - `crates/poc/executor/src/agg.rs` uses `tidb_query_datatype::codec::mysql::{Decimal, Res, RoundMode}` (`decimal.rs` changed only a clippy loop condition).
   - `crates/poc/executor/src/compare.rs` uses `tidb_query_datatype::{Collation, codec::collation::{Collator, collator::*}}`, unchanged once #524 is applied.
   - `crates/distsql/src/{decode,dag,ranges}.rs` uses `codec::table::{encode_row_key, decode_col_value, decode_row}`, `codec::row::v2::{RowSlice, V1CompatibleEncoder, CODEC_VERSION}`, `codec::datum::{Datum, encode_value, split_datum, decode}`, `mysql::Decimal`, and `expr::EvalContext`. None of those paths changed (`EvalConfig` drops only unused `max_keys_read` from TiKV PR `19518`). `Time::to_packed_u64` in `v8.5.8` lacks TiKV PR `19288` and `parse_from_float_string` lacks TiKV PR `19532`, but `tidb-distsql/src/decode.rs` only calls `from_packed_u64` and `tidb-distsql/src/dag.rs::origin_default_datum` returns `Error::Unsupported` for date/time columns before encoding.
-  - `crates/meta/src/keys.rs` uses `codec::prelude::{BufferReader, MemComparableByteDecoder, MemComparableByteEncoder, NumberEncoder}`. `codec/src/byte.rs` drops only Miri pointer-provenance fixes on `encode_all_in_place` / `try_decode_first_in_place*` and a naive bench fix, none of which `tidb-meta` calls.
+  - `crates/meta/src/keys.rs` uses `codec::prelude::{BufferReader, MemComparableByteDecoder, MemComparableByteEncoder, NumberEncoder}`. At `v8.5.8` `codec/src/byte.rs` initially dropped master's Miri pointer-provenance fixes and a naive bench fix; `#553` re-applied the two pointer-provenance fixes (`5461083e5`, `3b39795da`), leaving only the naive bench fix absent.
 - **Coprocessor evaluation oracle (`crates/query-smoke/tests/copr_eval_oracle.rs`).**
   - TiKV `v8.5.8` lacks TiKV PR `17935` (`ToInt for f64` using `round_ties_even()`) and TiKV PR `18009` (`round_real` / `round_with_frac_real` using `round_ties_even()` and an overflow guard). At `v8.5.8`, TiKV rounds half away from zero (`f64::round()`), whereas Go v8.5.8 uses `math.RoundToEven`: `RoundReal` now mismatches (6 rows, recorded under `#498`; `RoundWithFracReal` has the same `.round()` logic by code inspection) and signed `CastRealAsInt` now also joins the `#498` mismatches (`CastRealAsInt` value mismatches increase to 2522 rows).
   - Master-only functions and error codes absent in `v8.5.8` (`ExprType::SumInt` in `tidb_query_aggr/src/impl_sum_int.rs`, `FromUnixTime*`, `StrToDate*`, `UnixTimestamp*`, `TimestampDiff`, `UuidVersion`, `UuidTimestamp`, v1 `Uuid`, `ErrorCode::coprocessor::DEFAULT_NOT_FOUND`, and `coprocessor`-gated `Storage::scanned_bytes` / `RangesScanner::peek_*`) are neither in `tikv_pushable_sigs.tsv` nor used by `tidb-rs`.
@@ -148,11 +156,11 @@ Reusing its operators needs the executor-trait split described in the query-core
 
 ## Tests
 
-On stable 1.99.1 in tidb-rs at `a87863eb7`:
+On stable 1.99.1 in tidb-rs at `3b39795da`:
 
 | Crate | Tests passing |
 |---|---|
-| codec | 42 (+1 ignored) |
+| codec | 44 (+1 ignored) |
 | error_code | 1 |
 | tidb_query_common | 2 |
 | tidb_query_codegen | 18 (+6 ignored doctests) |
@@ -160,10 +168,24 @@ On stable 1.99.1 in tidb-rs at `a87863eb7`:
 | tidb_query_expr | 394 (+4 ignored doctests) |
 | tidb_query_aggr | 35 |
 
-Compared with the prior master `78aedc1c8` snapshot (`7614b0cbb`), `v8.5.8` omits master-only
-tests (`2` Miri pointer-provenance tests in `codec`, `3` date/time helper tests in
-`tidb_query_datatype`, `8` tests in `tidb_query_expr` for `from_unixtime`/`timestampdiff`/
-`str_to_date`/`uuid` v1, and `5` `SumInt` tests in `tidb_query_aggr`).
+Compared with the prior master `78aedc1c8` snapshot (`7614b0cbb`), `v8.5.8` + `#553` omits only
+master-only tests (`3` date/time helper tests in `tidb_query_datatype`, `8` tests in
+`tidb_query_expr` for `from_unixtime`/`timestampdiff`/`str_to_date`/`uuid` v1, and `5` `SumInt`
+tests in `tidb_query_aggr`); the `2` Miri pointer-provenance tests in `codec`
+(`miri_soundness_encode_all_in_place` and `miri_soundness_try_decode_first_in_place`) are back.
+
+### Miri verification (`codec`, #553)
+
+`tidb-rs` CI builds on stable Rust only (`ci.yml`), whereas Miri requires a nightly toolchain with
+the `miri` component, so Miri is not added to `ci.yml`. Local verification on `nightly-2026-01-30`
+(`miri 0.1.0`) passes under both Stacked Borrows and Tree Borrows:
+
+```sh
+# Stacked Borrows (both soundness regression tests)
+cargo +nightly-2026-01-30 miri test --locked -p codec -- miri_soundness_
+# Tree Borrows (both soundness regression tests)
+MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly-2026-01-30 miri test --locked -p codec -- miri_soundness_
+```
 
 On TiKV's nightly, the branch also enables libtest benches (`nightly` feature) and
 `coprocessor`-gated tests (`tidb_query_common` storage tests, `tidb_query_datatype`
