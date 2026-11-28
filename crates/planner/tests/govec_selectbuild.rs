@@ -73,8 +73,6 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     // Comment-style optimizer hints (`/*+ ... */`): the Rust parser does not parse the hint
     // grammar, so the hint skeleton stops at a non-empty hint list.
     ("D02.2", 2),
-    // The preprocessor's missing table check (the privilege manager decides the error).
-    ("D04.1", 2),
     // Time functions not ported yet (DATE_ADD / DATE_SUB for window RANGE INTERVAL bounds).
     ("D08.7", 2),
     // Built-in function families not ported yet (IN, ANY_VALUE, user variables, ...).
@@ -579,6 +577,25 @@ fn run(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
                 })
                 .collect();
             let w = warns(ctx.vars, &wh);
+            let mut resolved_tables: Vec<(String, String)> = builder
+                .resolve_ctx
+                .as_ref()
+                .map(|rc| {
+                    rc.lock()
+                        .get_table_names()
+                        .values()
+                        .map(|tn| {
+                            let db = tn
+                                .db_info
+                                .as_ref()
+                                .filter(|d| !d.name.l.is_empty())
+                                .map_or_else(|| "test".to_owned(), |d| d.name.l.clone());
+                            (db, tn.table_info.name.l.clone())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            resolved_tables.sort();
             Outcome::Value(json!({
                 "plan": plan,
                 "plan_id": plan_id,
@@ -586,6 +603,7 @@ fn run(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
                 "opt_flag": builder.get_opt_flag(),
                 "vi": vi,
                 "w": w,
+                "__r29_tables": resolved_tables,
             }))
         }
     }
@@ -1322,6 +1340,119 @@ fn run_winop(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
     }
 }
 
+/// Records in `selectbuild` whose `.vi` differs from Go v8.5.8 strictly because of owner-approved
+/// ruling `R29` (`specs/D04.1-privilege/spec.md` §5.1–§5.2, §6.1 D1 option A): `tidb-rs` registers
+/// table-read `SelectPriv` (`column = "*"`, error `1142`) at `build_data_source` and removes Go's
+/// case-sensitive `collectPrivsForCount` patch. Pinned so any unexpected drift fails CI.
+const EXPECTED_R29_NORMALIZED: usize = 2321;
+
+/// Checks whether `got` equals Go's `out` once the exact `R29` table-read `("*", 1142)` entries
+/// for the statement's resolved base tables (including those folded into `TableDual` by
+/// `WHERE 0` / `LIMIT 0`, per specs/D04.1-privilege/spec.md §5.1), Go's superseded
+/// `collectPrivsForCount` `"*"` entries, and `R32` `_tidb_rowid` full-table `VisitInfo` entries
+/// are accounted for. Returns `true` only when every resolved base table actually emitted its
+/// exact `R29` entry in `got["vi"]` and every other field (`plan`, `plan_id`, `col_id`,
+/// `opt_flag`, remaining `vi`, `w`) matches Go byte-for-byte.
+fn matches_with_r29_vi_normalization(
+    out: &Value,
+    got: &Value,
+    resolved_tables: &[(String, String)],
+) -> bool {
+    let (Some(out_obj), Some(got_obj)) = (out.as_object(), got.as_object()) else {
+        return false;
+    };
+    let (Some(out_vi), Some(got_vi)) = (
+        out_obj.get("vi").and_then(Value::as_array),
+        got_obj.get("vi").and_then(Value::as_array),
+    ) else {
+        return false;
+    };
+    if resolved_tables.is_empty() {
+        return false;
+    }
+
+    // Every resolved table in the statement must have registered its exact R29 table-read
+    // VisitInfo in `got["vi"]` (even if WHERE 0 / LIMIT 0 later folded DataSource to TableDual).
+    let mut expected_entries: Vec<Value> = resolved_tables
+        .iter()
+        .map(|(db, tbl)| {
+            json!([
+                4,
+                db,
+                tbl,
+                "*",
+                format!("[planner:1142]SELECT command denied to user ''@'' for table '{tbl}'"),
+                1142
+            ])
+        })
+        .collect();
+
+    // For single-table plans, the R29 entry must be the very first VisitInfo (ensuring R30
+    // table-denied 1142 precedes column-denied 1143).
+    if expected_entries.len() == 1 && got_vi.first() != Some(&expected_entries[0]) {
+        return false;
+    }
+
+    // R32: `_tidb_rowid` references now register full-table SelectPriv (`column = ""`, 1143)
+    // where Go v8.5.8 emitted none.
+    let r32_rowid_entries: Vec<Value> = resolved_tables
+        .iter()
+        .map(|(db, tbl)| {
+            json!([
+                4,
+                db,
+                tbl,
+                "",
+                format!(
+                    "[planner:1143]SELECT command denied to user ''@'' for column '_tidb_rowid' in table '{tbl}'"
+                ),
+                1143
+            ])
+        })
+        .collect();
+
+    let mut rem_got_vi = Vec::with_capacity(got_vi.len());
+    for entry in got_vi {
+        if let Some(pos) = expected_entries.iter().position(|e| e == entry) {
+            expected_entries.remove(pos);
+        } else if r32_rowid_entries.contains(entry) {
+            // R32 `_tidb_rowid` entry (not emitted by Go v8.5.8).
+        } else {
+            rem_got_vi.push(entry.clone());
+        }
+    }
+    if !expected_entries.is_empty() {
+        return false;
+    }
+
+    // Go's superseded `collectPrivsForCount` emitted trailing `("*", 1142)` entries for lowercase
+    // `count(*)`; drop only exact matches for the same resolved `(db, tbl)` pairs from Go's `vi`.
+    let ds_star_entries: Vec<Value> = resolved_tables
+        .iter()
+        .map(|(db, tbl)| {
+            json!([
+                4,
+                db,
+                tbl,
+                "*",
+                format!("[planner:1142]SELECT command denied to user ''@'' for table '{tbl}'"),
+                1142
+            ])
+        })
+        .collect();
+    let rem_out_vi: Vec<Value> = out_vi
+        .iter()
+        .filter(|entry| !ds_star_entries.contains(entry))
+        .cloned()
+        .collect();
+
+    let mut norm_out = out_obj.clone();
+    let mut norm_got = got_obj.clone();
+    norm_out.insert("vi".into(), Value::Array(rem_out_vi));
+    norm_got.insert("vi".into(), Value::Array(rem_got_vi));
+    norm_out == norm_got
+}
+
 /// The first path where two JSON values differ, with both sides (for the report).
 fn first_diff(a: &Value, b: &Value, path: String) -> Option<String> {
     match (a, b) {
@@ -1360,7 +1491,8 @@ fn govec_selectbuild() {
     let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(header["domain"], "selectbuild");
     let mut tables: Option<Arc<Tables>> = None;
-    let (mut records, mut equal, mut errors_equal) = (0usize, 0usize, 0usize);
+    let (mut records, mut equal, mut r29_normalized, mut errors_equal) =
+        (0usize, 0usize, 0usize, 0usize);
     let mut blocked: BTreeMap<String, usize> = BTreeMap::new();
     let (mut diffs, mut unparsed) = (Vec::new(), Vec::new());
     for line in lines {
@@ -1413,7 +1545,22 @@ fn govec_selectbuild() {
                 }
                 *blocked.entry(b).or_default() += 1
             }
-            Outcome::Value(got) => {
+            Outcome::Value(mut got) => {
+                let resolved_tables: Vec<(String, String)> = got
+                    .as_object_mut()
+                    .and_then(|o| o.remove("__r29_tables"))
+                    .and_then(|v| v.as_array().cloned())
+                    .map(|arr| {
+                        arr.into_iter()
+                            .map(|pair| {
+                                (
+                                    pair[0].as_str().unwrap().to_owned(),
+                                    pair[1].as_str().unwrap().to_owned(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 if out.get("unsupported").is_some() {
                     diffs.push(format!(
                         "{sql} {}: Go builds {}, tidb-rs gives {got}",
@@ -1425,6 +1572,8 @@ fn govec_selectbuild() {
                     } else {
                         equal += 1;
                     }
+                } else if matches_with_r29_vi_normalization(out, &got, &resolved_tables) {
+                    r29_normalized += 1;
                 } else {
                     diffs.push(format!(
                         "{sql} {}: {}",
@@ -1438,7 +1587,7 @@ fn govec_selectbuild() {
     collate::set_new_collation_enabled_for_test(true);
     assert_eq!(records as u64, header["records"].as_u64().unwrap());
     eprintln!(
-        "selectbuild: {records} records, {equal} plans and {errors_equal} errors equal to Go, blocked {blocked:?}, {} not parsed, {} differences",
+        "selectbuild: {records} records, {equal} plans + {r29_normalized} R29-normalized plans and {errors_equal} errors equal to Go, blocked {blocked:?}, {} not parsed, {} differences",
         unparsed.len(),
         diffs.len()
     );
@@ -1446,6 +1595,10 @@ fn govec_selectbuild() {
         eprintln!("{d}");
     }
     assert!(diffs.is_empty(), "{} differences", diffs.len());
+    assert_eq!(
+        r29_normalized, EXPECTED_R29_NORMALIZED,
+        "R29-normalized record count changed"
+    );
     assert!(
         unparsed.is_empty(),
         "Go parses, Rust does not: {unparsed:?}"

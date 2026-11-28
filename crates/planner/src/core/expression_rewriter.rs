@@ -401,16 +401,21 @@ impl<'ast> PlanBuilder<'ast> {
 
     /// appendColNamesToVisitInfo.
     ///
-    /// `b.SavedViews` (views, D09.1 `BuildDataSourceFromView`) is always empty here, and the
-    /// session has no user name yet (D05.2, as `TryFastPlan`): the errors carry an empty
-    /// user and host.
-    // go: PlanBuilder.appendColNamesToVisitInfo L2 (no saved views: views are not built yet; empty user)
+    /// `b.SavedViews` (views, D09.1 `BuildDataSourceFromView`) is always empty here.
+    // go: PlanBuilder.appendColNamesToVisitInfo L2 (no saved views: views are not built yet)
     pub fn append_col_names_to_visit_info(&mut self, column_visited: &[VisitedColumn]) {
-        let (user, host) = ("", "");
+        let user = self.user_name.as_str();
+        let host = self.host_name.as_str();
         let gs = |s: &str| tidb_base::gofmt::Arg::from(s.to_owned());
         match self.check_col_priv {
             CheckSelectColumnPrivOption::ReportTableErrOption => {
                 for col_name in column_visited {
+                    // R32 (D5 option A): hidden `_tidb_rowid` requires full-table SELECT (`column = ""`).
+                    let check_col = if col_name.name == tidb_model::ExtraHandleName.l {
+                        ""
+                    } else {
+                        &col_name.name
+                    };
                     let err = ErrTableaccessDenied.fast_gen_by_args(vec![
                         gs("SELECT"),
                         gs(user),
@@ -422,13 +427,20 @@ impl<'ast> PlanBuilder<'ast> {
                         SelectPriv.0,
                         &col_name.schema,
                         &col_name.table,
-                        &col_name.name,
+                        check_col,
                         Some(err),
                     );
                 }
             }
             _ => {
                 for col_name in column_visited {
+                    // R32 (D5 option A): hidden `_tidb_rowid` requires full-table SELECT (`column = ""`)
+                    // while reporting `1143 for column '_tidb_rowid' in table '...'` for partial-column users.
+                    let check_col = if col_name.name == tidb_model::ExtraHandleName.l {
+                        ""
+                    } else {
+                        &col_name.name
+                    };
                     let err = ErrColumnaccessDenied.fast_gen_by_args(vec![
                         gs("SELECT"),
                         gs(user),
@@ -441,7 +453,7 @@ impl<'ast> PlanBuilder<'ast> {
                         SelectPriv.0,
                         &col_name.schema,
                         &col_name.table,
-                        &col_name.name,
+                        check_col,
                         Some(err),
                     );
                 }
@@ -1132,11 +1144,10 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
     // go: expressionRewriter.Leave L2 (variables, DEFAULT(), GROUPING() and ORDER BY ? are stubs, spec §4)
     fn leave(&mut self, in_node: &AstExpr) -> Result<(), Error> {
         match in_node {
-            AstExpr::Aggregate(v) => {
-                // Go checks `v.F == ast.AggFuncCount` (case-sensitive, expression_rewriter.go:1517).
-                if v.f == fnames::AggFuncCount {
-                    self.collect_privs_for_count();
-                }
+            AstExpr::Aggregate(_) => {
+                // Table-read SELECT privilege is registered unconditionally at DataSource and
+                // PointGet boundaries (specs/D04.1-privilege/spec.md §5.2 item 1, §5.3 item 2,
+                // ruling R29), superseding Go's case-sensitive `collectPrivsForCount` patch.
             }
             AstExpr::Column(_)
             | AstExpr::Paren(_)
@@ -2075,64 +2086,7 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
         Ok(())
     }
 
-    /// Assume that there are two tables t and t1, which contain a and b columns individually. In MySQL:
-    ///
-    /// ```text
-    /// -- Require `a` or `b` SELECT privilege
-    /// select count(*) from t;
-    /// select count(1) from t;
-    /// -- Require `a` SELECT privilege
-    /// select count(a) from t;
-    /// -- Require `b` SELECT privilege
-    /// select count(b) from t;
-    /// -- Require `SELCT` privilege of `t.a` and `t1.a`
-    /// select count(*) from t join t1 on t.a = t1.a;
-    /// ```
-    ///
-    /// The plan builder has no InfoSchema yet (views are not built, D09.1) and the session
-    /// no user name (D05.2): view names are taken as tables, the error has an empty user.
-    /// Go walks a map: the visit infos are appended in sorted (db, table) order here (`M-MAPORDER`).
-    // go: expressionRewriter.collectPrivsForCount L2 (no view lookup, empty user; sorted instead of map order, M-MAPORDER)
-    fn collect_privs_for_count(&mut self) {
-        let Some(pc) = self.plan_ctx.as_mut() else {
-            return;
-        };
-        // dbName -> tableName
-        let mut table_names: std::collections::BTreeMap<
-            String,
-            std::collections::BTreeSet<String>,
-        > = Default::default();
-        for field_name in self.names {
-            let (name, schema) = (&field_name.orig_tbl_name.l, &field_name.db_name.l);
-            if !name.is_empty() && !schema.is_empty() {
-                table_names
-                    .entry(schema.clone())
-                    .or_default()
-                    .insert(name.clone());
-            }
-        }
-
-        let (user, host) = ("", "");
-        let gs = |s: &str| tidb_base::gofmt::Arg::from(s.to_owned());
-        for (db, tables) in &table_names {
-            for table in tables {
-                let err = ErrTableaccessDenied.fast_gen_by_args(vec![
-                    gs("SELECT"),
-                    gs(user),
-                    gs(host),
-                    gs(table),
-                ]);
-                append_visit_info(
-                    &mut pc.builder.visit_info,
-                    SelectPriv.0,
-                    db,
-                    table,
-                    "*",
-                    Some(err),
-                );
-            }
-        }
-    }
+    // go-exception: R29 expressionRewriter.collectPrivsForCount (replaced by single-point table-read SelectPriv registration at DataSource/PointGet boundaries; specs/D04.1-privilege/spec.md §5.3 item 2, §6.2 item 3)
 
     /// Now TableName in expression only used by sequence function like nextval(seq).
     /// The function arg should be evaluated as a table name rather than normal column name like mysql does.
@@ -2196,9 +2150,10 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
                 ]));
             }
             let col = Expr::Column((**column).clone()).into_ref();
+            let col_uid = column.unique_id;
             let name = Arc::clone(&self.names[i]);
             self.ctx_stack_append(col, Arc::clone(&name));
-            self.precollect_col_names(&name);
+            self.precollect_col_names(&name, Some(col_uid));
             return Ok(());
         } else if self.plan_ctx.is_none()
             && let Some(src) = self.source_table
@@ -2221,8 +2176,12 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
 
         let plan = self.plan_ctx.as_ref().expect("plan ctx").plan;
         if let Some((col, name)) = find_field_name_from_natural_using_join(self.arena, plan, v)? {
+            let col_uid = match col.as_ref() {
+                Expr::Column(c) => Some(c.unique_id),
+                _ => None,
+            };
             self.ctx_stack_append(col, Arc::clone(&name));
-            self.precollect_col_names(&name);
+            self.precollect_col_names(&name, col_uid);
             return Ok(());
         }
         // for i := len(planCtx.builder.outerSchemas) - 1; i >= 0; i--: empty (see the doc).
@@ -2244,13 +2203,25 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
     /// `infoschema.TableIsView` needs the builder's InfoSchema (not there yet; views are not
     /// built, D09.1) and `b.nameMapCTE` the CTE builder (D09.5): neither applies.
     // go: expressionRewriter.precollectColNames L2 (no view or CTE names yet)
-    fn precollect_col_names(&mut self, field_name: &FieldName) {
+    fn precollect_col_names(&mut self, field_name: &FieldName, col_unique_id: Option<i64>) {
         let Some(pc) = self.plan_ctx.as_mut() else {
             return;
         };
+        // R32 (D5 option A): `_tidb_rowid` keeps `orig_tbl_name == ""` on the wire (matching Go),
+        // so resolve its physical table name via `PlanBuilder.rowid_orig_tbl`.
+        let table = if !field_name.orig_tbl_name.l.is_empty() {
+            field_name.orig_tbl_name.l.clone()
+        } else if field_name.orig_col_name.l == tidb_model::ExtraHandleName.l
+            && let Some(uid) = col_unique_id
+            && let Some(tbl) = pc.builder.rowid_orig_tbl.get(&uid)
+        {
+            tbl.clone()
+        } else {
+            String::new()
+        };
         let col_name = VisitedColumn {
             name: field_name.orig_col_name.l.clone(),
-            table: field_name.orig_tbl_name.l.clone(),
+            table,
             schema: field_name.db_name.l.clone(),
         };
 

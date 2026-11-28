@@ -10,6 +10,7 @@ use tidb_expr_pushdown::infer_pushdown::{
     PushDownContext, new_push_down_context_from_session_vars,
 };
 use tidb_kv::kv::Client;
+use tidb_privilege::PrivilegeManagerRef;
 use tidb_sessionctx::context::InstancePlanCache;
 use tidb_sessionctx::exprctx::{BuildContextRef, EvalContextRef, ExprContext, ExprContextRef};
 use tidb_sessionctx::ranger::context::RangerContext;
@@ -52,6 +53,9 @@ pub struct PlanCtx<'s> {
     /// `domain.GetDomain(sctx).GetInstancePlanCache()`: the instance-level plan cache (the
     /// plan-cache exception A3). `None` without a domain: nothing is cached.
     pub instance_plan_cache: Option<Arc<dyn InstancePlanCache>>,
+    /// `privilege.GetPrivilegeManager(sctx)`: the session's privilege manager (D04.1). `None`
+    /// when unbound (Go's `pm == nil` path, skipping runtime privilege checks).
+    pub privilege_manager: Option<PrivilegeManagerRef>,
 }
 
 /// `HasDirtyContent(tid)` of the session.
@@ -81,6 +85,8 @@ pub struct SessionPlanCtx {
     pub domain_info_schema: Option<Arc<dyn InfoSchemaLookup>>,
     /// `domain.GetDomain(sctx).GetInstancePlanCache()` (`None`: no domain, nothing cached).
     pub instance_plan_cache: Option<Arc<dyn InstancePlanCache>>,
+    /// `privilege.GetPrivilegeManager(sctx)` (`None`: no privilege manager bound).
+    pub privilege_manager: Option<PrivilegeManagerRef>,
 }
 
 impl SessionPlanCtx {
@@ -93,6 +99,7 @@ impl SessionPlanCtx {
         ctx.advise_txn_warmup = self.advise_txn_warmup.clone();
         ctx.domain_info_schema = self.domain_info_schema.clone();
         ctx.instance_plan_cache = self.instance_plan_cache.clone();
+        ctx.privilege_manager = self.privilege_manager.clone();
         ctx
     }
 
@@ -107,6 +114,7 @@ impl SessionPlanCtx {
             advise_txn_warmup: ctx.advise_txn_warmup.clone(),
             domain_info_schema: ctx.domain_info_schema.clone(),
             instance_plan_cache: ctx.instance_plan_cache.clone(),
+            privilege_manager: ctx.privilege_manager.clone(),
         }
     }
 }
@@ -124,6 +132,7 @@ impl<'s> PlanCtx<'s> {
             advise_txn_warmup: None,
             domain_info_schema: None,
             instance_plan_cache: None,
+            privilege_manager: None,
         }
     }
 

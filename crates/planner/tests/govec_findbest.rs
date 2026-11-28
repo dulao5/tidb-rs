@@ -71,8 +71,6 @@ const GO_TARGET: &str = if cfg!(target_arch = "x86_64") {
 const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     // Comment-style hints (`/*+ USE_INDEX(...) */`): the parser keeps them opaque.
     ("D02.2", 2),
-    // The preprocessor's missing table check (the privilege manager decides the error).
-    ("D04.1", 2),
     // Time functions not ported yet (DATE_ADD / DATE_SUB for window RANGE INTERVAL bounds).
     ("D08.7", 2),
     // Built-in function families not ported yet (IN, ANY_VALUE, user variables, ...).
