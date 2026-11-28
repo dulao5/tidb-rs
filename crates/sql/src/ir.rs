@@ -973,6 +973,23 @@ mod tests {
                 "Unknown character set: 'nosuch'".to_owned()
             )
         );
+        // Every statement using the rule, not only SET.
+        assert_eq!(
+            whole("SELECT CONVERT('a' USING nosuch)"),
+            (
+                1115,
+                "42000".to_owned(),
+                "Unknown character set: 'nosuch'".to_owned()
+            )
+        );
+        assert_eq!(
+            whole("SELECT _ujis '3F'"),
+            (
+                1115,
+                "42000".to_owned(),
+                "Unsupported character introducer: 'ujis'".to_owned()
+            )
+        );
         assert_eq!(
             whole("SELECT 'a' COLLATE nosuch"),
             (

@@ -35,8 +35,8 @@ tidb-rs 现在是只读计算节点：写路径、DDL、ANALYZE、导入、备�
   `'false'` 等同）。`SET autocommit = 1` / `DEFAULT` 放行，非布尔值按 MySQL 报 1231。
 - **理由**：只读节点不持有事务状态，每条语句在 autocommit 下执行；事务中的写和加锁读属于写路径
   （X）。显式只读事务的语法和错误码等例外 N11 D8 定稿（草案）。
-- **围栏位置**：`crates/poc/session/src/lib.rs:508`（`txn_fence`，由 `run_stmt` 在 `:767` 调用）、
-  `:520`（`autocommit_fence`，由 `check_set` 在 `:1193` 调用），错误由 `:498` 的 `not_in_txn` 构造。
+- **围栏位置**：`crates/poc/session/src/lib.rs:512`（`txn_fence`，由 `run_stmt` 在 `:771` 调用）、
+  `:524`（`autocommit_fence`，由 `check_set` 在 `:1230` 调用），错误由 `:502` 的 `not_in_txn` 构造。
 - **用户看到的确切错误**：`ERROR 1235 (42000): This version of TiDB doesn't yet support
   '<语句>: explicit transactions are not supported by the read-only node (every statement runs in
   autocommit mode)'`，`<语句>` 为 `BEGIN/START TRANSACTION`、`COMMIT`、`ROLLBACK` 或 `autocommit=0`。
@@ -66,4 +66,4 @@ tidb-rs 现在是只读计算节点：写路径、DDL、ANALYZE、导入、备�
 | B5 代价模型 v1 | `tidb_cost_model_version = 1` 在使用时报错 | 新栈照 Go 接受，没有围栏 |
 | D1 TiFlash / MPP | 只读阶段不做，边界桩隔开 | 读 TiFlash 副本的路径由 `blocked-by` 桩和原型的通用"不支持"挡住 |
 | N11 D8 / D10 | 显式只读事务的语法与错误码；`tidb_replica_read` 非 leader 值报错 | 草案；现状见 F2 和 `docs/compatibility.md` "TiKV client gaps" |
-| X：`SET GLOBAL`（原型会话） | 原型会话不支持 | 临时缺口（D05.3 之前），不是永久围栏：`crates/poc/session/src/lib.rs:1154` |
+| X：`SET GLOBAL`（原型会话） | 原型会话不支持 | 临时缺口（D05.3 之前），不是永久围栏：`crates/poc/session/src/lib.rs:1202` |

@@ -245,8 +245,11 @@ impl SessionFactory for Factory {
             // Go's `session.SetCollation` at the handshake (`SetSystemVarWithoutValidation`).
             session_values: router::sync::SET_NAMES_VARIABLES
                 .iter()
-                .map(|v| ((*v).to_owned(), charset.to_owned()))
-                .chain([("collation_connection".to_owned(), collation.to_owned())])
+                .map(|v| ((*v).to_owned(), Some(charset.to_owned())))
+                .chain([(
+                    "collation_connection".to_owned(),
+                    Some(collation.to_owned()),
+                )])
                 .collect(),
             globals: self.new_globals.clone(),
             default_vars_loaded: false,
@@ -336,8 +339,9 @@ pub struct Session {
     /// The session values the prototype gave its session variables (the handshake's charset,
     /// the `SET`s it accepted), in order, last write per variable: `default_session` writes
     /// them again (Go's `SetSystemVarWithoutValidation`) when it makes `default_vars` anew
-    /// once the cluster's global values are loaded.
-    session_values: Vec<(String, String)>,
+    /// once the cluster's global values are loaded. `None`: the variable's global value
+    /// (`SET x = DEFAULT`, Go's `getVarValue`), read again from the cluster's globals then.
+    session_values: Vec<SessionValue>,
     /// The sysvar cache `default_vars` takes the cluster's global values from (the
     /// factory's; D06.5 spec §8).
     globals: Option<Arc<tidb_systable::sysvar_cache::SysVarCache>>,
@@ -1012,20 +1016,51 @@ impl Session {
                 *results_charset = r;
             }
             warnings.extend(change.warnings);
-            for (name, value) in change.values {
-                record_session_value(values, name, value);
-            }
+            record_session_values(values, change.values, change.from_default);
         });
         self.set_applied = applied;
         result
     }
 }
 
-/// Records that the prototype's session variable `name` now holds `value`, for
-/// `Session::default_session` to write it again when it makes the session anew.
-fn record_session_value(values: &mut Vec<(String, String)>, name: String, value: String) {
-    values.retain(|(n, _)| *n != name);
-    values.push((name, value));
+/// A session value of the prototype's session variables: the variable, and its value
+/// (`None`: the variable's global value, `SET x = DEFAULT`).
+type SessionValue = (String, Option<String>);
+
+/// Records the values a `SET` assignment left in the prototype's session variables, for
+/// `Session::default_session` to write them again when it makes the session anew; a
+/// `SET x = DEFAULT` records the global value, read again from the cluster's globals then.
+fn record_session_values(
+    values: &mut Vec<SessionValue>,
+    written: Vec<(String, String)>,
+    from_default: bool,
+) {
+    for (name, value) in written {
+        values.retain(|(n, _)| *n != name);
+        values.push((name, (!from_default).then_some(value)));
+    }
+}
+
+/// The prototype's session variables over `globals`, with its session values written over
+/// them (Go's `SetSystemVarWithoutValidation`); a `DEFAULT` value is the global value of
+/// `globals` (Go's `getVarValue`).
+fn build_default_session(
+    globals: router::newstack::ClusterGlobals,
+    session_values: &[SessionValue],
+) -> Result<tidb_session::Session, SqlError> {
+    let err = |e: tidb_base::Error| router::sql_error(&e);
+    let mut s = tidb_session::Session::new(tidb_session::Dialect::MySQL, Box::new(globals));
+    s.load_common_global_variables_if_needed().map_err(err)?;
+    for (name, value) in session_values {
+        let value = match value {
+            Some(v) => v.clone(),
+            None => s.vars_mut().get_global_system_var(name).map_err(err)?,
+        };
+        s.vars_mut()
+            .set_system_var_without_validation(name, &value)
+            .map_err(err)?;
+    }
+    Ok(s)
 }
 
 /// A write of the prototype's session variables that a `SET` assignment makes.
@@ -1052,6 +1087,8 @@ struct SetChange {
     /// The warnings the assignment appended (set by [`run_set`]): a validation's, Go's
     /// `ErrSettingNoopVariable`.
     warnings: Vec<SQLWarn>,
+    /// `SET x = DEFAULT`: the session value is the global value (Go's `getVarValue`).
+    from_default: bool,
 }
 
 /// `SET assignments` on the prototype as Go's `SetExecutor.Next` runs them (`set.go:55-110`):
@@ -1150,11 +1187,8 @@ fn check_set(
             global,
             value,
         } => {
-            if *global {
-                return Err(SqlError::not_supported("SET GLOBAL"));
-            }
             // Go's `setSysVariable`: an unknown name is 1193; a removed one is parsed and
-            // ignored.
+            // ignored (also with GLOBAL: the name is checked first).
             let Some(sys_var) = tidb_sessionctx::variable::get_sys_var(name) else {
                 if tidb_sessionctx::variable::removed::is_removed_sys_var(name) {
                     return Ok(SetChange::default());
@@ -1164,6 +1198,9 @@ fn check_set(
                         .gen_with_stack_by_args(tidb_base::go_args![name.to_owned()]),
                 ));
             };
+            if *global {
+                return Err(SqlError::not_supported("SET GLOBAL"));
+            }
             if !router::sync::is_synced(name) {
                 return Err(SqlError::not_supported(format!(
                     "setting system variable '{name}'"
@@ -1218,6 +1255,7 @@ fn check_set(
                 }
             }
             change.writes = vec![VarWrite::Validated(sys_var.name.to_owned(), normalized)];
+            change.from_default = *value == SetValue::Default;
             Ok(change)
         }
     }
@@ -1548,14 +1586,7 @@ impl Session {
                     router::newstack::ClusterGlobals::compiled_defaults()
                 }
             };
-            let mut s = tidb_session::Session::new(tidb_session::Dialect::MySQL, Box::new(globals));
-            s.load_common_global_variables_if_needed()
-                .map_err(|e| router::sql_error(&e))?;
-            for (name, value) in &self.session_values {
-                s.vars_mut()
-                    .set_system_var_without_validation(name, value)
-                    .map_err(|e| router::sql_error(&e))?;
-            }
+            let s = build_default_session(globals, &self.session_values)?;
             self.default_vars = Some(Box::new(s));
         }
         Ok(self.default_vars.as_deref_mut().expect("set above"))
@@ -1764,37 +1795,63 @@ impl router::PocEngine for Session {
     }
 }
 
-/// Reads `new_collation_enabled` from `mysql.tidb` (set once at cluster bootstrap; Go:
-/// `collate.SetNewCollationEnabledForTest` from `bootstrap`). Missing row: old framework.
-pub async fn detect_new_collation(kv: &KvClient, schema: &SchemaCache) -> Result<bool, SqlError> {
-    let rows = tidb_table_rows(kv, schema).await?;
-    Ok(rows.iter().any(|r| {
-        r.first() == Some(&Value::from("new_collation_enabled"))
-            && matches!(r.get(1), Some(Value::Bytes(b)) if b.eq_ignore_ascii_case(b"true"))
-    }))
+/// The rows of `mysql.tidb` (`VARIABLE_NAME`, `VARIABLE_VALUE`), read once at server start:
+/// what Go's `BootstrapSession` reads from it, the system time zone and the collation
+/// framework.
+pub struct TidbTable {
+    rows: Vec<Vec<Value>>,
 }
 
-/// Loads the cluster's system time zone at server start: `system_tz` of `mysql.tidb`,
-/// written at bootstrap from `InferSystemTZ`. Go's `BootstrapSession` reads it with
-/// `getTableValue` (session.go:3692), fails when the row is missing (`errResultIsEmpty`) and
-/// hands it to `timeutil.SetSystemTZ`; the server start then copies it into
-/// `@@system_time_zone` (`setSystemTimeZoneVariable`, server.go:1133), which keeps its
-/// default "CST" when the zone is "" or "System".
-// glue: BootstrapSession's getTableValue(mysql.tidb, system_tz) on the prototype's mysql.tidb reader, then the server start
-pub async fn load_system_tz(kv: &KvClient, schema: &SchemaCache) -> Result<(), SqlError> {
-    let rows = tidb_table_rows(kv, schema).await?;
-    let row = rows
-        .iter()
-        .find(|r| r.first() == Some(&Value::from("system_tz")))
-        // Go's `errResultIsEmpty`.
-        .ok_or_else(|| SqlError::new(tidb_base::errno::ErrResultIsEmpty, "Result is empty"))?;
-    let tz = match row.get(1) {
-        Some(Value::Bytes(b)) => String::from_utf8_lossy(b).into_owned(),
-        _ => String::new(),
-    };
-    tidb_base::timeutil::set_system_tz(&tz);
-    tidb_server::server::set_system_time_zone_variable();
-    Ok(())
+impl TidbTable {
+    /// Reads `mysql.tidb` at a fresh TSO.
+    pub async fn read(kv: &KvClient, schema: &SchemaCache) -> Result<TidbTable, SqlError> {
+        Ok(TidbTable {
+            rows: tidb_table_rows(kv, schema).await?,
+        })
+    }
+
+    fn value(&self, name: &str) -> Option<Option<&[u8]>> {
+        let row = self
+            .rows
+            .iter()
+            .find(|r| r.first() == Some(&Value::from(name)))?;
+        Some(match row.get(1) {
+            Some(Value::Bytes(b)) => Some(b.as_slice()),
+            _ => None,
+        })
+    }
+
+    /// `new_collation_enabled` (set once at cluster bootstrap; Go: `loadCollationParameter`).
+    /// Missing row: old framework.
+    pub fn new_collation_enabled(&self) -> bool {
+        matches!(self.value("new_collation_enabled"), Some(Some(b)) if b.eq_ignore_ascii_case(b"true"))
+    }
+
+    /// Loads the cluster's system time zone: `system_tz`, written at bootstrap from
+    /// `InferSystemTZ`. Go's `BootstrapSession` reads it with `getTableValue` (session.go:3692),
+    /// fails when the row is missing (`errResultIsEmpty`) and hands it to
+    /// `timeutil.SetSystemTZ`; the server start then copies it into `@@system_time_zone`
+    /// (`setSystemTimeZoneVariable`, server.go:1133), which keeps its default "CST" when the
+    /// zone is "" or "System".
+    // glue: BootstrapSession's getTableValue(mysql.tidb, system_tz) on the prototype's mysql.tidb read, then the server start
+    pub fn load_system_tz(&self) -> Result<(), SqlError> {
+        let value = self
+            .value("system_tz")
+            // Go's `errResultIsEmpty`.
+            .ok_or_else(|| {
+                let e = tidb_base::mysql::new_err(tidb_base::errno::ErrResultIsEmpty, vec![]);
+                SqlError::new(e.code, String::from_utf8_lossy(&e.message).into_owned())
+            })?;
+        let tz = String::from_utf8_lossy(value.unwrap_or_default()).into_owned();
+        tidb_base::timeutil::set_system_tz(&tz);
+        tidb_server::server::set_system_time_zone_variable();
+        Ok(())
+    }
+}
+
+/// Reads `new_collation_enabled` from `mysql.tidb` ([`TidbTable::new_collation_enabled`]).
+pub async fn detect_new_collation(kv: &KvClient, schema: &SchemaCache) -> Result<bool, SqlError> {
+    Ok(TidbTable::read(kv, schema).await?.new_collation_enabled())
 }
 
 /// The rows `(VARIABLE_NAME, VARIABLE_VALUE)` of `mysql.tidb` at a fresh TSO.
@@ -1857,7 +1914,18 @@ mod fence_tests {
     /// makes it: over a sysvar cache built from these rows of `mysql.global_variables` (the
     /// loader's rebuild), or over the compiled defaults when there are none.
     fn validation_session(rows: &[(&str, &str)]) -> tidb_session::Session {
-        let globals = if rows.is_empty() {
+        let mut s = tidb_session::Session::new(
+            tidb_session::Dialect::MySQL,
+            Box::new(cluster_globals(rows)),
+        );
+        s.load_common_global_variables_if_needed().unwrap();
+        s
+    }
+
+    /// The cluster's global values: a sysvar cache built from these rows of
+    /// `mysql.global_variables`, or the compiled defaults when there are none.
+    fn cluster_globals(rows: &[(&str, &str)]) -> router::newstack::ClusterGlobals {
+        if rows.is_empty() {
             router::newstack::ClusterGlobals::compiled_defaults()
         } else {
             let table: HashMap<String, String> = rows
@@ -1867,10 +1935,7 @@ mod fence_tests {
             let cache = tidb_systable::sysvar_cache::SysVarCache::new();
             cache.rebuild(None, &mut || Ok(table.clone())).unwrap();
             router::newstack::ClusterGlobals::new(Arc::new(cache))
-        };
-        let mut s = tidb_session::Session::new(tidb_session::Dialect::MySQL, Box::new(globals));
-        s.load_common_global_variables_if_needed().unwrap();
-        s
+        }
     }
 
     /// `SET` on the prototype as `Session::set` runs it, validated against `session`: the
@@ -2250,11 +2315,14 @@ mod fence_tests {
                 vec![]
             )
         );
-        // A removed variable is ignored, as Go's `setSysVariable` does.
-        assert_eq!(
-            set_values("SET tidb_enable_streaming = 1"),
-            (vec![], vec![])
-        );
+        // A removed variable is ignored, as Go's `setSysVariable` does, also with GLOBAL: Go
+        // checks the name before the scope.
+        for sql in [
+            "SET tidb_enable_streaming = 1",
+            "SET GLOBAL tidb_enable_streaming = 1",
+        ] {
+            assert_eq!(set_values(sql), (vec![], vec![]), "{sql}");
+        }
     }
 
     /// Go's validation errors of the connect-time SETs (#505), whole: code, SQLSTATE and
@@ -2272,12 +2340,23 @@ mod fence_tests {
             wrong_type
         );
         assert_eq!(err("SET max_execution_time = -1.5"), wrong_type);
+        for sql in ["SET nosuch_var = 1", "SET GLOBAL nosuch_var = 1"] {
+            assert_eq!(
+                err(sql),
+                (
+                    1193,
+                    "HY000".to_owned(),
+                    "Unknown system variable 'nosuch_var'".to_owned()
+                ),
+                "{sql}"
+            );
+        }
         assert_eq!(
-            err("SET nosuch_var = 1"),
+            err("SET GLOBAL max_execution_time = 1"),
             (
-                1193,
-                "HY000".to_owned(),
-                "Unknown system variable 'nosuch_var'".to_owned()
+                1235,
+                "42000".to_owned(),
+                "This version of TiDB doesn't yet support 'SET GLOBAL'".to_owned()
             )
         );
         // Go's `setCharset`: `GetCollationByName` (the grammar takes any name after
@@ -2423,5 +2502,51 @@ mod fence_tests {
             }
         }
         assert_eq!(seen, expected_errors.len());
+    }
+
+    /// The prototype's session values survive the rebuild of its session when the cluster's
+    /// global values load (`Session::default_session`): a value it set stays, a `SET x =
+    /// DEFAULT` made over the compiled defaults becomes the cluster's global value, as Go's
+    /// `getVarValue` reads the global value of the session's cluster.
+    #[test]
+    fn session_values_survive_the_rebuild_over_the_cluster_globals() {
+        let mut before = validation_session(&[]);
+        let Statement::Set(a) = tidb_sql::parse_and_lower(
+            "SET NAMES latin1, group_concat_max_len = 2048, max_execution_time = DEFAULT, \
+             sql_mode = 'ANSI_QUOTES'",
+        )
+        .unwrap()
+        .stmt
+        else {
+            unreachable!()
+        };
+        let mut values: Vec<SessionValue> = Vec::new();
+        let (_, result) = run_set(before.vars_mut(), &a, |c| {
+            record_session_values(&mut values, c.values, c.from_default)
+        });
+        result.unwrap();
+        assert_eq!(
+            before.vars_mut().get_system_var("max_execution_time").0,
+            "0"
+        );
+        let mut after = build_default_session(
+            cluster_globals(&[
+                ("max_execution_time", "500"),
+                ("group_concat_max_len", "4096"),
+                ("sql_mode", ""),
+            ]),
+            &values,
+        )
+        .unwrap();
+        let vars = after.vars_mut();
+        for (name, want) in [
+            ("character_set_client", "latin1"),
+            ("collation_connection", "latin1_bin"),
+            ("group_concat_max_len", "2048"),
+            ("max_execution_time", "500"),
+            ("sql_mode", "ANSI_QUOTES"),
+        ] {
+            assert_eq!(vars.get_system_var(name).0, want, "{name}");
+        }
     }
 }

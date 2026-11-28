@@ -72,6 +72,28 @@ fn charset_and_collation_actions_carry_their_code() {
         err("SELECT 'a' COLLATE nosuch"),
         ParseError::Semantic(Diagnostic { code: 1273, .. })
     ));
+    // The name is cut at 64 characters (`'%-.64s'` of `MySQLErrName`).
+    let long = "x".repeat(70);
+    assert_eq!(
+        err(&format!("SET NAMES {long}")),
+        ParseError::Semantic(Diagnostic {
+            msg: format!("Unknown character set: '{}'", &long[..64]),
+            pos: 10,
+            code: 1115
+        })
+    );
+    // A known introducer without a legacy collation (Go's TestUnderscoreCharset) and
+    // `UNICODE` (ucs2) are `ErrUnknownCharacterSet` too.
+    assert!(matches!(
+        err("select hex(_ujis '3F')"),
+        ParseError::Semantic(Diagnostic { code: 1115, ref msg, .. })
+            if msg == "Unsupported character introducer: 'ujis'"
+    ));
+    assert!(matches!(
+        err("CREATE TABLE t (a TEXT UNICODE)"),
+        ParseError::Semantic(Diagnostic { code: 1115, ref msg, .. })
+            if msg == "Unknown character set: 'ucs2'"
+    ));
 }
 
 #[test]

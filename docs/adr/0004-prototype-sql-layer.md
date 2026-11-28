@@ -92,11 +92,18 @@ rejected with `ER_NOT_SUPPORTED_YET` (1235) before any data is read. Unsupported
   `sql_select_limit = DEFAULT` (any other limit is 1235: the prototype applies none),
   `group_concat_max_len`, `sql_safe_updates`, `foreign_key_checks`, `unique_checks`,
   `innodb_lock_wait_timeout`. As Go's `setSysVariable`: an unknown variable is 1193, a removed
-  one is ignored, a noop variable warns when `tidb_enable_noop_variables` is OFF; validation
-  warnings go to the statement's warnings. Decimal and float values are their
+  one is ignored (both checked before the `SET GLOBAL` fence, as Go checks the name first),
+  a noop variable warns when `tidb_enable_noop_variables` is OFF; validation warnings go to
+  the statement's warnings. `SET x = DEFAULT` is the global value (Go's `getVarValue`); made
+  before the cluster's globals are loaded, it is read again from them when they are. Decimal and float values are their
   `Datum.ToString` (`SET max_execution_time = 1.5` is Go's 1232). `SET NAMES` / `SET
-  CHARACTER SET` follow Go's `setCharset`: `SET NAMES nosuch` is the parser's 1115, `COLLATE
-  nosuch` 1273, `SET NAMES utf8mb4 COLLATE latin1_bin` 1253. `@@system_time_zone` is the
+  CHARACTER SET` follow Go's `setCharset`: `COLLATE nosuch` is 1273, `SET NAMES utf8mb4
+  COLLATE latin1_bin` 1253. The parser's charset errors are Go's TiDB errors, which Go's
+  `util.SyntaxError` passes through, in every statement: an unknown charset name (`SET NAMES
+  nosuch`, `CONVERT(... USING nosuch)`, `CAST(... CHARSET nosuch)`, `CREATE/ALTER ...
+  CHARSET nosuch`) is 1115, an unsupported introducer (`_ujis '3F'`) and `UNICODE` (ucs2) are
+  1115, an unknown collation name where the grammar checks it is 1273; names are cut at 64
+  characters as Go's messages do. `@@system_time_zone` is the
   cluster's `mysql.tidb` `system_tz`, loaded at start as Go's `BootstrapSession` and
   `setSystemTimeZoneVariable` do (a missing row fails the start, as in Go).
 - Errors that match Go: 1146 unknown table, 1054 unknown column (with Go's clause names), 1046

@@ -82,3 +82,16 @@ impl Ctx {
         });
     }
 }
+
+/// The message of the TiDB error `code` with `args`, as `GenWithStackByArgs` formats it: the
+/// format of `MySQLErrName` (`Unknown character set: '%-.64s'`).
+// glue: the message part of terror ErrClass.NewStd(code).GenWithStackByArgs(args) in a grammar action
+pub fn tidb_message(code: u16, args: Vec<tidb_base::gofmt::Arg>) -> String {
+    String::from_utf8_lossy(&tidb_base::mysql::new_err(code, args).message).into_owned()
+}
+
+/// The message of `GenWithStack(format, args)`: `fmt.Sprintf`.
+// glue: the message part of terror Error.GenWithStack(format, args) in a grammar action
+pub fn go_sprintf(format: &str, args: Vec<tidb_base::gofmt::Arg>) -> String {
+    String::from_utf8_lossy(&tidb_base::gofmt::sprintf(format, &args)).into_owned()
+}

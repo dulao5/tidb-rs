@@ -2417,7 +2417,7 @@ Literal -> Expr:
         let cs = underscore_cs($lexer.src_str(tok_span(&$1)));
         match crate::charset::get_default_collation_legacy(cs) {
             None => {
-                p.fail(format!("Unsupported character introducer: '{cs}'"), $span.start());
+                p.fail_code(1115, crate::ctx::go_sprintf("Unsupported character introducer: '%-.64s'", tidb_base::go_args![cs.to_owned()]), $span.start());
                 Expr::default()
             }
             Some(co) => {
@@ -2437,7 +2437,7 @@ Literal -> Expr:
         let cs = underscore_cs($lexer.src_str(tok_span(&$1)));
         match crate::charset::get_default_collation_legacy(cs) {
             None => {
-                p.fail(format!("Unsupported character introducer: '{cs}'"), $span.start());
+                p.fail_code(1115, crate::ctx::go_sprintf("Unsupported character introducer: '%-.64s'", tidb_base::go_args![cs.to_owned()]), $span.start());
                 Expr::default()
             }
             Some(co) => {
@@ -2455,7 +2455,7 @@ Literal -> Expr:
         let cs = underscore_cs($lexer.src_str(tok_span(&$1)));
         match crate::charset::get_default_collation_legacy(cs) {
             None => {
-                p.fail(format!("Unsupported character introducer: '{cs}'"), $span.start());
+                p.fail_code(1115, crate::ctx::go_sprintf("Unsupported character introducer: '%-.64s'", tidb_base::go_args![cs.to_owned()]), $span.start());
                 Expr::default()
             }
             Some(co) => {
@@ -3890,7 +3890,7 @@ CharsetName -> String:
             Ok((name, _)) => name.to_string(),
             Err(_) => {
                 // `ErrUnknownCharacterSet` (1115).
-                p.fail_code(1115, format!("Unknown character set: '{}'", $1), $span.start());
+                p.fail_code(1115, crate::ctx::tidb_message(1115, tidb_base::go_args![$1.clone()]), $span.start());
                 String::new()
             }
         }
@@ -3903,7 +3903,7 @@ CollationName -> String:
             Some(name) => name.to_string(),
             None => {
                 // `charset.GetCollationByName`'s `ErrUnknownCollation` (1273).
-                p.fail_code(1273, format!("Unknown collation: '{}'", $1), $span.start());
+                p.fail_code(1273, crate::ctx::tidb_message(1273, tidb_base::go_args![$1.clone()]), $span.start());
                 String::new()
             }
         }
@@ -4680,7 +4680,7 @@ OptCharsetWithOptBinary -> Box<OptBinary>:
   | ascii { Box::new(OptBinary { is_binary: false, charset: crate::charset::CHARSET_LATIN1.into() }) }
   | unicodeSym { {
         // charset.GetCharsetInfo("ucs2") fails (ucs2 is not supported)
-        p.fail("Unknown character set: 'ucs2'", $span.start());
+        p.fail_code(1115, crate::ctx::tidb_message(1115, tidb_base::go_args!["ucs2"]), $span.start());
         Box::new(OptBinary::default())
     } }
   | byteType { Box::new(OptBinary { is_binary: false, charset: crate::charset::CHARSET_BIN.into() }) }

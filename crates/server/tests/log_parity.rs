@@ -28,8 +28,9 @@ fn normalize_caller(line: &str) -> String {
     format!("{level_part}] [{file}:<LINE>] {tail}")
 }
 
+/// One test: the logger and its sink are global to this binary.
 #[test]
-fn result_encoder_unknown_charset_id_matches_go_whole_line() {
+fn server_logs_match_go_whole_line() {
     let sink = MemorySink::new();
     let cfg = LogConfig {
         level: "debug".to_owned(),
@@ -54,5 +55,24 @@ fn result_encoder_unknown_charset_id_matches_go_whole_line() {
     assert_eq!(
         lines[1],
         "[WARN] [result_encoder.rs:<LINE>] [\"unknown charset ID\"] [error=\"Unknown collation id 9999\"]"
+    );
+
+    // `setSystemTimeZoneVariable` (server.go:1137) when the system zone was never set (Go's
+    // `GetSystemTZ` sees "System"): the variable keeps its default.
+    tidb_server::server::set_system_time_zone_variable();
+    let out = String::from_utf8(sink.take()).unwrap();
+    let lines: Vec<String> = out.lines().map(normalize_caller).collect();
+    assert_eq!(
+        lines,
+        [
+            "[ERROR] [server.rs:<LINE>] [\"Error getting SystemTZ, use default value instead\"] \
+          [error=\"variable `systemTZ` is not properly set\"] [\"default system_time_zone\"=CST]"
+        ]
+    );
+    assert_eq!(
+        tidb_sessionctx::variable::get_sys_var("system_time_zone")
+            .unwrap()
+            .value,
+        "CST"
     );
 }
