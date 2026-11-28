@@ -37,7 +37,7 @@ pub fn normalize(sql: &str, redact: &str, tt: &TokenTable) -> String {
         return sql.to_owned();
     }
     let ids = tt.ids();
-    let raw = Lexer::new(tt, sql, true).tokenize_raw_lossy();
+    let raw = Lexer::new(tt, sql, true, crate::SQLMode(0)).tokenize_raw_lossy();
     let mut tokens: Vec<NormTok> = Vec::with_capacity(raw.len());
 
     let mut idx = 0;

@@ -1469,12 +1469,21 @@ impl SessionHandler for Session {
 }
 
 impl Session {
+    fn parse_options(&mut self) -> Result<tidb_parser::ParseOptions, SqlError> {
+        let vars = self.default_vars()?;
+        Ok(tidb_parser::ParseOptions {
+            window_functions: vars.enable_window_function,
+            sql_mode: tidb_base::mysql::SQLMode(vars.sql_mode),
+        })
+    }
+
     async fn query_inner(&mut self, sql: &str) -> Result<Response, SqlError> {
         self.timer.begin();
         self.mdl = None;
         self.stmt.stmt_type = None;
+        let opts = self.parse_options()?;
         let start = Instant::now();
-        let lowered = match tidb_sql::parse_and_lower(sql) {
+        let lowered = match tidb_sql::parse_and_lower_with(sql, &opts) {
             Ok(l) => l,
             Err(e) => {
                 if e.code == tidb_base::errno::ErrParse {
@@ -1527,7 +1536,8 @@ impl Session {
     async fn prepare_inner(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
         // A parse error comes before Go's `ResetContextOfStmt` (`PrepareExec.Next`): the
         // warnings stay.
-        let stmt = tidb_sql::ir::parse_one(sql)?;
+        let opts = self.parse_options()?;
+        let stmt = tidb_sql::ir::parse_one_with(sql, &opts)?;
         let lowered = match tidb_sql::ir::lower_statement(&stmt, sql) {
             Ok(l) => l,
             Err(e) => {
@@ -2548,5 +2558,74 @@ mod fence_tests {
         ] {
             assert_eq!(vars.get_system_var(name).0, want, "{name}");
         }
+    }
+
+    /// `--new-stack=off` parses queries and prepares with the session's `sql_mode` (both after
+    /// `SET sql_mode` and after `DEFAULT` over cluster globals).
+    #[test]
+    fn off_mode_parse_options_follow_session_sql_mode() {
+        let mut s = validation_session(&[("sql_mode", "ANSI_QUOTES")]);
+        let opts = |sess: &tidb_session::Session| tidb_parser::ParseOptions {
+            window_functions: sess.vars().enable_window_function,
+            sql_mode: tidb_base::mysql::SQLMode(sess.vars().sql_mode),
+        };
+
+        // Starts with cluster global ANSI_QUOTES.
+        let lowered = tidb_sql::parse_and_lower_with(r#"SELECT "x""#, &opts(&s)).unwrap();
+        let Statement::Select(sel) = lowered.stmt else {
+            panic!("expected Select");
+        };
+        assert!(matches!(
+            sel.fields[0],
+            tidb_sql::ir::Field::Expr {
+                expr: tidb_sql::ir::Expr::Column(_),
+                ..
+            }
+        ));
+
+        // SET sql_mode = 'NO_BACKSLASH_ESCAPES,IGNORE_SPACE,REAL_AS_FLOAT,PIPES_AS_CONCAT,HIGH_NOT_PRECEDENCE'.
+        run_over(
+            &mut s,
+            "SET sql_mode = 'NO_BACKSLASH_ESCAPES,IGNORE_SPACE,REAL_AS_FLOAT,PIPES_AS_CONCAT,HIGH_NOT_PRECEDENCE'",
+        )
+        .1
+        .unwrap();
+        let o = opts(&s);
+        let lowered = tidb_sql::parse_and_lower_with(r"SELECT '\n'", &o).unwrap();
+        let Statement::Select(sel) = lowered.stmt else {
+            panic!("expected Select");
+        };
+        assert!(matches!(
+            &sel.fields[0],
+            tidb_sql::ir::Field::Expr {
+                expr: tidb_sql::ir::Expr::Literal(Literal::Str(str_val)),
+                ..
+            } if str_val == r"\n"
+        ));
+        assert!(tidb_sql::ir::parse_one_with("SELECT CAST (1 AS REAL)", &o).is_ok());
+        assert_eq!(
+            tidb_sql::parse_and_lower_with("SELECT 'a' || 'b'", &o)
+                .unwrap_err()
+                .code,
+            1235
+        );
+        let stmt = tidb_sql::ir::parse_one_with("SELECT NOT 1 BETWEEN -5 AND 5", &o).unwrap();
+        assert!(matches!(
+            stmt,
+            tidb_parser::ast::Stmt::Select(sel) if matches!(
+                sel.fields.fields[0].expr.as_ref(),
+                Some(tidb_parser::ast::Expr::Between(b))
+                    if matches!(&b.expr, tidb_parser::ast::Expr::Unary(u) if u.op == tidb_parser::ast::Op::Not2)
+            )
+        ));
+
+        // SET sql_mode = DEFAULT restores the cluster's global ANSI_QUOTES.
+        run_over(&mut s, "SET sql_mode = DEFAULT").1.unwrap();
+        let stmt = tidb_sql::ir::parse_one_with(r#"SELECT "x""#, &opts(&s)).unwrap();
+        assert!(matches!(
+            stmt,
+            tidb_parser::ast::Stmt::Select(sel)
+                if matches!(sel.fields.fields[0].expr.as_ref(), Some(tidb_parser::ast::Expr::Column(_)))
+        ));
     }
 }
