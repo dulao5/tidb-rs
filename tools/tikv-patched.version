@@ -1,7 +1,7 @@
 # Pinned patched TiKV v8.5.8 release for test clusters (dulao5/tidb-rs#531).
-# Built from dulao5/tikv branch rust-tidb/v8.5.8-stable-rpn-fn (fixes for #523/#524).
-# Commit 8cc700315 adds only .github/workflows/release-patched-tikv.yml on top of the
-# vendored query-crate commit a87863eb7 (TiKV Rust code is identical).
+# Built from dulao5/tikv branch rust-tidb/v8.5.8-stable-rpn-fn (fixes for #523, #524, #553).
+# Commit 2ffed34f2 carries the codec Stacked Borrows fixes (#553) and the release workflow fix
+# on top of the v8.5.8 query-crate rebase (#530).
 #
 # Per-platform tarballs (tikv-server-<tag>-<os>-<arch>.tar.gz) and SHA-256 checksums are
 # produced by .github/workflows/release-patched-tikv.yml in dulao5/tikv.
@@ -13,9 +13,9 @@
 # tools/tikv-patched.sh still verifies that the binary reports the pinned version and commit.
 repo=dulao5/tikv
 branch=rust-tidb/v8.5.8-stable-rpn-fn
-tag=tikv-v8.5.8-tidbrs.1
+tag=tikv-v8.5.8-tidbrs.2
 version=8.5.8
-commit=8cc700315265662ebae73bd68b3045552cfb85a2
-sha256_linux_amd64=6007e6ae8f62e2099587ce6262503af9457fa316b6407f7178125637a428e885
-sha256_linux_arm64=5652d4e59a2043b1a2d6218d49b16eb668461682c60ed1620b3601b4f88a04de
-sha256_darwin_arm64=6330056045ccf8a49ea97f39a17d9e43a38948ef9a783d11adc1e87fae45362e
+commit=2ffed34f20aa992cdf0880f290412f44d65e6a19
+sha256_linux_amd64=b2597b49c310f41b9a8973a65f3806750759f280411765f6ab2afd9cf6273c9f
+sha256_linux_arm64=799e7ef9c84c66162a679164d8f3a376e1a1be99207f28e79bda3ebb67019a54
+sha256_darwin_arm64=7a9e9051c78238eb62ca3b440a7046a9e6714e4c39ed245095799027abc8c600

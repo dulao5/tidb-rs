@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "tools", "tikv-patched.sh")
 VERSION_FILE = os.path.join(ROOT, "tools", "tikv-patched.version")
 
-PATCHED_COMMIT = "8cc700315265662ebae73bd68b3045552cfb85a2"
+PATCHED_COMMIT = "2ffed34f20aa992cdf0880f290412f44d65e6a19"
 STOCK_COMMIT = "a1fdd6a59bb9c8a282c15677e1894501a52425cf"
 
 
@@ -67,7 +67,7 @@ def write_version_file(path, commit=PATCHED_COMMIT, sha_overrides=None):
     lines = [
         "repo=dulao5/tikv",
         "branch=rust-tidb/v8.5.8-stable-rpn-fn",
-        "tag=tikv-v8.5.8-tidbrs.1",
+        "tag=tikv-v8.5.8-tidbrs.2",
         "version=8.5.8",
         f"commit={commit}",
         f"sha256_linux_amd64={sha_overrides.get('sha256_linux_amd64', 'pending')}",
@@ -229,7 +229,7 @@ class TikvPatchedTest(unittest.TestCase):
             with open(bin_src, "rb") as f:
                 bin_bytes = f.read()
 
-            tar_name = f"tikv-server-tikv-v8.5.8-tidbrs.1-{plat}.tar.gz"
+            tar_name = f"tikv-server-tikv-v8.5.8-tidbrs.2-{plat}.tar.gz"
             sha = make_tarball(os.path.join(serve_dir, tar_name), bin_bytes)
             vf = os.path.join(d, "v")
             write_version_file(vf, sha_overrides={sha_key: sha})
@@ -242,7 +242,7 @@ class TikvPatchedTest(unittest.TestCase):
                 r_dl = run_tool(["--version-file", vf],
                                 {"TIDB_RS_TIKV_CACHE": cache_dir, "TIDB_RS_TIKV_URL_BASE": url})
                 self.assertEqual(r_dl.returncode, 0, r_dl.stderr)
-                expected_bin = os.path.join(cache_dir, "tikv-v8.5.8-tidbrs.1", "tikv-server")
+                expected_bin = os.path.join(cache_dir, "tikv-v8.5.8-tidbrs.2", "tikv-server")
                 self.assertEqual(r_dl.stdout.strip(), expected_bin)
 
             # Cached binary passes --check offline without URL_BASE
@@ -259,7 +259,7 @@ class TikvPatchedTest(unittest.TestCase):
                                       {"TIDB_RS_TIKV_CACHE": bad_cache, "TIDB_RS_TIKV_URL_BASE": url})
                 self.assertNotEqual(r_mismatch.returncode, 0)
                 self.assertIn("sha256 mismatch", r_mismatch.stderr)
-                self.assertFalse(os.path.exists(os.path.join(bad_cache, "tikv-v8.5.8-tidbrs.1", "tikv-server")))
+                self.assertFalse(os.path.exists(os.path.join(bad_cache, "tikv-v8.5.8-tidbrs.2", "tikv-server")))
 
     def test_download_rejects_tarball_whose_binary_has_wrong_commit(self):
         sha_key, plat = host_sha_key()
@@ -272,7 +272,7 @@ class TikvPatchedTest(unittest.TestCase):
             with open(bin_src, "rb") as f:
                 bin_bytes = f.read()
 
-            tar_name = f"tikv-server-tikv-v8.5.8-tidbrs.1-{plat}.tar.gz"
+            tar_name = f"tikv-server-tikv-v8.5.8-tidbrs.2-{plat}.tar.gz"
             sha = make_tarball(os.path.join(serve_dir, tar_name), bin_bytes)
             vf = os.path.join(d, "v")
             write_version_file(vf, sha_overrides={sha_key: sha})
@@ -282,7 +282,7 @@ class TikvPatchedTest(unittest.TestCase):
                                {"TIDB_RS_TIKV_CACHE": cache_dir, "TIDB_RS_TIKV_URL_BASE": url})
                 self.assertNotEqual(res.returncode, 0)
                 self.assertIn("Git Commit Hash", res.stderr)
-                self.assertFalse(os.path.exists(os.path.join(cache_dir, "tikv-v8.5.8-tidbrs.1", "tikv-server")))
+                self.assertFalse(os.path.exists(os.path.join(cache_dir, "tikv-v8.5.8-tidbrs.2", "tikv-server")))
 
     def test_check_status_and_check_pd_and_check_log(self):
         with tempfile.TemporaryDirectory() as d:
