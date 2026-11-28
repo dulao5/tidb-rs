@@ -624,6 +624,7 @@ fn run(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
                 })
                 .unwrap_or_default();
             resolved_tables.sort();
+            let has_group_by = stmt_has_group_by(&stmt);
             Outcome::Value(json!({
                 "plan": plan,
                 "plan_id": plan_id,
@@ -632,6 +633,7 @@ fn run(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
                 "vi": vi,
                 "w": w,
                 "__r29_tables": resolved_tables,
+                "__r29_has_gby": has_group_by,
             }))
         }
     }
@@ -1632,17 +1634,63 @@ fn run_joinop(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
 /// entry per base table of the join.
 const EXPECTED_R29_NORMALIZED: usize = 2488;
 
+fn select_list_has_group_by(list: &tidb_parser::ast::SetOprSelectList) -> bool {
+    list.selects.iter().any(|s| match s {
+        tidb_parser::ast::SetOprNode::Select(sel) => sel.group_by.is_some(),
+        tidb_parser::ast::SetOprNode::List(inner) => select_list_has_group_by(inner),
+        tidb_parser::ast::SetOprNode::Unported(_) => false,
+    })
+}
+
+/// Returns true if `stmt` (or any nested SELECT in a set operation) has a `GROUP BY` clause.
+fn stmt_has_group_by(stmt: &tidb_parser::ast::Stmt) -> bool {
+    match stmt {
+        tidb_parser::ast::Stmt::Select(sel) => sel.group_by.is_some(),
+        tidb_parser::ast::Stmt::SetOpr(set_opr) => select_list_has_group_by(&set_opr.select_list),
+        _ => false,
+    }
+}
+
+/// Checks whether `entry` is an R29 `GROUP BY` column-privilege `VisitInfo` (`SelectPriv`, 1143)
+/// on one of the statement's resolved `(db, tbl)` pairs.
+fn is_r29_gby_col_vi(entry: &Value, resolved_tables: &[(String, String)]) -> bool {
+    let Some(arr) = entry.as_array() else {
+        return false;
+    };
+    if arr.len() != 6 || arr[0] != json!(4) || arr[5] != json!(1143) {
+        return false;
+    }
+    let (Some(db), Some(tbl), Some(col), Some(msg)) = (
+        arr[1].as_str(),
+        arr[2].as_str(),
+        arr[3].as_str(),
+        arr[4].as_str(),
+    ) else {
+        return false;
+    };
+    if col.is_empty() || col == "*" {
+        return false;
+    }
+    resolved_tables.iter().any(|(d, t)| d == db && t == tbl)
+        && msg
+            == format!(
+                "[planner:1143]SELECT command denied to user ''@'' for column '{col}' in table '{tbl}'"
+            )
+}
+
 /// Checks whether `got` equals Go's `out` once the exact `R29` table-read `("*", 1142)` entries
 /// for the statement's resolved base tables (including those folded into `TableDual` by
-/// `WHERE 0` / `LIMIT 0`, per specs/D04.1-privilege/spec.md §5.1), Go's superseded
-/// `collectPrivsForCount` `"*"` entries, and `R32` `_tidb_rowid` full-table `VisitInfo` entries
-/// are accounted for. Returns `true` only when every resolved base table actually emitted its
-/// exact `R29` entry in `got["vi"]` and every other field (`plan`, `plan_id`, `col_id`,
-/// `opt_flag`, remaining `vi`, `w`) matches Go byte-for-byte.
+/// `WHERE 0` / `LIMIT 0`, per specs/D04.1-privilege/spec.md §5.1), `R29` `GROUP BY` column `1143`
+/// entries (emitted by `rewrite_gby_exprs` where Go v8.5.8 mistakenly guarded `resolveGbyExprs`),
+/// Go's superseded `collectPrivsForCount` `"*"` entries, and `R32` `_tidb_rowid` full-table
+/// `VisitInfo` entries are accounted for. Returns `true` only when every resolved base table
+/// actually emitted its exact `R29` entry in `got["vi"]` and every other field (`plan`,
+/// `plan_id`, `col_id`, `opt_flag`, remaining `vi`, `w`) matches Go byte-for-byte.
 fn matches_with_r29_vi_normalization(
     out: &Value,
     got: &Value,
     resolved_tables: &[(String, String)],
+    has_group_by: bool,
 ) -> bool {
     let (Some(out_obj), Some(got_obj)) = (out.as_object(), got.as_object()) else {
         return false;
@@ -1732,10 +1780,32 @@ fn matches_with_r29_vi_normalization(
         .cloned()
         .collect();
 
+    let norm_got_vi = if has_group_by && rem_got_vi != rem_out_vi {
+        // R29 (`rewrite_gby_exprs`): Go v8.5.8 omitted `checkColPriv` during GROUP BY expression
+        // rewriting, so `tidb-rs` emits additional `(SelectPriv, db, tbl, col, 1143)` entries for
+        // GROUP BY column references while preserving every Go `VisitInfo` entry in exact order.
+        let mut matched = Vec::with_capacity(rem_out_vi.len());
+        let mut out_idx = 0usize;
+        for entry in &rem_got_vi {
+            if out_idx < rem_out_vi.len() && entry == &rem_out_vi[out_idx] {
+                matched.push(entry.clone());
+                out_idx += 1;
+            } else if !is_r29_gby_col_vi(entry, resolved_tables) {
+                return false;
+            }
+        }
+        if out_idx != rem_out_vi.len() {
+            return false;
+        }
+        matched
+    } else {
+        rem_got_vi
+    };
+
     let mut norm_out = out_obj.clone();
     let mut norm_got = got_obj.clone();
     norm_out.insert("vi".into(), Value::Array(rem_out_vi));
-    norm_got.insert("vi".into(), Value::Array(rem_got_vi));
+    norm_got.insert("vi".into(), Value::Array(norm_got_vi));
     norm_out == norm_got
 }
 
@@ -1836,6 +1906,11 @@ fn govec_selectbuild() {
                 *blocked.entry(b).or_default() += 1
             }
             Outcome::Value(mut got) => {
+                let has_group_by = got
+                    .as_object_mut()
+                    .and_then(|o| o.remove("__r29_has_gby"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let resolved_tables: Vec<(String, String)> = got
                     .as_object_mut()
                     .and_then(|o| o.remove("__r29_tables"))
@@ -1862,7 +1937,12 @@ fn govec_selectbuild() {
                     } else {
                         equal += 1;
                     }
-                } else if matches_with_r29_vi_normalization(out, &got, &resolved_tables) {
+                } else if matches_with_r29_vi_normalization(
+                    out,
+                    &got,
+                    &resolved_tables,
+                    has_group_by,
+                ) {
                     r29_normalized += 1;
                 } else {
                     diffs.push(format!(
