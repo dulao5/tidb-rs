@@ -17,8 +17,12 @@
 #
 # Go TiDB is started with security.auto-tls so TLS-only clients (Homebrew sysbench links
 # MariaDB Connector/C, which insists on TLS) can connect.
+#
+# TiKV uses the patched v8.5.8 binary resolved and verified by tools/tikv-patched.sh
+# (passed via --kv.binpath and verified against PD / TiKV metrics + startup logs).
 set -euo pipefail
 
+repo=$(cd "$(dirname "$0")/.." && pwd)
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 tag=${PLAYGROUND_TAG:-maya-ab}
@@ -79,8 +83,13 @@ print_addrs() {
 }
 
 start() {
+    local tikv_info kv_bin kv_log
     if tidb_up; then
-        echo "playground $tag already answering on $tidb_port"
+        tikv_info=$("$repo/tools/tikv-patched.sh" --check-pd "127.0.0.1:$pd_port") || {
+            echo "playground $tag is running an unpatched or mismatched TiKV; clean and restart it ($0 clean -t $tag)" >&2
+            exit 1
+        }
+        echo "playground $tag already answering on $tidb_port (TiKV: $tikv_info)"
         print_addrs
         return 0
     fi
@@ -89,6 +98,7 @@ start() {
         tag_pids >&2
         exit 1
     fi
+    kv_bin=$("$repo/tools/tikv-patched.sh")
     local cfg=$state_dir/$tag-tidb.toml
     # The extra config goes first so that its top-level keys stay top-level (it must not have
     # a [security] table of its own).
@@ -100,9 +110,9 @@ start() {
 [security]
 auto-tls = true
 EOF
-    echo "starting tiup playground $version tag=$tag offset=$offset (log: $log)"
+    echo "starting tiup playground $version tag=$tag offset=$offset kv_bin=$kv_bin (log: $log)"
     nohup tiup playground "$version" --tag "$tag" --db 1 --pd 1 --kv "$kv" --tiflash 0 \
-        --port-offset "$offset" --without-monitor --db.config "$cfg" >"$log" 2>&1 &
+        --kv.binpath "$kv_bin" --port-offset "$offset" --without-monitor --db.config "$cfg" >"$log" 2>&1 &
     echo $! >"$pidfile"
     local deadline=$((SECONDS + ${PLAYGROUND_TIMEOUT:-180}))
     until tidb_up; do
@@ -117,7 +127,19 @@ EOF
         fi
         sleep 2
     done
+    if ! tikv_info=$("$repo/tools/tikv-patched.sh" --check-pd "127.0.0.1:$pd_port"); then
+        stop >/dev/null 2>&1 || true
+        exit 1
+    fi
+    for kv_log in "$data_dir"/tikv-*/tikv.log; do
+        [ -f "$kv_log" ] || continue
+        if ! "$repo/tools/tikv-patched.sh" --check-log "$kv_log" >/dev/null; then
+            stop >/dev/null 2>&1 || true
+            exit 1
+        fi
+    done
     echo "TiDB is up: $(mysql -h 127.0.0.1 -P "$tidb_port" -u root -N -e 'SELECT version()')"
+    echo "TiKV is up: $tikv_info"
     print_addrs
 }
 
@@ -153,10 +175,15 @@ stop() {
 }
 
 status() {
-    local pids
+    local pids tikv_info
     pids=$(tag_pids)
     if tidb_up; then
         echo "running (TiDB answers on $tidb_port)"
+        if tikv_info=$("$repo/tools/tikv-patched.sh" --check-pd "127.0.0.1:$pd_port" 2>&1); then
+            echo "TiKV:       $tikv_info"
+        else
+            echo "TiKV:       INVALID ($tikv_info)" >&2
+        fi
     elif [ -n "$pids" ]; then
         echo "processes exist but TiDB does not answer on $tidb_port"
     else

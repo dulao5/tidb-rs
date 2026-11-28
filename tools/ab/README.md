@@ -9,8 +9,8 @@ run sysbench against both.
 ```sh
 source <toolchains>/tidb-rs-env.sh
 
-# 1. Cluster: tiup playground v8.5.8, tag maya-ab, port offset 23000
-#    -> PD 127.0.0.1:25379, Go TiDB 127.0.0.1:27000 (auto-TLS on)
+# 1. Cluster: tiup playground v8.5.8 with patched TiKV (tools/tikv-patched.version),
+#    tag maya-ab, port offset 23000 -> PD 127.0.0.1:25379, Go TiDB 127.0.0.1:27000 (auto-TLS on)
 scripts/playground.sh start            # status | stop | clean; -t tag -o offset -v version
 
 # 2. Data, loaded through Go TiDB: sbtest1, 100k rows (ids 1..100000), split into 8 regions
@@ -266,9 +266,18 @@ Only `new_stack` statements the comparator judged equal count as new-stack cover
 
 ## Scripts
 
+- `tools/tikv-patched.sh`: resolves and verifies the patched TiKV v8.5.8 binary pinned in
+  `tools/tikv-patched.version` (from `dulao5/tikv`, carrying the `#523`/`#524` fixes), caches it
+  under `~/.cache/tidb-rs/tikv/<tag>/tikv-server` after SHA-256 and `--version` verification, and
+  prints its path. Override with `TIDB_RS_TIKV_BIN=/path/to/tikv-server` (or
+  `TIDB_RS_TIKV_SRC=/path/to/dulao5-tikv`) when testing a local TiKV build; the commit hash is still
+  checked. `--check-pd <pd>` / `--check-status <host:port>` / `--check-log <tikv.log>` verify that
+  a running cluster uses the pinned TiKV build and fail hard otherwise.
 - `scripts/playground.sh start|stop|status|clean [-t tag] [-o offset] [-v version] [-c toml]`: defaults
   maya-ab / 23000 / v8.5.8. Starts `tiup playground` in the background (no TiFlash, no
-  monitor) with Go TiDB `security.auto-tls`, waits until TiDB answers, prints the addresses.
+  monitor) passing `--kv.binpath "$(tools/tikv-patched.sh)"` and Go TiDB `security.auto-tls`, waits
+  until TiDB answers, verifies the running TiKV stores through PD and their startup logs, and
+  prints the addresses.
   `stop` interrupts the playground and then kills whatever is left of that tag only (processes
   whose arguments point into `~/.tiup/data/<tag>/`). `clean` also runs `tiup clean <tag>`.
   `-c` appends a TOML file to Go TiDB's config.

@@ -39,6 +39,10 @@ if ! mysql -h 127.0.0.1 -P 28000 -u root -N -e 'select 1' >/dev/null 2>&1; then
     "$root/scripts/playground.sh" start
     "$root/scripts/sysbench-prepare.sh" -P 28000 -t 1 -s 100000 -r 8
 fi
+tikv_json=$("$root/tools/tikv-patched.sh" --inspect-pd "$pd")
+if [ -n "${FAULTS_TIKV_INFO:-}" ]; then
+    printf '%s\n' "$tikv_json" >"$FAULTS_TIKV_INFO"
+fi
 
 if [ -z "$bin" ]; then
     (cd "$root" && cargo build --release --locked -p poc-server)

@@ -1,6 +1,7 @@
 # tools/weekly: the weekly and nightly builds (#128)
 
 `.github/workflows/weekly.yml` runs Go TiDB v8.5.8 and tidb-rs side by side on tiup playgrounds
+(using the patched TiKV v8.5.8 pinned in `tools/tikv-patched.version`, verified at startup)
 and writes one page of report.
 
 | mode | when | parts | report |
@@ -21,6 +22,7 @@ The parts run in parallel jobs, each against its own cluster (`run.sh <part> <ou
 
 `report.py` turns the parts' JSON into the report:
 
+- the verdict, commit, and the TiKV build in use (recorded from each part's PD check);
 - the status of every part;
 - agreement per operator (Go's plan), and which operators tidb-rs executed for the first time this week;
 - the new stack (VS1, `specs/VS1-vertical-slice/plan.md` §7.2): how many statements of the strict round ran on the new stack, the fallback reasons (`tidbrs_route_total{engine, reason}`), the boundary stubs named by its 1235 answers, and the agreement per VS1 operator. Its `unsupported` statements are expected and never a failure; a mismatch is RED like any other;

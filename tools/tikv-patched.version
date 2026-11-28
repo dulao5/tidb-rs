@@ -1,0 +1,19 @@
+# Pinned patched TiKV v8.5.8 release for test clusters (dulao5/tidb-rs#531).
+# Built from dulao5/tikv branch rust-tidb/v8.5.8-stable-rpn-fn (fixes for #523/#524).
+#
+# Per-platform tarballs (tikv-server-<tag>-<os>-<arch>.tar.gz) and SHA-256 checksums are
+# produced by .github/workflows/release-patched-tikv.yml in dulao5/tikv.
+#
+# When developing locally before a release asset is published, set:
+#   TIDB_RS_TIKV_BIN=/path/to/tikv-server
+# or:
+#   TIDB_RS_TIKV_SRC=/path/to/dulao5-tikv-checkout
+# tools/tikv-patched.sh still verifies that the binary reports the pinned version and commit.
+repo=dulao5/tikv
+branch=rust-tidb/v8.5.8-stable-rpn-fn
+tag=tikv-v8.5.8-tidbrs.1
+version=8.5.8
+commit=a87863eb7ce3b848f1d9ea964e4a84c823da2359
+sha256_linux_amd64=pending
+sha256_linux_arm64=pending
+sha256_darwin_arm64=pending
