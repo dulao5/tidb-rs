@@ -704,5 +704,39 @@ class CensusTest(unittest.TestCase):
             self.assertEqual(report(cur, prev)[0], 2)
 
 
+class TikvHeaderTest(unittest.TestCase):
+    def test_report_header_shows_tikv_build_from_parts(self):
+        with tempfile.TemporaryDirectory() as d:
+            tikv = {"version": "8.5.8", "commit": "a87863eb7ce3b848f1d9ea964e4a84c823da2359",
+                    "tag": "tikv-v8.5.8-tidbrs.1"}
+            write(d, "ab.json", {"part": "ab", "status": "ok", "tikv": tikv})
+            write(d, "ab-classified.json", classified())
+            rc, _ = report(d, extra=["--commit", "deadbeef"])
+            self.assertEqual(rc, 0)
+            with open(f"{d}/report.md") as f:
+                head = "\n".join(f.read().splitlines()[:8])
+            self.assertIn("Commit `deadbeef`.", head)
+            self.assertIn("TiKV: `8.5.8` (`a87863eb7ce3b848f1d9ea964e4a84c823da2359`, `tikv-v8.5.8-tidbrs.1`).", head)
+
+    def test_report_header_shows_distinct_tikv_builds_and_faults_fallback(self):
+        with tempfile.TemporaryDirectory() as d:
+            t1 = {"version": "8.5.8", "commit": "a87863eb7ce3b848f1d9ea964e4a84c823da2359",
+                  "tag": "tikv-v8.5.8-tidbrs.1"}
+            t2 = {"version": "8.5.8", "commit": "1111111111111111111111111111111111111111",
+                  "tag": "tikv-v8.5.8-tidbrs.2"}
+            write(d, "ab.json", {"part": "ab", "status": "ok", "tikv": t1})
+            write(d, "ab-classified.json", classified())
+            write(d, "faults.json", {"part": "faults", "status": "ok"})
+            write(d, "faults-raw.json", {"tikv": t2, "results": [], "new_inconsistencies": [], "incomplete": []})
+            rc, _ = report(d, parts="ab,faults")
+            self.assertEqual(rc, 0)
+            with open(f"{d}/report.md") as f:
+                head = "\n".join(f.read().splitlines()[:8])
+            self.assertIn("[ab]", head)
+            self.assertIn("[faults]", head)
+            self.assertIn("a87863eb7ce3b848f1d9ea964e4a84c823da2359", head)
+            self.assertIn("1111111111111111111111111111111111111111", head)
+
+
 if __name__ == "__main__":
     unittest.main()

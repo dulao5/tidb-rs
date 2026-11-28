@@ -173,6 +173,7 @@ start() {
     status_port=$opt_status_port
     [ -x "$bin" ] || { echo "binary $bin not found; run 'cargo build --release' or pass -b" >&2; exit 1; }
     [ -n "$pd" ] || { echo "no pd-server process found for playground $tag" >&2; exit 1; }
+    "$repo/tools/tikv-patched.sh" --check-pd "$pd" >/dev/null
     for p in "$port" "$status_port"; do
         if listening "$p"; then echo "port $p is already in use; pick another with -P/-s" >&2; exit 1; fi
     done

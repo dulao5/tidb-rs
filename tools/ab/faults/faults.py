@@ -722,6 +722,16 @@ def main():
     args = ap.parse_args()
     expected = json.load(open(args.expected)) if args.expected else {}
 
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    tikv_info = json.loads(
+        subprocess.run(
+            [os.path.join(repo_root, "tools", "tikv-patched.sh"), "--inspect-pd", args.pd],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+
     rnd = random.Random(1)
     keys = {s: [rnd.randint(1, ROWS - 2000) for _ in range(300)] for s in SHAPES}
     print("taking the baseline from A ...", flush=True)
@@ -803,7 +813,8 @@ def main():
             t.join(timeout=130)
     if args.json:
         with open(args.json, "w") as f:
-            json.dump({"results": results, "new_inconsistencies": new, "incomplete": incomplete}, f, indent=1)
+            json.dump({"tikv": tikv_info, "results": results, "new_inconsistencies": new, "incomplete": incomplete},
+                      f, indent=1)
     print(f"{len(new)} new inconsistencies")
     for i in incomplete:
         print(f"INCOMPLETE: {i}")

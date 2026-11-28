@@ -5,7 +5,7 @@
 //! Creates and drops database `tidb_rs_kv_it`. For example:
 //!
 //! ```sh
-//! tiup playground v8.5.8 --tag maya-kv --db 1 --pd 1 --kv 1 --tiflash 0 --port-offset 21000
+//! PLAYGROUND_TAG=maya-kv PLAYGROUND_OFFSET=21000 scripts/playground.sh start
 //! TIDB_RS_PD=127.0.0.1:23379 TIDB_RS_TIDB_PORT=25000 \
 //!     cargo test -p tidb-distsql --test cluster -- --nocapture
 //! ```

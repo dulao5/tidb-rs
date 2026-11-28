@@ -58,6 +58,7 @@ run() {
         esac
     done
     [ -n "$pd" ] || { echo "run needs -p <pd address>" >&2; exit 2; }
+    "$root/tools/tikv-patched.sh" --check-pd "$pd" >/dev/null
     mkdir -p "$out"
     if mysql -h 127.0.0.1 -P "$port" -u root -N -e 'SELECT 1' >/dev/null 2>&1; then
         echo "port $port is already serving; stop that server or pass -P" >&2

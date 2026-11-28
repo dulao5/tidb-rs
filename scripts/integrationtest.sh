@@ -93,6 +93,7 @@ echo "== build"
 echo "== playground $tag (offset $offset)"
 "$repo/scripts/playground.sh" start -t "$tag" -o "$offset" -v "$version" \
     -c "$repo/tools/ab/integrationtest.toml"
+tikv_json=$("$repo/tools/tikv-patched.sh" --inspect-pd "127.0.0.1:$((2379 + offset))")
 # As in scripts/sysbench-prepare.sh: the ingest backfill refuses to run on a nearly full disk.
 mysql -h 127.0.0.1 -P "$a_port" -u root -e \
     "SET GLOBAL tidb_ddl_enable_fast_reorg = OFF; SET GLOBAL tidb_enable_dist_task = OFF"
@@ -114,11 +115,15 @@ b_alive=no
 curl -fsS --max-time 2 "http://127.0.0.1:$b_status/status" >/dev/null 2>&1 && b_alive=yes
 cp "$HOME/.tiup/data/$tag/tidb-rs-$b_port/tidb-rs.log" "$out/tidb-rs.log" 2>/dev/null || true
 tidb_version=$(mysql -h 127.0.0.1 -P "$a_port" -u root -N -e 'SELECT version()' | sed 's/.*-TiDB-//')
+tikv_version=$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["version"])' "$tikv_json")
+tikv_commit=$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["commit"])' "$tikv_json")
 {
     printf 'key\tvalue\n'
     printf 'tidb_rs_commit\t%s\n' "$commit"
     printf 'tidb_rs_dirty\t%s\n' "$dirty"
     printf 'tidb_version\t%s\n' "${tidb_version:-$version}"
+    printf 'tikv_version\t%s\n' "$tikv_version"
+    printf 'tikv_commit\t%s\n' "$tikv_commit"
     printf 'tests_commit\t%s\n' "$(tests_commit)"
     printf 'date\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'runner\t%s\n' "$(uname -sm) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -n)"
