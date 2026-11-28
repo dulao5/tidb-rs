@@ -213,9 +213,12 @@ raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 opt-level = 3
 
 [profile.release]
-# Keep line tables in release builds so Backtrace / errorVerbose frames include `\n\t<file>:<line>`
-# as required by specs/D00.3-logging/spec.md §2.1.
-debug = "line-tables-only"
+# Keep line tables and function names in release builds so Backtrace / errorVerbose frames read
+# `<qualified func>\n\t<file>:<line>` as required by specs/D00.3-logging/spec.md §2.1.
+# "limited", not "line-tables-only": line-tables-only debug info records only the short function
+# name (`gen_with_stack_by_args`), and std's symbolizer prefers it over the symbol table's
+# qualified name. Measured cost: +20% file size, `.text` unchanged (no runtime cost).
+debug = "limited"
 
 [profile.release.build-override]
 opt-level = 3
@@ -227,5 +230,5 @@ opt-level = 3
 inherits = "release"
 overflow-checks = true
 # CI runs 500M-iteration fuzzing under release-checked; keep DWARF line tables disabled here
-# so overflow-fuzz CI binaries stay fast while `[profile.release]` retains `line-tables-only`.
+# so overflow-fuzz CI binaries stay fast while `[profile.release]` keeps `limited` debug info.
 debug = false

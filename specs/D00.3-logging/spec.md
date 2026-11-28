@@ -155,6 +155,12 @@
    - 先写入 `[<key>=<err.Error()>]`（`zap.Error` 键名固定为 `"error"`，`zap.NamedError(k, err)` 用自定义键名 `k`）；
    - 当且仅当 **`!enc.disableErrorVerbose`** 且 `err` 实现 `fmt.Formatter` 且 `fmt.Sprintf("%+v", err) != err.Error()` 时，紧接追加 `[<key>Verbose="..."]`，其内部所有 `\n`、`\t` 均按 §1.3 转义成 `\n`、`\t`，确保整条日志仍在单行内（`probe` `4_TEXT_DISABLE_VERBOSE_false`）。
    - **`errorVerbose` 段落布局（`pingcap/errors` `errors.go:150-164,213-227,303-317`, `stack.go:84-112,173-188`）**：按 Go `%+v` 顺序，**底层原因（cause `Error()`）在前**，紧接每层附注（`\n<annotation>`），随后是堆栈帧，每帧两行格式为 **`<func>\n\t<file>:<line>`**（若在已有栈的外层再次 `Annotate`，外层附注排在堆栈帧之后）。即便具体帧名/路径为 Rust 符号与路径，仍须保持该段序。
+   - **堆栈帧内容（维护者已定，2026-11-28，#490）**：Go 的 `Frame.format`（`pingcap/errors` `stack.go`）写 `runtime.FuncForPC(pc).Name()`（完整限定名）+ `\n\t` + `fn.FileLine(pc)` 的文件路径与 `:<行号>`；`zap.Stack` 同形。Go v8.5.8 的 Linux `tidb-server` 构建（`Makefile` 的 `server` 目标 → `Makefile.common` 的 `GOBUILD`）不带 `-trimpath`（仅 FreeBSD 交叉构建带），所以路径是构建机上的**绝对路径**。Rust 侧（`crates/base/src/errors.rs` `format_backtrace_frames`）对齐如下：
+     - **函数名**：完整限定名（如 `<tidb_base::errors::Error>::gen_with_stack_by_args`），去掉符号哈希（v0 的 `crate[<hex>]` 与 legacy 的 `::h<16 位 hex>`）。为此工作区 `[profile.release]` 设 `debug = "limited"`：`line-tables-only` 的调试信息只记短名（`gen_with_stack_by_args`），而 std 的符号解析优先用调试信息里的名字。实测 `tidb-log` release 测试二进制 14.3 MB → 17.1 MB（+20%），`.text` 不变（无运行时开销）；
+     - **路径**：**维护者已定选项 A：打印构建时调试信息记录的绝对路径，与 Go 相同**（第一方源码为 `<构建目录>/crates/...`，依赖为 `~/.cargo/registry/src/...`，std 为 `/rustc/<hash>/library/...`）。不再使用 std 的短格式：短格式在运行时去掉进程当前目录前缀，路径随启动目录变化（#462 复查中出现 `./projects/<worktree>/crates/...`）。备选 B（第一方文件改为相对仓库根的路径）保留为代码中的单一开关 `FRAME_PATH_STYLE`，改一行即可切换；
+     - **起始帧**：与 Go `callers()`（跳过 `runtime.Callers`、`callersSkip`、`callers` 与直接调用它的函数）一致：去掉 std 栈展开帧、`fill_line_and_file` 与日志后端内部帧；`GenWithStack*` 与 `errors.Trace` 经 `AddStack` 采栈，顶帧是构造函数本身（`gen_with_stack_by_args`、`tidb_base::errors::trace`）；`errors.New` / `errors.Errorf` / `errors.Annotate` 直接调用 `callers()`，顶帧是其调用者（Rust 侧去掉 `Error::plain` / `new` / `errorf` / `annotate` 帧）；
+     - **无法解析的帧**：输出 `unknown`，不带 `\n\t` 行（同 Go `runtime.FuncForPC` 返回 `nil` 时）；
+     - 黄金测试：`crates/log/tests/stack_frame_golden.rs`，CI 以 release 配置（`cargo test --release -p tidb-log --test stack_frame_golden`）与默认测试配置各跑一次。
    - **`multierr` 组合错误（`probe` `4_TEXT_*` vs `4_JSON_*`、`zapcore/error.go:67-77`）**：JSON 编码器先于 `fmt.Formatter` 检查 `errorGroup`，输出 **`"errorCauses":[...]` 且不输出顶层 `"errorVerbose"`**；text 编码器不识别 `errorGroup`，仅在 `!disableErrorVerbose` 时走 `fmt.Formatter` 输出 **`[errorVerbose="the following errors occurred:\n -  a\n...\n -  b c\n..."]`**。
    - Typed-nil `*errors.Error` 实测（`probe` `3_TEXT_FIELDS`）：`(*errors.Error)(nil).Error()` 返回 `"<nil>"`，text 输出 `[error=<nil>]`，JSON 输出 `"error":"<nil>"`；而无类型 `nil` 接口值走 `zap.Skip()`。
 2. **`log.disable-error-stack` / `log.enable-error-stack` 解析（`pkg/config/config.go:577-585,1322-1326`）**：
@@ -617,7 +623,7 @@ Go v8.5.8 实测 `SIGTERM` 核心捕获片段（状态服务默认开启时，3 
 |---|---|---|---|
 | 1 | `[file:line]` 显示 Rust 源文件 basename 与行号（如 `[consistency.rs:67]`），不映射为 `.go` | `pingcap/log/zap_text_encoder.go:64-94` | 必然工程差异（已由负责人 2026-11-27 决定） |
 | 2 | `Welcome to TiDB.` 中 `[GoVersion=]` 留空并紧跟新增 `["Rust Version"=...]` | `pkg/util/printer/printer.go:45` | 有意特性差异（已由负责人 2026-11-27 决定） |
-| 3 | 堆栈帧格式为 Rust 符号与路径而非 Go goroutine 帧 | `pingcap/errors` / `zap.Stack` | 必然运行时差异（格式转义与单行契约仍严格对齐） |
+| 3 | 堆栈帧格式为 Rust 符号与路径而非 Go goroutine 帧（形状对齐：完整限定名 + `\n\t<绝对构建路径>:<行号>`，起始帧规则同 Go `callers()`，见 §2.1；Rust 名带 `<...>` 与泛型实参，优化构建中尾调用与内联可能少帧） | `pingcap/errors` `stack.go`（`Frame.format`、`callersSkip`）/ `zap.Stack` | 必然运行时差异（格式转义与单行契约仍严格对齐；路径形式由维护者 2026-11-28 定为与 Go 相同的绝对构建路径，#490） |
 | 4 | Go `pingcap/log` JSON 编码器忽略 `DisableErrorVerbose` | `pingcap/log/zap_text_encoder.go:166-167`、`pkg/util/logutil/log.go:138` | `upstream-pitfall` `go-bug-fixed`（`#453`，复现见 `probe` `4_JSON_DISABLE_VERBOSE_true`），负责人已定 **D2 = B**，已登记 `rulings.toml` **`R33`** |
 | 5 | Go `pingcap/log` 文本编码器对 `zap.Skip()` / `zap.Error(nil)` 输出多余 `[]` | `pingcap/log/zap_text_encoder.go:639-641` | `upstream-pitfall` `go-bug-fixed`（`#454`，复现见 `probe` `3_TEXT_FIELDS`），负责人已定 **D3 = A**，已登记 `rulings.toml` **`R34`** |
 | 6 | Go `pingcap/log` `OpenNamespace` 在 text 模式下括号错位 `[ns={] ...}` | `pingcap/log/zap_text_encoder.go:238-242,489-493` | `upstream-pitfall` `go-bug-fixed`（`#454`，复现见 `probe` `3_TEXT_FIELDS [01]`），负责人已定 **D3 = A**，已登记 `rulings.toml` **`R34`** |
@@ -650,6 +656,7 @@ Go v8.5.8 实测 `SIGTERM` 核心捕获片段（状态服务默认开启时，3 
 4. **CI 检查脚本与棘轮**：`scripts/check_log_parity.py` 三条规则（含禁用裸 `catch_unwind`）、`scripts/log_parity_ratchet.tsv` 只减不增基线、按 `(go_file, go_symbol)` 合并 `go-part:` 以及 `// log-skip:` 消音约定；
 5. **分批回改排期与内部参数**：Batch 0–4 回改顺序、内存缓冲默认刷新/批大小及写锁检查间隔等不改变对外格式契约的内部参数；
 6. **`pingcap/log` 其余非关键内部缺陷（如 `Complex` 负虚部 `1+-2i`）**：按需开英文 `upstream-pitfall` issue 登记跟踪。
+7. **堆栈帧路径形式（2026-11-28，#490）**：堆栈帧位置属于负责人规则中的 `[file:line]` 例外，形式由维护者决定：选项 A，与 Go 相同的绝对构建路径（§2.1）；`[profile.release] debug = "limited"`（完整限定函数名）同时确认。
 
 ---
 
