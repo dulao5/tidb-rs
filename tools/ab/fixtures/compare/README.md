@@ -10,6 +10,8 @@ Format: `key: value` lines, then sections. `#` lines are comments.
     sorted: yes                   --sorted_result before it (T2)
     result_log: off               --disable_result_log (T4)
     tolerance: T2                 the tolerance the case exercises, if any
+    b_engine: poc                 the engine B answered on, from the route trace (poc | new;
+                                  absent: unknown); T6 applies only with poc
     class: ordered 1              expected class (exact | unordered | ordered K | limited <inner>)
     verdict: match                match | mismatch | both_error | unsupported
     diff: <text>                  (repeatable) a diff line must contain it

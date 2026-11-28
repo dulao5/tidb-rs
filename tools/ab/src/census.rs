@@ -81,6 +81,13 @@ pub enum Route {
 }
 
 impl Route {
+    /// B answered on the prototype (engine `poc`: `--new-stack=off`, or the router sent the
+    /// statement there). Tolerance T6 applies only then; an unknown route is never the
+    /// prototype's.
+    pub fn on_prototype(&self) -> bool {
+        matches!(self, Route::Routed(engine, _) if engine == "poc")
+    }
+
     /// The census path and reason of a statement B ran with outcome `ob`.
     pub fn path(&self, ob: &Outcome) -> (CensusPath, String) {
         if let Outcome::Client(m) = ob {
@@ -535,6 +542,17 @@ mod tests {
             Route::Routed("new".into(), "ok".into()).path(&client).0,
             CensusPath::Error
         );
+    }
+
+    /// Tolerance T6 applies only to the prototype's answers (engine `poc`), never to the new
+    /// stack's, a refusal (`none`) or an unknown route.
+    #[test]
+    fn only_poc_is_the_prototype() {
+        let r = |e: &str| Route::Routed(e.into(), "x".into()).on_prototype();
+        assert!(r("poc"));
+        assert!(!r("new"));
+        assert!(!r("none"));
+        assert!(!Route::Unknown("no route trace".into()).on_prototype());
     }
 
     #[test]

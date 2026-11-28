@@ -64,6 +64,7 @@ pub const TOLERANCES: &[(&str, &str)] = &[
     ("T3", "replace-directives"),
     ("T4", "result-log-off"),
     ("T5", "go-execute-metadata-drift"),
+    ("T6", "prototype-plan-cache-optimizer-reasons"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -573,6 +574,107 @@ fn warning_diffs(a: Observed<'_>, b: Observed<'_>) -> Vec<String> {
         None => Vec::new(),
         Some(d) => d.into_iter().map(|s| format!("warnings: {s}")).collect(),
     }
+}
+
+/// T6: the reasons Go's optimizer (not its PREPARE) gives for skipping the plan cache, as
+/// patterns over the reason text (Go v8.5.8 `SetSkipPlanCache` call sites: `find_best_task.go`
+/// / `isPhysicalPlanCacheable` "get a TableDual plan" (an empty range, `LIMIT 0`) and
+/// "Batch/PointGet plans may be over-optimized", the ranger (`detacher.go`, `ranger.go`),
+/// predicate simplification, constant propagation, `builtin_compare.go` refining, the null
+/// check of `expression.go`, the expression rewriter's INT conversion, read-only variables in
+/// preprocess, `planner/util/path.go`'s correlated subquery, and "in-list is too long"). The
+/// prototype has no optimizer that could decide these (#512).
+const OPTIMIZER_SKIP_REASONS: &[&str] = &[
+    r"get a TableDual plan",
+    r"Batch/PointGet plans may be over-optimized",
+    r"some parameters may be overwritten",
+    r".+ when converting .+",
+    r"NE/INList simplification is triggered",
+    r"OR predicate simplification is triggered",
+    r"some parameters may be overwritten when constant propagation",
+    r"Skip plan cache since mutable constant is restored and propagated",
+    r"'.*' may be converted to INT",
+    r"'.*' may be converted to datetime",
+    r".+ affects null check",
+    r"read-only variables are used",
+    r"Correlated subquery is not cached currently",
+    r"in-list is too long",
+];
+
+static OPTIMIZER_SKIP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        "^skip prepared plan-cache: (?:{})$",
+        OPTIMIZER_SKIP_REASONS.join("|")
+    ))
+    .expect("OPTIMIZER_SKIP_REASONS: bad pattern")
+});
+
+/// A `SHOW WARNINGS` cell as the runner renders it (strings are quoted, `exec::render`), back
+/// to its text.
+fn cell_text(c: &str) -> String {
+    match c.strip_prefix('"').and_then(|c| c.strip_suffix('"')) {
+        Some(inner) => inner.replace("\\\"", "\"").replace("\\\\", "\\"),
+        None => c.to_string(),
+    }
+}
+
+/// T6: whether a `SHOW WARNINGS` row is Go's warning for an optimizer-time plan-cache skip
+/// reason (`Warning | 1105 | skip prepared plan-cache: <reason>`, [`OPTIMIZER_SKIP_REASONS`]).
+pub fn is_optimizer_skip_warning(row: &[String]) -> bool {
+    let [level, code, message] = row else {
+        return false;
+    };
+    cell_text(level) == "Warning" && cell_text(code) == "1105" && {
+        OPTIMIZER_SKIP.is_match(&cell_text(message))
+    }
+}
+
+/// T6 (prototype path only): A's answer without the optimizer-time plan-cache skip warnings
+/// (see [`is_optimizer_skip_warning`]) that B does not report, with A's warning count lowered
+/// to match; `None` when there is none to remove. The caller applies it only to a statement B
+/// answered on the prototype (route trace engine `poc`): the new stack is compared in full.
+/// Every other warning, and every other difference, still compares.
+pub fn without_optimizer_skip_warnings(
+    a: Observed<'_>,
+    b: Observed<'_>,
+) -> Option<(Outcome, Vec<Vec<String>>)> {
+    let wa = a.warnings?;
+    let mut b_left: Vec<&Vec<String>> = b.warnings.unwrap_or(&[]).iter().collect();
+    let mut kept = Vec::new();
+    let mut removed: u16 = 0;
+    for row in wa {
+        if let Some(i) = b_left.iter().position(|r| *r == row) {
+            b_left.swap_remove(i);
+            kept.push(row.clone());
+        } else if is_optimizer_skip_warning(row) {
+            removed += 1;
+        } else {
+            kept.push(row.clone());
+        }
+    }
+    if removed == 0 {
+        return None;
+    }
+    let outcome = match a.outcome.clone() {
+        Outcome::Rows {
+            columns,
+            rows,
+            warnings,
+        } => Outcome::Rows {
+            columns,
+            rows,
+            warnings: warnings.saturating_sub(removed),
+        },
+        Outcome::Ok {
+            affected_rows,
+            warnings,
+        } => Outcome::Ok {
+            affected_rows,
+            warnings: warnings.saturating_sub(removed),
+        },
+        _ => return None,
+    };
+    Some((outcome, kept))
 }
 
 /// At most this many differing rows are listed per side.
@@ -1236,7 +1338,7 @@ mod tests {
             match k {
                 "diff" => diffs.push(v.to_string()),
                 "sql" | "cols" | "b_cols" | "sorted" | "result_log" | "class" | "verdict"
-                | "tolerance" => {
+                | "tolerance" | "b_engine" => {
                     kv.insert(k.to_string(), v.to_string());
                 }
                 _ => return Err(format!("unknown key {k:?}")),
@@ -1306,12 +1408,30 @@ mod tests {
         let wa = table("a_warnings");
         let wb = table("b_warnings");
         let full = table("a_full");
+        // T6 applies only to a statement B answered on the prototype (the runner's route).
+        let on_prototype = match kv.get("b_engine").map(String::as_str) {
+            None | Some("new") => false,
+            Some("poc") => true,
+            Some(e) => return Err(format!("unknown b_engine {e:?}")),
+        };
+        let tolerated = on_prototype
+            .then(|| {
+                without_optimizer_skip_warnings(
+                    Observed::new(&a, wa.as_deref()),
+                    Observed::new(&b, wb.as_deref()),
+                )
+            })
+            .flatten();
+        let obs_a = match &tolerated {
+            Some((o, w)) => Observed::new(o, Some(w.as_slice())),
+            None => Observed::new(&a, wa.as_deref()),
+        };
         let v = if kv.get("result_log").is_some_and(|v| v == "off") {
             compare_status_only(&a, &b)
         } else {
             compare(
                 &class,
-                Observed::new(&a, wa.as_deref()),
+                obs_a,
                 Observed::new(&b, wb.as_deref()),
                 full.as_deref(),
             )
@@ -1427,6 +1547,121 @@ mod tests {
                     .to_string(),
                 "col[0].charset: A=46(utf8mb4_bin) B=63(binary)".to_string(),
             ]
+        );
+    }
+
+    /// T6: every optimizer-time reason Go reports is recognised (texts as Go v8.5.8 formats
+    /// them, quoted as the runner renders `SHOW WARNINGS` cells); prepare-time reasons, other
+    /// warnings and other codes are not.
+    #[test]
+    fn optimizer_skip_warnings() {
+        let row = |level: &str, code: &str, msg: &str| -> Vec<String> {
+            vec![
+                format!("{level:?}"),
+                format!("{code:?}"),
+                format!("{msg:?}"),
+            ]
+        };
+        for reason in [
+            "get a TableDual plan",
+            "Batch/PointGet plans may be over-optimized",
+            "some parameters may be overwritten",
+            "[types:1292]Truncated incorrect DOUBLE value: 'x' when converting x",
+            "NE/INList simplification is triggered",
+            "OR predicate simplification is triggered",
+            "some parameters may be overwritten when constant propagation",
+            "Skip plan cache since mutable constant is restored and propagated",
+            "'abc' may be converted to INT",
+            "'1.5' may be converted to INT",
+            "'2024-01-01' may be converted to datetime",
+            "isnull(test.t.a) affects null check",
+            "read-only variables are used",
+            "Correlated subquery is not cached currently",
+            "in-list is too long",
+        ] {
+            let msg = format!("skip prepared plan-cache: {reason}");
+            assert!(
+                is_optimizer_skip_warning(&row("Warning", "1105", &msg)),
+                "{reason}"
+            );
+            // Unquoted cells (the fixtures) read the same.
+            assert!(is_optimizer_skip_warning(&[
+                "Warning".into(),
+                "1105".into(),
+                msg.clone()
+            ]));
+            assert!(!is_optimizer_skip_warning(&row("Note", "1105", &msg)));
+            assert!(!is_optimizer_skip_warning(&row("Warning", "1292", &msg)));
+        }
+        for msg in [
+            // Prepare-time reasons: the prototype reports them itself (#512).
+            "skip prepared plan-cache: query has 'database' is un-cacheable",
+            "skip prepared plan-cache: query has user-defined variables is un-cacheable",
+            "skip prepared plan-cache: plan cache is disabled",
+            // Optimizer-time, but not in the approved list.
+            "skip prepared plan-cache: Static partition pruning mode",
+            "skip prepared plan-cache: query has uncorrelated sub-queries is un-cacheable",
+            // Not a prepared plan-cache skip, or more text than Go writes.
+            "skip non-prepared plan-cache: get a TableDual plan",
+            "force plan-cache: may use risky cached plan: get a TableDual plan",
+            "skip prepared plan-cache: get a TableDual plan (and more)",
+            "Truncated incorrect INTEGER value: 'abc'",
+        ] {
+            assert!(
+                !is_optimizer_skip_warning(&row("Warning", "1105", msg)),
+                "{msg}"
+            );
+        }
+    }
+
+    /// T6 removes only A's optimizer-time skip warnings that B does not report, and lowers A's
+    /// count by as many; nothing else changes.
+    #[test]
+    fn without_optimizer_skip_warnings_removes_only_those() {
+        let w = |m: &str| vec!["Warning".to_string(), "1105".to_string(), m.to_string()];
+        let dual = w("skip prepared plan-cache: get a TableDual plan");
+        let other = w("Truncated incorrect INTEGER value: 'x'");
+        let ok = |n: u16| Outcome::Ok {
+            affected_rows: 0,
+            warnings: n,
+        };
+        let (a, b) = (ok(2), ok(1));
+        let (wa, wb) = (vec![dual.clone(), other.clone()], vec![other.clone()]);
+        let (o, kept) = without_optimizer_skip_warnings(
+            Observed::new(&a, Some(&wa)),
+            Observed::new(&b, Some(&wb)),
+        )
+        .unwrap();
+        assert_eq!(warning_count(&o), 1);
+        assert_eq!(kept, vec![other.clone()]);
+        // B reports the same skip warning: nothing to remove.
+        let (a, b) = (ok(1), ok(1));
+        let both = vec![dual.clone()];
+        assert!(
+            without_optimizer_skip_warnings(
+                Observed::new(&a, Some(&both)),
+                Observed::new(&b, Some(&both))
+            )
+            .is_none()
+        );
+        // Only other warnings: nothing to remove.
+        let only = vec![other];
+        let b0 = ok(0);
+        assert!(
+            without_optimizer_skip_warnings(
+                Observed::new(&a, Some(&only)),
+                Observed::new(&b0, Some(&[]))
+            )
+            .is_none()
+        );
+        // An error is compared in full.
+        let e = err(1105);
+        assert!(
+            without_optimizer_skip_warnings(
+                Observed::new(&e, Some(&both)),
+                Observed::new(&b0, Some(&[]))
+            )
+            .is_none()
         );
     }
 }

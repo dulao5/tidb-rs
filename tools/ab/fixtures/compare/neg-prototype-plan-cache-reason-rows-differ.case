@@ -1,0 +1,13 @@
+# T6 only touches warnings: rows that differ are a mismatch whatever the warnings.
+sql: SELECT c FROM sbtest1 WHERE id = ?
+cols: c
+b_engine: poc
+class: unordered
+verdict: mismatch
+diff: row count
+[a]
+x
+[b]
+[a_warnings]
+Warning|1105|skip prepared plan-cache: get a TableDual plan
+[b_warnings]

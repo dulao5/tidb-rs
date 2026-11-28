@@ -1,0 +1,17 @@
+# T6: "may be converted to INT" on the prototype path, next to a warning both sides report:
+# that one still compares, and it is equal.
+sql: SELECT c FROM sbtest1 WHERE id = ?
+cols: c
+b_engine: poc
+tolerance: T6
+class: unordered
+verdict: match
+[a]
+x
+[b]
+x
+[a_warnings]
+Warning|1105|skip prepared plan-cache: '12abc' may be converted to INT
+Warning|1292|Truncated incorrect DOUBLE value: '12abc'
+[b_warnings]
+Warning|1292|Truncated incorrect DOUBLE value: '12abc'
