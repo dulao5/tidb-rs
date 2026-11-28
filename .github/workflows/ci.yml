@@ -118,6 +118,12 @@ jobs:
       - name: test
         run: cargo test --workspace --locked
 
+      # Stack frames in errorVerbose / [stack=...] (spec D00.3 §2.1, the unified log format) as a
+      # production (release) build prints them: qualified names need [profile.release]
+      # debug = "limited", and inlining / tail calls only show up when optimised (#490).
+      - name: test (release profile, stack frame golden)
+        run: cargo test --release --locked -p tidb-log --test stack_frame_golden --test error_panic_golden
+
       # Go-ported crates again, optimised but with integer overflow checks (profile
       # release-checked): vector replay plus a few minutes of the overflow fuzz. A Go
       # wrap that is not written wrapping_* (M-INT) panics here.

@@ -42,7 +42,8 @@ poc-session = { workspace = true }
 tidb-runtime = { workspace = true }
 tikv-jemallocator = { workspace = true }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
-tracing = "0.1"
+# Wire TiKV shim redaction hook to tidb_base::errors::redact_log_enabled_load() at startup (D00.3 Batch 4).
+log_wrappers = { workspace = true }
 
 [dev-dependencies]
 # status.rs tests: an HTTP/2 client for the gRPC routing.

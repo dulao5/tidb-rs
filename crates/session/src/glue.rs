@@ -119,7 +119,7 @@ impl Oracle for StoreOracle {
         let scope = txn_scope.to_owned();
         Box::pin(async move {
             oracle
-                .get_timestamp(&scope)
+                .get_timestamp_async(&scope)
                 .await
                 .map_err(tidb_store::driver::error::to_tidb_err)
         })

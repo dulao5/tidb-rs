@@ -52,8 +52,8 @@ impl SysVarCache {
     /// then rebuilds, since only it can scan the table).
     // go: Domain.rebuildSysVarCacheIfNeeded L2 (returns the condition; the caller, which can scan the table, rebuilds)
     pub fn needs_rebuild(&self) -> bool {
-        // log-skip: pkg/domain/sysvar_cache.go:49 no production caller for needs_rebuild yet (blocked-by:D06.5)
-        // log-skip: pkg/domain/sysvar_cache.go:51 no production caller for needs_rebuild yet (blocked-by:D06.5)
+        // log-skip: pkg/domain/sysvar_cache.go:49 the caller does not rebuild (a new session cannot block on TiKV; the loader's loop rebuilds, D06.5 spec §8.3)
+        // log-skip: pkg/domain/sysvar_cache.go:51 the caller does not rebuild (a new session cannot block on TiKV; the loader's loop rebuilds, D06.5 spec §8.3)
         let m = self.maps.read();
         m.session.is_empty() || m.global.is_empty()
     }
@@ -83,10 +83,17 @@ impl SysVarCache {
     /// earlier fetch cannot finish last); `ctx` is the session the SetGlobal hooks run on.
     /// A hook error is logged by Go and does not stop the rebuild: the errors are returned
     /// for the caller to log.
-    // go: Domain.rebuildSysVarCache L2 (the fetch and the hook session are the caller's; infoCache.ReSize is D06.3)
+    ///
+    /// `ctx` is `None` for the read-only node's loader (`poc-domain`'s `sysvar_loader`):
+    /// the two maps are built but no SetGlobal hook runs, because seven hooks call
+    /// callbacks that Go's domain, DDL and executor register and nothing registers here
+    /// (two of them write: `SwitchMDL` to the meta, `SetExternalTimestamp` to PD). The
+    /// process-wide values those hooks set keep their compiled defaults (D06.5 spec §8.4,
+    /// known difference; #521).
+    // go: Domain.rebuildSysVarCache L2 (the fetch and the hook session are the caller's; no hook session: no hooks; infoCache.ReSize is D06.3)
     pub fn rebuild(
         &self,
-        ctx: &mut SessionVars,
+        mut ctx: Option<&mut SessionVars>,
         fetch: &mut dyn FnMut() -> Result<HashMap<String, String>, Error>,
     ) -> Result<Vec<(String, Error)>, Error> {
         let mut new_session_cache = HashMap::new();
@@ -114,6 +121,7 @@ impl SysVarCache {
                 // This does not apply to INSTANCE scoped vars (HasGlobalScope() is false)
                 if let Some(set_global) = sv.set_global
                     && !sv.skip_sysvar_cache()
+                    && let Some(ctx) = ctx.as_deref_mut()
                 {
                     s_val = sv.validate_with_relaxed_validation(ctx, &s_val, ScopeGlobal);
                     if let Err(e) = set_global(ctx, &s_val) {

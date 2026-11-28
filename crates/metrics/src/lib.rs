@@ -607,6 +607,27 @@ pub fn route(engine: &str, reason: &str) {
     ROUTE_TOTAL.with_label_values(&[engine, reason]).inc();
 }
 
+/// `tidbrs_sysvar_cache_loaded`: 1 once the sysvar cache was built from the cluster's
+/// `mysql.global_variables`, 0 before (D06.5 spec §8.3: until then the new stack's sessions
+/// stay on the prototype). Registered when the loader starts.
+static SYSVAR_CACHE_LOADED: LazyLock<IntGauge> = LazyLock::new(|| {
+    register(
+        IntGauge::with_opts(
+            Opts::new(
+                "sysvar_cache_loaded",
+                "1 once the global variables were loaded from mysql.global_variables, 0 before.",
+            )
+            .namespace("tidbrs"),
+        )
+        .expect("valid metric"),
+    )
+});
+
+/// The sysvar cache was built (`true`) or not yet (`false`).
+pub fn sysvar_cache_loaded(loaded: bool) {
+    SYSVAR_CACHE_LOADED.set(i64::from(loaded));
+}
+
 /// Every registered metric in Go's text format (the body of `GET /metrics`).
 pub fn gather_text() -> String {
     encode::encode_text(&prometheus::gather())

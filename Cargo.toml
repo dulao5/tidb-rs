@@ -174,8 +174,9 @@ tidb-server = { path = "crates/server" }
 # branch tidb-rs/perf-point-get, specs/VS1-vertical-slice/perf-point-select.md); TiKV requests over
 # BatchCommands streams as client-go sends them, TiKV stores only (client-rust#26, merged,
 # specs/D07.1-store/batch-commands.md); `CopRpcContext.addr` populated from resolved store
-# address (client-rust#27, merged, #418).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "5cbc0d7fa3dece01002730d02e4ac3b3d13ab9c0", default-features = false, features = ["client-go-metrics"] }
+# address (client-rust#27, merged, #418); structured logging parity with client-go and quiet
+# `TransactionClient::current_timestamp_async` (client-rust#28, merged, #460).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "e210ec757496b23625787a3093b7d7ddec0917d0", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 async-trait = "0.1"
 bytes = "1.11"
@@ -212,9 +213,12 @@ raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 opt-level = 3
 
 [profile.release]
-# Keep line tables in release builds so Backtrace / errorVerbose frames include `\n\t<file>:<line>`
-# as required by specs/D00.3-logging/spec.md §2.1.
-debug = "line-tables-only"
+# Keep line tables and function names in release builds so Backtrace / errorVerbose frames read
+# `<qualified func>\n\t<file>:<line>` as required by specs/D00.3-logging/spec.md §2.1.
+# "limited", not "line-tables-only": line-tables-only debug info records only the short function
+# name (`gen_with_stack_by_args`), and std's symbolizer prefers it over the symbol table's
+# qualified name. Measured cost: +20% file size, `.text` unchanged (no runtime cost).
+debug = "limited"
 
 [profile.release.build-override]
 opt-level = 3
@@ -226,5 +230,5 @@ opt-level = 3
 inherits = "release"
 overflow-checks = true
 # CI runs 500M-iteration fuzzing under release-checked; keep DWARF line tables disabled here
-# so overflow-fuzz CI binaries stay fast while `[profile.release]` retains `line-tables-only`.
+# so overflow-fuzz CI binaries stay fast while `[profile.release]` keeps `limited` debug info.
 debug = false

@@ -1,0 +1,13 @@
+# T6: B answered on the prototype (route engine poc); A's only extra warning is Go's
+# optimizer-time plan-cache skip (an empty range planned as TableDual). Tolerated (#512).
+sql: SELECT c FROM sbtest1 WHERE id = ?
+cols: c
+b_engine: poc
+tolerance: T6
+class: unordered
+verdict: match
+[a]
+[b]
+[a_warnings]
+Warning|1105|skip prepared plan-cache: get a TableDual plan
+[b_warnings]

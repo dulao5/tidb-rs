@@ -767,12 +767,14 @@ async fn account_locked_returns_3118_after_password_check() {
                     auth_user: Some("u_locked".to_owned()),
                     auth_host: Some("127.0.%".to_owned()),
                     account_locked: true,
+                    password_expired: false,
                 }),
                 "u_ok" => Some(tidb_mysql_protocol::AccountAuth {
                     credential: Credential::native_from_password(PASSWORD),
                     auth_user: Some("u_ok".to_owned()),
                     auth_host: Some("127.0.%".to_owned()),
                     account_locked: false,
+                    password_expired: false,
                 }),
                 _ => None,
             }

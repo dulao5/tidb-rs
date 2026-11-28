@@ -260,6 +260,9 @@ impl Notifier for EtcdNotifier {
         )))
     }
     fn warn(&self, msg: &str, e: &Error) {
-        tracing::warn!("{msg}: {}", String::from_utf8_lossy(&e.error()));
+        tidb_base::log_warn!(msg, "error" => e);
+    }
+    fn error(&self, msg: &str, e: &Error) {
+        tidb_base::log_error!(msg, "error" => e);
     }
 }

@@ -105,6 +105,12 @@ pub struct Factory {
     /// The ported store driver the new stack's sessions read through (`None` with
     /// `--new-stack=off`: nothing of the new stack is built).
     new_store: Option<Arc<tidb_store::driver::TikvStore>>,
+    /// The sysvar cache of `mysql.global_variables` the sessions read their global values
+    /// from (the loader's, `poc_domain::sysvar_loader`; D06.5 spec §8), in every mode.
+    /// `None` without a loader: the new sessions' global values are unknown and they stay
+    /// on the PoC (step 0, "global variables not loaded"); with `off`, the plan-cache
+    /// decision uses the compiled defaults.
+    new_globals: Option<Arc<tidb_systable::sysvar_cache::SysVarCache>>,
 }
 
 impl Factory {
@@ -113,6 +119,7 @@ impl Factory {
             shared: Arc::new(shared),
             new_stack: NewStackMode::Off,
             new_store: None,
+            new_globals: None,
         }
     }
 
@@ -130,6 +137,16 @@ impl Factory {
             self.new_store = Some(Arc::new(store));
         }
         Ok(self)
+    }
+
+    /// The sessions read their global variables from `cache`, the sysvar cache the loader
+    /// keeps in step with `mysql.global_variables` (D06.5 spec §8).
+    pub fn with_sys_var_cache(
+        mut self,
+        cache: Arc<tidb_systable::sysvar_cache::SysVarCache>,
+    ) -> Factory {
+        self.new_globals = Some(cache);
+        self
     }
 
     /// The state shared by this factory's sessions.
@@ -152,6 +169,7 @@ impl SessionFactory for Factory {
                 auth_user: Some(self.shared.user.clone()),
                 auth_host: Some("%".to_owned()),
                 account_locked: false,
+                password_expired: false,
             });
         };
         // Read directly from the in-memory cache (same as Go's `ConnectionVerification`).
@@ -224,6 +242,8 @@ impl SessionFactory for Factory {
             stmts: HashMap::new(),
             warnings: Vec::new(),
             default_vars: None,
+            globals: self.new_globals.clone(),
+            default_vars_loaded: false,
             timer: Timer::default(),
             mdl: None,
             stmt: StmtMetrics::default(),
@@ -240,6 +260,11 @@ impl SessionFactory for Factory {
                 domain,
                 self.new_store.clone(),
                 self.shared.kv.exec_pool(),
+                // Without a loader the cache is never built: the global values are unknown,
+                // so the router keeps the session on the PoC.
+                self.new_globals
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(tidb_systable::sysvar_cache::SysVarCache::new())),
             ));
             if let Some(pm) = privilege_manager {
                 let ns = router::NewStack::session_mut(&mut *new);
@@ -298,6 +323,11 @@ pub struct Session {
     /// variables, the input of a PREPARE's plan-cache decision ([`plan_cache`]); made at the
     /// first PREPARE.
     default_vars: Option<Box<tidb_session::Session>>,
+    /// The sysvar cache `default_vars` takes the cluster's global values from (the
+    /// factory's; D06.5 spec §8).
+    globals: Option<Arc<tidb_systable::sysvar_cache::SysVarCache>>,
+    /// `default_vars` holds the cluster's global values (not the compiled defaults).
+    default_vars_loaded: bool,
     /// Phase timing (`timing`), off by default.
     timer: Timer,
     /// Metadata-lock entry of the current synced statement, released once its response has
@@ -1235,15 +1265,33 @@ impl Session {
         }
     }
 
-    /// The variables of the off-mode plan-cache decision: a new session's, Go's defaults.
+    /// The variables of the off-mode plan-cache decision: a new session's, with the
+    /// cluster's global values once the sysvar cache is built. Before that, the compiled
+    /// defaults, logged once per process (maintainer decision on #521, D06.5 spec §8.3); a
+    /// session made from them is made again once the cache is built (as the router loads a
+    /// new session's values late, #539 review).
     fn default_vars(
         &mut self,
     ) -> Result<&tidb_sessionctx::variable::session::SessionVars, SqlError> {
+        let built = self.globals.as_ref().is_some_and(|c| !c.needs_rebuild());
+        if built && !self.default_vars_loaded {
+            self.default_vars = None;
+        }
         if self.default_vars.is_none() {
-            let mut s = tidb_session::Session::new(
-                tidb_session::Dialect::MySQL,
-                Box::new(router::newstack::DefaultGlobals),
-            );
+            self.default_vars_loaded = built;
+            let globals = match &self.globals {
+                Some(cache) if built => router::newstack::ClusterGlobals::new(Arc::clone(cache)),
+                _ => {
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| {
+                        tidb_base::log_warn!(
+                            "the global variables of the cluster are not loaded yet (mysql.global_variables); the prototype uses the compiled defaults until they are"
+                        );
+                    });
+                    router::newstack::ClusterGlobals::compiled_defaults()
+                }
+            };
+            let mut s = tidb_session::Session::new(tidb_session::Dialect::MySQL, Box::new(globals));
             s.load_common_global_variables_if_needed()
                 .map_err(|e| router::sql_error(&e))?;
             self.default_vars = Some(Box::new(s));

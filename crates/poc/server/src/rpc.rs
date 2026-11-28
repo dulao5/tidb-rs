@@ -60,8 +60,6 @@ use tipb::ExecType;
 use tipb::Executor;
 use tipb::ExecutorExecutionSummary;
 use tipb::SelectResponse;
-use tracing::debug;
-use tracing::warn;
 
 use crate::status::Body;
 
@@ -104,9 +102,12 @@ fn warn_unimplemented_tikv(path: &str) {
             .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
     {
-        warn!(%path, "status port: unimplemented tikvpb.Tikv method called (logged at most once a minute)");
+        tidb_base::log_warn!(
+            "status port: unimplemented tikvpb.Tikv method called (logged at most once a minute)",
+            "path" => path,
+        );
     } else {
-        debug!(%path, "status port: unimplemented gRPC method");
+        tidb_base::log_debug!("status port: unimplemented gRPC method", "path" => path);
     }
 }
 
@@ -174,7 +175,7 @@ pub(crate) async fn serve(req: Request<Incoming>) -> Response<Body> {
         if path.starts_with("/tikvpb.Tikv/") {
             warn_unimplemented_tikv(&path);
         } else {
-            debug!(%path, "status port: unimplemented gRPC method");
+            tidb_base::log_debug!("status port: unimplemented gRPC method", "path" => path.as_str());
         }
         return status_only(Code::Unimplemented, &unknown_method(&path));
     }
@@ -219,23 +220,31 @@ pub(crate) async fn serve(req: Request<Incoming>) -> Response<Body> {
         COPROCESSOR => match CopRequest::decode(msg) {
             Ok(r) => {
                 let resp = coprocessor(&r);
-                debug!(tp = r.tp, other_error = %resp.other_error, "status port: coprocessor");
+                tidb_base::log_debug!(
+                    "status port: coprocessor",
+                    "tp" => r.tp,
+                    "other_error" => resp.other_error.as_str(),
+                );
                 reply(&[resp.encode_to_vec()])
             }
             Err(e) => unmarshal_error(e),
         },
         SERVER_INFO => match ServerInfoRequest::decode(msg) {
             Ok(r) => {
-                debug!(tp = r.tp, "status port: diagnostics server_info");
+                tidb_base::log_debug!(
+                    "status port: diagnostics server_info",
+                    "tp" => i64::from(r.tp),
+                );
                 reply(&[server_info(&r).encode_to_vec()])
             }
             Err(e) => unmarshal_error(e),
         },
         _ => match SearchLogRequest::decode(msg) {
             Ok(r) => {
-                debug!(
-                    r.start_time,
-                    r.end_time, "status port: diagnostics search_log"
+                tidb_base::log_debug!(
+                    "status port: diagnostics search_log",
+                    "start_time" => r.start_time,
+                    "end_time" => r.end_time,
                 );
                 reply(&[])
             }

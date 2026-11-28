@@ -15,8 +15,6 @@
 use std::time::Duration;
 use std::time::Instant;
 
-use tracing::info;
-
 /// Go: `oracle.GetTimeFromTS` in milliseconds (the physical part of a TSO).
 // go-dep: client-go oracle.GetTimeFromTS L1
 fn physical_ms(ts: u64) -> u64 {
@@ -106,9 +104,7 @@ impl SchemaValidator {
 
     // go: schemaValidator.Stop L1
     pub(crate) fn stop(&mut self) {
-        if self.is_started {
-            info!("the schema validator stops");
-        }
+        tidb_base::log_info!("the schema validator stops");
         self.is_started = false;
         self.latest_schema_ver = 0;
     }
@@ -117,7 +113,7 @@ impl SchemaValidator {
     /// `do.InfoSchema().SchemaMetaVersion()`).
     // go: schemaValidator.Restart L1
     pub(crate) fn restart(&mut self, loaded_ver: i64) {
-        info!("the schema validator restarts");
+        tidb_base::log_info!("the schema validator restarts");
         self.is_started = true;
         self.restart_schema_ver = loaded_ver;
     }
@@ -149,7 +145,7 @@ impl SchemaValidator {
         curr_ver: i64,
     ) {
         if !self.is_started {
-            info!("the schema validator stopped before updating");
+            tidb_base::log_info!("the schema validator stopped before updating");
             return;
         }
         let _ = old_ver;
@@ -189,12 +185,13 @@ impl SchemaValidator {
     // go-part: schemaValidator.Check
     fn check_with(&self, schema_ver: i64, expired: impl FnOnce(&Expire) -> bool) -> CheckResult {
         if !self.is_started {
+            tidb_base::log_info!("the schema validator stopped before checking");
             return CheckResult::Unknown;
         }
         if schema_ver < self.restart_schema_ver {
-            info!(
-                schema_ver,
-                "the schema version is too old, TiDB and PD maybe unhealthy after the transaction started"
+            tidb_base::log_info!(
+                "the schema version is too old, TiDB and PD maybe unhealthy after the transaction started",
+                "schemaVer" => schema_ver,
             );
             return CheckResult::Fail;
         }

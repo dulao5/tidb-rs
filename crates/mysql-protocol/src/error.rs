@@ -16,6 +16,7 @@ pub mod code {
     pub const ER_NOT_SUPPORTED_YET: u16 = 1235;
     pub const ER_UNKNOWN_STMT_HANDLER: u16 = 1243;
     pub const ER_NOT_SUPPORTED_AUTH_MODE: u16 = 1251;
+    pub const ER_MUST_CHANGE_PASSWORD_LOGIN: u16 = 1862;
     pub const ER_ACCOUNT_HAS_BEEN_LOCKED: u16 = 3118;
     pub const ER_INVALID_SEQUENCE: u16 = 8052;
     pub const ER_UNKNOWN_FIELD_TYPE: u16 = 8051;
@@ -98,12 +99,26 @@ impl SqlError {
         )
     }
 
-    /// Error 1044 (`ER_DBACCESS_DENIED_ERROR`) with TiDB's message format.
+    /// Error 1862 (`ER_MUST_CHANGE_PASSWORD_LOGIN`, SQLSTATE `HY000`) with TiDB's exact message
+    /// format (`pkg/privilege/privileges/errors.go`: `ErrMustChangePasswordLogin`).
+    pub fn password_expired() -> Self {
+        Self::new(
+            code::ER_MUST_CHANGE_PASSWORD_LOGIN,
+            "Your password has expired. To log in you must change it using a client that supports expired passwords.",
+        )
+    }
+
+    /// Error 1044 (`ER_DBACCESS_DENIED_ERROR`) with TiDB's message format and `ClassExecutor`
+    /// `terror` (Go `exeerrors.ErrDBaccessDenied` -> `[executor:1044]`).
     pub fn db_access_denied(user: &str, host: &str, db: &str) -> Self {
+        let src = tidb_base::dbterror::exeerrors::ErrDBaccessDenied.gen_with_stack_by_args(
+            tidb_base::go_args![user.to_owned(), host.to_owned(), db.to_owned()],
+        );
         Self::new(
             code::ER_DBACCESS_DENIED,
             format!("Access denied for user '{user}'@'{host}' to database '{db}'"),
         )
+        .with_source_err(src)
     }
 
     /// Error 1142 (`ER_TABLEACCESS_DENIED_ERROR`) with TiDB's message format.
@@ -141,6 +156,25 @@ impl SqlError {
             code::ER_UNKNOWN_STMT_HANDLER,
             format!("Unknown prepared statement handler ({stmt_id}) given to {command}"),
         )
+    }
+
+    /// Format this error the way Go `zap.Error(err)` formats a `terror` (with `[class:code]`
+    /// RFC prefix when known, matching `pkg/server/conn.go:677` and `server.go:712`).
+    pub fn error_for_log(&self) -> String {
+        if let Some(src) = &self.source_err {
+            return String::from_utf8_lossy(&src.error()).into_owned();
+        }
+        match self.code {
+            code::ER_DBACCESS_DENIED => format!("[executor:{}]{}", self.code, self.message),
+            code::ER_ACCESS_DENIED
+            | code::ER_MUST_CHANGE_PASSWORD_LOGIN
+            | code::ER_ACCOUNT_HAS_BEEN_LOCKED => {
+                format!("[privilege:{}]{}", self.code, self.message)
+            }
+            code::ER_BAD_DB => format!("[schema:{}]{}", self.code, self.message),
+            code::ER_NOT_SUPPORTED_AUTH_MODE => format!("[server:{}]{}", self.code, self.message),
+            _ => self.message.clone(),
+        }
     }
 }
 
@@ -194,6 +228,7 @@ mod tests {
             (1105, "HY000"),
             (1193, "HY000"),
             (1243, "HY000"),
+            (1862, "HY000"), // ErrMustChangePasswordLogin
             (3118, "HY000"), // ErrAccountHasBeenLocked
             (9001, "HY000"),
         ] {
