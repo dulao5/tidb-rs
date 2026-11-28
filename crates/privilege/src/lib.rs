@@ -17,7 +17,7 @@ pub mod privileges;
 
 pub use cache::{
     BaseRecord, ColumnsPrivRecord, DbRecord, DynamicPrivRecord, GlobalPrivRecord, Handle,
-    MySQLPrivilege, TablesPrivRecord, UserRecord,
+    MySQLPrivilege, PasswordExpireStatus, TablesPrivRecord, UserRecord,
 };
 pub use privileges::UserPrivileges;
 

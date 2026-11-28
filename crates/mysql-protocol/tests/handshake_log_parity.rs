@@ -37,6 +37,14 @@ impl SessionFactory for AuthTestFactory {
                 auth_user: Some("locked".to_owned()),
                 auth_host: Some("%".to_owned()),
                 account_locked: true,
+                password_expired: false,
+            }),
+            "expired" => Some(AccountAuth {
+                credential: Credential::native_from_password(""),
+                auth_user: Some("expired".to_owned()),
+                auth_host: Some("%".to_owned()),
+                account_locked: false,
+                password_expired: true,
             }),
             "sha2_user" => Some(AccountAuth::from(Credential::caching_sha2_from_password(
                 "secret123",
@@ -300,7 +308,27 @@ async fn handshake_eof_auth_failure_and_lifecycle_logs_match_go() {
         ]
     );
 
-    // 8. Successful connection + clean disconnect.
+    // 8. Expired password with valid password: Go checks password expiration after Account_locked
+    //    and emits `[privilege:1862]` on both handshake WARN lines.
+    let expired_opts = Opts::from(
+        OptsBuilder::default()
+            .ip_or_hostname("127.0.0.1")
+            .tcp_port(addr.port())
+            .user(Some("expired")),
+    );
+    assert!(mysql_async::Conn::new(expired_opts).await.is_err());
+
+    let expired_lines = take_lines(&sink, 3).await;
+    assert_eq!(
+        expired_lines,
+        vec![
+            "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]",
+            "[WARN] [conn.rs:LINE] [\"open new session or authentication failure\"] [conn=8] [error=\"[privilege:1862]Your password has expired. To log in you must change it using a client that supports expired passwords.\"]",
+            "[WARN] [conn.rs:LINE] [\"Server.onConn handshake\"] [conn=8] [error=\"[privilege:1862]Your password has expired. To log in you must change it using a client that supports expired passwords.\"] [\"remote addr\"=127.0.0.1:PORT]",
+        ]
+    );
+
+    // 9. Successful connection + clean disconnect.
     let ok_opts = Opts::from(
         OptsBuilder::default()
             .ip_or_hostname("127.0.0.1")
@@ -315,16 +343,16 @@ async fn handshake_eof_auth_failure_and_lifecycle_logs_match_go() {
         ok_lines,
         vec![
             "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]",
-            "[DEBUG] [conn.rs:LINE] [\"new connection\"] [conn=8] [remoteAddr=127.0.0.1:PORT]",
-            "[DEBUG] [conn.rs:LINE] [\"connection closed\"] [conn=8]",
+            "[DEBUG] [conn.rs:LINE] [\"new connection\"] [conn=9] [remoteAddr=127.0.0.1:PORT]",
+            "[DEBUG] [conn.rs:LINE] [\"connection closed\"] [conn=9]",
         ]
     );
 
-    // 9 & 10. caching_sha2_password empty auth (`[]` from drivers and `[0x00]` from libmysqlclient)
-    //         against a non-empty hash: both pin `[privilege:1045]...(using password: NO)` on wire
-    //         and in whole-line handshake logs.
+    // 10 & 11. caching_sha2_password empty auth (`[]` from drivers and `[0x00]` from libmysqlclient)
+    //          against a non-empty hash: both pin `[privilege:1045]...(using password: NO)` on wire
+    //          and in whole-line handshake logs.
     for (idx, empty_payload) in [&b""[..], &b"\0"[..]].into_iter().enumerate() {
-        let conn_id = 9 + idx;
+        let conn_id = 10 + idx;
         let stream = TcpStream::connect(addr).await.unwrap();
         let mut io = PacketIo::new(stream, 1 << 20);
         let _hs = io.read_packet().await.unwrap();

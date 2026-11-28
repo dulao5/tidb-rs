@@ -683,6 +683,17 @@ where
         write_handshake_err(io, capability, connection_id, &e).await;
         return Err(HandshakeError::Other(err_str));
     }
+    if account.password_expired {
+        let e = SqlError::password_expired();
+        let err_str = e.error_for_log();
+        tidb_base::log_warn!(
+            "open new session or authentication failure",
+            "conn" => connection_id,
+            "error" => err_str.as_str(),
+        );
+        write_handshake_err(io, capability, connection_id, &e).await;
+        return Err(HandshakeError::Other(err_str));
+    }
 
     let info = ConnectionInfo {
         connection_id,

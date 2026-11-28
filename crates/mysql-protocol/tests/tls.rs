@@ -46,6 +46,14 @@ impl SessionFactory for Factory {
                 auth_user: Some("bob_locked".to_owned()),
                 auth_host: Some("%".to_owned()),
                 account_locked: true,
+                password_expired: false,
+            }),
+            "bob_expired" => Some(AccountAuth {
+                credential: Credential::caching_sha2_from_password(PASSWORD),
+                auth_user: Some("bob_expired".to_owned()),
+                auth_host: Some("%".to_owned()),
+                account_locked: false,
+                password_expired: true,
             }),
             _ => None,
         }
@@ -457,6 +465,38 @@ async fn caching_sha2_password_over_tls_and_plain_tcp() {
         assert!(
             matches!(err, mysql_async::Error::Server(ref e) if e.code == 1045),
             "locked wrong pw (default={default_plugin}): {err:?}"
+        );
+
+        // 4b. Expired caching_sha2 account over TLS: right password -> 1862, wrong password -> 1045.
+        let err = mysql_async::Conn::new(
+            OptsBuilder::default()
+                .ip_or_hostname(addr.ip().to_string())
+                .tcp_port(addr.port())
+                .user(Some("bob_expired"))
+                .pass(Some(PASSWORD))
+                .prefer_socket(false)
+                .ssl_opts(Some(ssl.clone())),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, mysql_async::Error::Server(ref e) if e.code == 1862),
+            "expired right pw (default={default_plugin}): {err:?}"
+        );
+        let err = mysql_async::Conn::new(
+            OptsBuilder::default()
+                .ip_or_hostname(addr.ip().to_string())
+                .tcp_port(addr.port())
+                .user(Some("bob_expired"))
+                .pass(Some("wrong-pw"))
+                .prefer_socket(false)
+                .ssl_opts(Some(ssl.clone())),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, mysql_async::Error::Server(ref e) if e.code == 1045),
+            "expired wrong pw (default={default_plugin}): {err:?}"
         );
 
         // 5. Passwordless caching_sha2 account succeeds over both TLS and plain TCP, and rejects non-empty password.
