@@ -162,6 +162,8 @@ pub struct NewSession {
     /// Go's `clientConn.rsEncoder`: the result encoder of the last result set (`None`
     /// before the first), which `writePrepare` also dumps column definitions with.
     rs_encoder: Option<ResultEncoder>,
+    /// The loader's sysvar cache the session's global variables come from.
+    globals: Arc<SysVarCache>,
 }
 
 impl NewSession {
@@ -188,10 +190,13 @@ impl NewSession {
         let mut session = match store {
             Some(store) => {
                 let oracle = Arc::new(tidb_session::glue::StoreOracle(store.get_oracle()));
-                let globals = Box::new(ClusterGlobals::new(globals));
+                let globals = Box::new(ClusterGlobals::new(Arc::clone(&globals)));
                 Session::with_store(Dialect::MySQL, globals, store, oracle)
             }
-            None => Session::new(Dialect::MySQL, Box::new(ClusterGlobals::new(globals))),
+            None => Session::new(
+                Dialect::MySQL,
+                Box::new(ClusterGlobals::new(Arc::clone(&globals))),
+            ),
         };
         session.set_instance_plan_cache(domain.as_ref().and_then(|d| d.get_instance_plan_cache()));
         session.set_exec_pool(pool);
@@ -199,6 +204,7 @@ impl NewSession {
             session,
             domain,
             rs_encoder: None,
+            globals,
         }
     }
 }
@@ -226,6 +232,10 @@ impl NewStack for NewSession {
                 .get_domain_info_schema()
                 .schema_meta_version(),
         )
+    }
+
+    fn globals_ready(&self) -> bool {
+        !self.globals.needs_rebuild()
     }
 
     fn refresh_info_schema(&mut self) {

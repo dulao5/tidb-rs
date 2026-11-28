@@ -101,6 +101,20 @@ impl WarnAppender for Sink {
     }
 }
 
+/// A session with the compiled default global values (Go's defaults): the input of the
+/// plan-cache decision while the cluster's global variables are not loaded (D06.5 spec
+/// §8.3), and of the router's probe of a rejected value.
+// glue: a session over ClusterGlobals::compiled_defaults (D06.5 spec §8.3)
+pub(crate) fn compiled_defaults_session() -> Result<tidb_session::Session, SqlError> {
+    let mut s = tidb_session::Session::new(
+        tidb_session::Dialect::MySQL,
+        Box::new(crate::router::newstack::ClusterGlobals::compiled_defaults()),
+    );
+    s.load_common_global_variables_if_needed()
+        .map_err(|e| crate::router::sql_error(&e))?;
+    Ok(s)
+}
+
 #[cfg(test)]
 mod tests {
     use tidb_session::{Dialect, Session};

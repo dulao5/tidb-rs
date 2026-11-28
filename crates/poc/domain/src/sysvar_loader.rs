@@ -154,18 +154,29 @@ fn run(
     // Go's rebuildSysVarCache(ctx) on the loop's session; no hook session: no SetGlobal hook
     // runs (D06.5 spec §8.4). The first success is logged once (after a failed start it
     // ends the time in which new sessions stay on the PoC).
+    // `tidbrs_sysvar_cache_loaded` is 0 until then.
     let mut built = false;
+    tidb_metrics::sysvar_cache_loaded(false);
     let mut rebuild = || {
         cache.rebuild(None, &mut *fetch)?;
         if !std::mem::replace(&mut built, true) {
+            tidb_metrics::sysvar_cache_loaded(true);
             tidb_base::log_info!("global variables loaded from mysql.global_variables");
         }
         Ok(())
     };
-    let mut next = || match rx.recv_timeout(period) {
-        Ok(event) => event,
-        Err(RecvTimeoutError::Timeout) => LoopEvent::Tick,
-        Err(RecvTimeoutError::Disconnected) => LoopEvent::Exit,
+    let mut next = || {
+        let event = match rx.recv_timeout(period) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => LoopEvent::Tick,
+            Err(RecvTimeoutError::Disconnected) => LoopEvent::Exit,
+        };
+        // Go logs this after its select for a watch event and for the timer alike
+        // (`domain.go` line 2084).
+        if matches!(event, LoopEvent::Watch | LoopEvent::Tick) {
+            tidb_base::log_debug!("Rebuilding sysvar cache from etcd watch event.");
+        }
+        event
     };
     // The watch task watches again by itself after it reported a closed watch.
     let mut rewatch = || {};
@@ -292,7 +303,6 @@ async fn watch_once(
                 if msg.events().is_empty() {
                     continue;
                 }
-                tidb_base::log_debug!("Rebuilding sysvar cache from etcd watch event.");
                 if events.send(LoopEvent::Watch).is_err() {
                     return Ok(WatchEnd::Stop);
                 }
@@ -319,9 +329,10 @@ mod tests {
         }
     }
 
-    /// Waits (up to 5 s) until `f` holds.
+    /// Waits (up to 60 s: the first WARN resolves an error's backtrace, which takes seconds
+    /// on a CI runner with debug info) until `f` holds.
     fn eventually(f: impl Fn() -> bool) {
-        for _ in 0..500 {
+        for _ in 0..6000 {
             if f() {
                 return;
             }

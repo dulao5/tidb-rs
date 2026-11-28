@@ -242,6 +242,7 @@ impl SessionFactory for Factory {
             warnings: Vec::new(),
             default_vars: None,
             globals: self.new_globals.clone(),
+            default_vars_loaded: false,
             timer: Timer::default(),
             mdl: None,
             stmt: StmtMetrics::default(),
@@ -324,6 +325,8 @@ pub struct Session {
     /// The sysvar cache `default_vars` takes the cluster's global values from (the
     /// factory's; D06.5 spec §8).
     globals: Option<Arc<tidb_systable::sysvar_cache::SysVarCache>>,
+    /// `default_vars` holds the cluster's global values (not the compiled defaults).
+    default_vars_loaded: bool,
     /// Phase timing (`timing`), off by default.
     timer: Timer,
     /// Metadata-lock entry of the current synced statement, released once its response has
@@ -1263,15 +1266,20 @@ impl Session {
 
     /// The variables of the off-mode plan-cache decision: a new session's, with the
     /// cluster's global values once the sysvar cache is built. Before that, the compiled
-    /// defaults, logged once per process (maintainer decision on #521, D06.5 spec §8.3).
+    /// defaults, logged once per process (maintainer decision on #521, D06.5 spec §8.3); a
+    /// session made from them is made again once the cache is built (as the router loads a
+    /// new session's values late, #539 review).
     fn default_vars(
         &mut self,
     ) -> Result<&tidb_sessionctx::variable::session::SessionVars, SqlError> {
+        let built = self.globals.as_ref().is_some_and(|c| !c.needs_rebuild());
+        if built && !self.default_vars_loaded {
+            self.default_vars = None;
+        }
         if self.default_vars.is_none() {
+            self.default_vars_loaded = built;
             let globals = match &self.globals {
-                Some(cache) if !cache.needs_rebuild() => {
-                    router::newstack::ClusterGlobals::new(Arc::clone(cache))
-                }
+                Some(cache) if built => router::newstack::ClusterGlobals::new(Arc::clone(cache)),
                 _ => {
                     static WARNED: std::sync::Once = std::sync::Once::new();
                     WARNED.call_once(|| {

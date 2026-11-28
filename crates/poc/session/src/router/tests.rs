@@ -219,6 +219,8 @@ struct Script {
 struct FakeNew {
     session: Session,
     script: Arc<Mutex<Script>>,
+    /// The sysvar cache behind the session's accessor (`None`: always ready).
+    globals: Option<Arc<tidb_systable::sysvar_cache::SysVarCache>>,
 }
 
 /// What Go's statement path writes before it opens an executor (and a SELECT after it).
@@ -286,6 +288,9 @@ impl NewStack for FakeNew {
     fn info_schema_version(&self) -> Option<i64> {
         self.script.lock().unwrap().version
     }
+    fn globals_ready(&self) -> bool {
+        self.globals.as_ref().is_none_or(|c| !c.needs_rebuild())
+    }
     fn executed_stmts(&self) -> u64 {
         self.script.lock().unwrap().executed
     }
@@ -351,6 +356,7 @@ fn scripted(mode: NewStackMode, poc: &FakePoc) -> (Router, Arc<Mutex<Script>>) {
             Box::new(ClusterGlobals::compiled_defaults()),
         ),
         script: script.clone(),
+        globals: None,
     };
     let r = Router::new(mode, Box::new(new), &poc.values());
     (r, script)
@@ -1154,6 +1160,7 @@ fn failed_global_variable_load_pins_the_session_to_the_poc() {
     let new = FakeNew {
         session: Session::new(Dialect::MySQL, Box::new(FailingGlobals)),
         script: script.clone(),
+        globals: None,
     };
     let mut r = Router::new(NewStackMode::Strict, Box::new(new), &p.values());
     assert_eq!(r.session_condition(&p), Some("global variables not loaded"));
@@ -1189,8 +1196,12 @@ fn scripted_over(
         ..Script::default()
     }));
     let new = FakeNew {
-        session: Session::new(Dialect::MySQL, Box::new(ClusterGlobals::new(cache))),
+        session: Session::new(
+            Dialect::MySQL,
+            Box::new(ClusterGlobals::new(Arc::clone(&cache))),
+        ),
         script: script.clone(),
+        globals: Some(cache),
     };
     (Router::new(mode, Box::new(new), &poc.values()), script)
 }
@@ -1242,10 +1253,11 @@ fn cluster_global_values_reach_a_new_session() {
 }
 
 /// #521, fail safe: while the cluster's global values cannot be read (the loader's cache was
-/// never built: TiKV unreachable at start, or no loader), a new session is pinned to the PoC,
-/// even in strict mode, and the new stack is never called.
+/// never built: TiKV unreachable at start, or no loader), a new session's statements stay on
+/// the PoC, even in strict mode, and the new stack is never called; once the cache is built,
+/// the session loads them at its next command (#539 review).
 #[test]
-fn unreadable_cluster_global_values_pin_the_session_to_the_poc() {
+fn unreadable_cluster_global_values_keep_the_session_on_the_poc_until_loaded() {
     let mut p = poc();
     let unbuilt = Arc::new(tidb_systable::sysvar_cache::SysVarCache::new());
     let (mut r, script) = scripted_over(NewStackMode::Strict, &p, Arc::clone(&unbuilt));
@@ -1258,15 +1270,52 @@ fn unreadable_cluster_global_values_pin_the_session_to_the_poc() {
     let res = block_on(r.query(&mut p, POINT));
     assert_eq!(rows(&res).map(|r| r.0), Some(3));
     assert!(script.lock().unwrap().log.is_empty());
-    // The cache is built later: this session stays on the PoC (Go loads once per session),
-    // a session opened now runs on the new stack.
+    // The cache is built later: the session loads the cluster's values at its next command
+    // (Go would have blocked its first statement on a rebuild) and then runs on the new
+    // stack.
+    unbuilt
+        .rebuild(None, &mut || {
+            Ok([("sql_mode".to_owned(), String::new())]
+                .into_iter()
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(r.session_condition(&p), Some("global variables not loaded"));
+    let res = block_on(r.query(&mut p, POINT));
+    assert_eq!(rows(&res).map(|r| r.0), Some(1));
+    assert_eq!(script.lock().unwrap().log, vec!["execute".to_owned()]);
+    assert_eq!(r.session_condition(&p), None);
+    assert_eq!(get(&mut r, "sql_mode"), "");
+}
+
+/// #539 review: a PREPARE before the global variables are loaded stays on the PoC (step 0),
+/// and its plan-cache decision reads the compiled defaults, not the unloaded session's
+/// variables (whose `tidb_enable_prepared_plan_cache` is off: Go would not warn "plan cache
+/// is disabled").
+#[test]
+fn prepare_before_the_global_variables_are_loaded_stays_on_the_poc() {
+    let mut p = poc();
+    let unbuilt = Arc::new(tidb_systable::sysvar_cache::SysVarCache::new());
+    let (mut r, script) = scripted_over(NewStackMode::Strict, &p, Arc::clone(&unbuilt));
+    script.lock().unwrap().prepare = Some(Answer::Rows);
+    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
+    assert!(matches!(
+        r.owner(1),
+        Some(Owner::Poc(Reason::Session("global variables not loaded")))
+    ));
+    assert!(script.lock().unwrap().log.is_empty());
+    let c = p
+        .cacheability
+        .get(&1)
+        .expect("the PoC's plan-cache decision");
+    assert_eq!(c.reason, "");
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+    // Once the cache is built, the next PREPARE runs on both sides.
     unbuilt
         .rebuild(None, &mut || Ok(std::collections::HashMap::new()))
         .unwrap();
-    assert_eq!(r.session_condition(&p), Some("global variables not loaded"));
-    let (r2, _) = scripted_over(NewStackMode::Strict, &p, unbuilt);
-    assert_eq!(r2.session_condition(&p), None);
-    assert_eq!(r2.route(&parse(POINT), &p, false), Route::New);
+    block_on(r.prepare(&mut p, 2, POINT)).unwrap();
+    assert!(matches!(r.owner(2), Some(Owner::Both { .. })));
 }
 
 /// Go's `session.GetGlobalSysVar` over the cache: the cached value, type-validated (a value
