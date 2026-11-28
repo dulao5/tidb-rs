@@ -38,7 +38,16 @@ fn native_hash(password: &str) -> String {
             out
         }
         Credential::NativePassword(None) => String::new(),
+        Credential::CachingSha2Password(_) => {
+            unreachable!("native_from_password returns NativePassword")
+        }
     }
+}
+
+fn sha2_hash(password: &str) -> String {
+    Credential::caching_sha2_from_password(password)
+        .to_caching_sha2_authentication_string()
+        .unwrap()
 }
 
 struct PrivTestFactory {
@@ -164,12 +173,14 @@ fn build_fixture() -> Arc<Handle> {
             .with_account_locked(true),
     );
 
-    // 3. Non-native plugin accounts (including empty auth_string caching_sha2_password).
+    // 3. Unsupported non-native plugin accounts + malformed caching_sha2 hash (fail closed),
+    //    plus valid empty-password & non-empty caching_sha2_password accounts.
     for (name, plugin, auth_str) in [
         ("u_token", "tidb_auth_token", ""),
         ("u_socket", "auth_socket", ""),
         ("u_ldap", "authentication_ldap_simple", ""),
-        ("u_sha2_empty", "caching_sha2_password", ""),
+        ("u_sm3_empty", "tidb_sm3_password", ""),
+        ("u_sha2_malformed", "caching_sha2_password", "$A$005$broken"),
     ] {
         snap.push_user(
             UserRecord::new("%", name, SelectPriv)
@@ -177,6 +188,22 @@ fn build_fixture() -> Arc<Handle> {
                 .with_auth_plugin(plugin),
         );
     }
+    snap.push_user(
+        UserRecord::new("%", "u_sha2_empty", SelectPriv)
+            .with_auth_string("")
+            .with_auth_plugin("caching_sha2_password"),
+    );
+    snap.push_user(
+        UserRecord::new("%", "u_sha2_empty_expired", SelectPriv)
+            .with_auth_string("")
+            .with_auth_plugin("caching_sha2_password")
+            .with_password_expired(true),
+    );
+    snap.push_user(
+        UserRecord::new("%", "u_sha2_ok", SelectPriv)
+            .with_auth_string(sha2_hash(PASSWORD))
+            .with_auth_plugin("caching_sha2_password"),
+    );
 
     // 4. Restricted login accounts: SSL required, broken global_priv, expired, lifetime, lockout.
     snap.push_user(UserRecord::new("%", "u_ssl", SelectPriv).with_auth_string(pw.clone()));
@@ -284,12 +311,31 @@ async fn wire_handshake_enforces_locked_plugins_restrictions_and_use_db() {
     let (code, state, _) = parse_err_packet(&reply);
     assert_eq!((code, state.as_str()), (1045, "28000"));
 
-    // Non-native plugins & unported restrictions -> fail closed with 1045 (28000).
+    // Expired passwordless caching_sha2_password account -> 1862 on empty auth, 1045 on wrong auth.
+    let (mut io, reply) = raw_handshake(addr, "u_sha2_empty_expired", "", None).await;
+    assert_eq!(reply[0], 0xfe);
+    io.write_packet(b"").await.unwrap();
+    io.flush().await.unwrap();
+    let reply = io.read_packet().await.unwrap();
+    let (code, state, msg) = parse_err_packet(&reply);
+    assert_eq!((code, state.as_str()), (1862, "HY000"));
+    assert_eq!(msg, EXPIRED_MSG);
+
+    let (mut io, reply) = raw_handshake(addr, "u_sha2_empty_expired", "wrong", None).await;
+    assert_eq!(reply[0], 0xfe);
+    io.write_packet(b"wrong").await.unwrap();
+    io.flush().await.unwrap();
+    let reply = io.read_packet().await.unwrap();
+    let (code, state, _) = parse_err_packet(&reply);
+    assert_eq!((code, state.as_str()), (1045, "28000"));
+
+    // Unsupported plugins, malformed caching_sha2 hash, & unported restrictions -> fail closed with 1045 (28000).
     for (user, pw) in [
         ("u_token", ""),
         ("u_socket", ""),
         ("u_ldap", ""),
-        ("u_sha2_empty", ""),
+        ("u_sm3_empty", ""),
+        ("u_sha2_malformed", PASSWORD),
         ("u_ssl", PASSWORD),
         ("u_broken_gp", PASSWORD),
         ("u_lockout", PASSWORD),
@@ -303,13 +349,57 @@ async fn wire_handshake_enforces_locked_plugins_restrictions_and_use_db() {
         );
     }
 
+    // Passwordless caching_sha2_password switches plugin, succeeds on empty auth, rejects non-empty.
+    let (mut io, reply) = raw_handshake(addr, "u_sha2_empty", "", None).await;
+    assert_eq!(
+        reply[0], 0xfe,
+        "expected AuthSwitchRequest for caching_sha2_password, got {reply:?}"
+    );
+    assert!(
+        reply[1..].starts_with(b"caching_sha2_password\0"),
+        "expected caching_sha2_password plugin in AuthSwitchRequest, got {reply:?}"
+    );
+    io.write_packet(b"").await.unwrap();
+    io.flush().await.unwrap();
+    let reply = io.read_packet().await.unwrap();
+    assert_eq!(
+        reply[0], 0x00,
+        "passwordless caching_sha2_password must succeed: {reply:?}"
+    );
+
+    let (mut io, reply) = raw_handshake(addr, "u_sha2_empty", "wrong", None).await;
+    assert_eq!(reply[0], 0xfe);
+    io.write_packet(b"wrong").await.unwrap();
+    io.flush().await.unwrap();
+    let reply = io.read_packet().await.unwrap();
+    let (code, state, _) = parse_err_packet(&reply);
+    assert_eq!((code, state.as_str()), (1045, "28000"));
+
+    // Non-empty caching_sha2_password over plain TCP must never accept cleartext password (1045).
+    let (mut io, reply) = raw_handshake(addr, "u_sha2_ok", PASSWORD, None).await;
+    assert_eq!(reply[0], 0xfe);
+    io.write_packet(b"initial-non-empty-auth").await.unwrap();
+    io.flush().await.unwrap();
+    let reply = io.read_packet().await.unwrap();
+    assert_eq!(
+        reply,
+        vec![0x01, 0x04],
+        "expected AuthMoreData perform-full-auth, got {reply:?}"
+    );
+    let mut pw_pkt = PASSWORD.as_bytes().to_vec();
+    pw_pkt.push(0);
+    io.write_packet(&pw_pkt).await.unwrap();
+    io.flush().await.unwrap();
+    let reply = io.read_packet().await.unwrap();
+    let (code, state, _) = parse_err_packet(&reply);
+    assert_eq!((code, state.as_str()), (1045, "28000"));
+
     // Account with explicit 30-day lifetime rotated 5 days ago -> OK.
     let (_, reply) = raw_handshake(addr, "u_lifetime_fresh", PASSWORD, None).await;
     assert_eq!(
         reply[0], 0x00,
         "fresh lifetime account must succeed: {reply:?}"
     );
-
     // Handshake with unauthorized default database -> 1044 (42000).
     let (_, reply) = raw_handshake(addr, "u_ok", PASSWORD, Some("secret")).await;
     let (code, state, msg) = parse_err_packet(&reply);
