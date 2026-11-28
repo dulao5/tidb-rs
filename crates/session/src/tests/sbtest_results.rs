@@ -1662,7 +1662,7 @@ fn signed_zero_minus_min_bigint_is_out_of_range() {
         assert_eq!(e.code(), 1690, "{what}: {e}");
         assert_eq!(
             String::from_utf8_lossy(&e.error()),
-            format!("BIGINT value is out of range in '{expr}'"),
+            format!("[types:1690]BIGINT value is out of range in '{expr}'"),
             "{what}"
         );
     };
@@ -1682,7 +1682,8 @@ fn signed_zero_minus_min_bigint_is_out_of_range() {
             ),
         ] {
             let what = format!("{sql} (vectorized {vectorized})");
-            let e = exec_error(&mut s, block_on(s.execute_stmt(parse(sql), sql)));
+            let started = block_on(s.execute_stmt(parse(sql), sql));
+            let e = exec_error(&mut s, started);
             out_of_range(&what, &e, expr);
         }
         for sql in [
@@ -1700,7 +1701,8 @@ fn signed_zero_minus_min_bigint_is_out_of_range() {
         "SELECT 0 - (-9223372036854775808)",
         "SELECT 0 - CAST(-9223372036854775808 AS SIGNED)",
     ] {
-        let e = exec_error(&mut s, block_on(s.execute_stmt(parse(sql), sql)));
+        let started = block_on(s.execute_stmt(parse(sql), sql));
+        let e = exec_error(&mut s, started);
         out_of_range(sql, &e, "(0 - -9223372036854775808)");
     }
     let sql = "SELECT 0 - (-9223372036854775807)";
