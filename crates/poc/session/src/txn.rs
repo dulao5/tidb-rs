@@ -24,6 +24,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use poc_domain::StartTsGuard;
 use tidb_meta::InfoSchema;
 pub(crate) use tidb_metrics::TxnEnd;
 
@@ -104,19 +105,29 @@ pub(crate) struct PocTxn {
     /// The InfoSchema visible at `start_ts`, once a statement read at the start ts found it
     /// (D05.4 spec §6.4): the later statements that read the start ts plan with it.
     start_schema: Option<Arc<InfoSchema>>,
+    /// Keeps `start_ts` registered in [`poc_domain::MinStartTsTracker`] while this
+    /// transaction is open; unregistered automatically on drop in every exit path.
+    _ts_guard: Option<StartTsGuard>,
 }
 
 impl PocTxn {
     /// A transaction of `mode` at `isolation` activated at `start_ts`; `created` is when its
     /// context was made (`BEGIN`, or the start of the statement that activated it).
     // glue: the prototype's transaction state (D05.4 spec §6.4)
-    pub(crate) fn new(mode: &str, isolation: &str, start_ts: u64, created: Instant) -> PocTxn {
+    pub(crate) fn new(
+        mode: &str,
+        isolation: &str,
+        start_ts: u64,
+        created: Instant,
+        ts_guard: Option<StartTsGuard>,
+    ) -> PocTxn {
         PocTxn {
             rule: read_ts_rule(mode, isolation),
             pessimistic: mode == PESSIMISTIC,
             start_ts,
             created,
             start_schema: None,
+            _ts_guard: ts_guard,
         }
     }
 
@@ -220,16 +231,16 @@ mod tests {
     fn statement_read_ts() {
         assert_eq!(stmt_ts(None), StmtTs::Activate);
         let now = Instant::now();
-        let rr = PocTxn::new("PESSIMISTIC", "REPEATABLE-READ", 100, now);
+        let rr = PocTxn::new("PESSIMISTIC", "REPEATABLE-READ", 100, now, None);
         assert_eq!(rr.rule(), ReadTsRule::StartTs);
         for _ in 0..3 {
             assert_eq!(stmt_ts(Some(&rr)), StmtTs::Start(100));
         }
-        let rc = PocTxn::new("PESSIMISTIC", "READ-COMMITTED", 100, now);
+        let rc = PocTxn::new("PESSIMISTIC", "READ-COMMITTED", 100, now, None);
         for _ in 0..3 {
             assert_eq!(stmt_ts(Some(&rc)), StmtTs::NewTso);
         }
-        let optimistic_rc = PocTxn::new("OPTIMISTIC", "READ-COMMITTED", 100, now);
+        let optimistic_rc = PocTxn::new("OPTIMISTIC", "READ-COMMITTED", 100, now, None);
         assert_eq!(stmt_ts(Some(&optimistic_rc)), StmtTs::Start(100));
     }
 
@@ -237,7 +248,7 @@ mod tests {
     /// start ts; a statement at another ts (read committed) neither uses nor replaces it.
     #[test]
     fn start_schema_is_cached_for_the_start_ts() {
-        let mut t = PocTxn::new("PESSIMISTIC", "READ-COMMITTED", 100, Instant::now());
+        let mut t = PocTxn::new("PESSIMISTIC", "READ-COMMITTED", 100, Instant::now(), None);
         assert!(t.schema_at(100).is_none());
         let s7 = Arc::new(InfoSchema::new(7, vec![]));
         let s8 = Arc::new(InfoSchema::new(8, vec![]));

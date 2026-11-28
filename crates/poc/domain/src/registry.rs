@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use tidb_meta::InfoSchema;
 
+use crate::min_start_ts::MinStartTsTracker;
 use crate::schema_validator::CheckResult;
 use crate::schema_validator::SchemaCheckError;
 use crate::schema_validator::SchemaCheckRetry;
@@ -237,6 +238,7 @@ pub struct SyncStats {
 pub struct Registry {
     limits: Limits,
     state: Mutex<State>,
+    min_start_ts: Arc<MinStartTsTracker>,
     invalidated: AtomicU64,
     admitted: AtomicU64,
     counters: Mutex<SyncStats>,
@@ -365,10 +367,16 @@ impl Registry {
                 ported_reload_failed: false,
                 new_stack_paused: false,
             }),
+            min_start_ts: MinStartTsTracker::new(),
             invalidated: AtomicU64::new(0),
             admitted: AtomicU64::new(0),
             counters: Mutex::default(),
         })
+    }
+
+    /// Active `start_ts` tracker reported to `/tidb/server/minstartts/<ddl_id>`.
+    pub fn min_start_ts_tracker(&self) -> &Arc<MinStartTsTracker> {
+        &self.min_start_ts
     }
 
     fn lock(&self) -> parking_lot::MutexGuard<'_, State> {

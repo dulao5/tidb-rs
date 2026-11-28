@@ -127,7 +127,9 @@ fn tsv(rows: &[Vec<Value>]) -> String {
 }
 
 struct Env {
+    pd: String,
     port: String,
+    kv: KvClient,
     factory: Factory,
     sync: SchemaSync,
 }
@@ -172,6 +174,10 @@ impl Env {
 /// `None` (test skipped) unless the cluster is configured. `listening_port` only has to be
 /// unique among the cluster's TiDB servers (nothing listens on it).
 async fn setup(listening_port: u32) -> Option<Env> {
+    setup_with(listening_port, |_| {}).await
+}
+
+async fn setup_with(listening_port: u32, customize: impl FnOnce(&mut SyncConfig)) -> Option<Env> {
     let (Ok(pd), Ok(port)) = (
         std::env::var("TIDB_RS_PD"),
         std::env::var("TIDB_RS_TIDB_PORT"),
@@ -199,17 +205,18 @@ async fn setup(listening_port: u32) -> Option<Env> {
         ..DagContext::select_utc()
     };
     let info = ServerInfo::new("127.0.0.1".to_owned(), listening_port, 0);
-    let mut cfg = SyncConfig::new(vec![pd], info, dag.clone());
+    let mut cfg = SyncConfig::new(vec![pd.clone()], info, dag.clone());
     // A short schema lease keeps the stuck-loop test short (the default is Go's 45 s).
     cfg.limits.schema_lease = Duration::from_secs(5);
     cfg.limits.max_staleness = Duration::from_secs(5);
+    customize(&mut cfg);
     let sync = SchemaSync::start(kv.clone(), cfg).await.unwrap();
     assert!(
         sync.wait_admissible(Duration::from_secs(15)).await,
         "synced mode not reached"
     );
     let factory = Factory::new(Shared {
-        kv,
+        kv: kv.clone(),
         schema,
         dag,
         sync: Some(sync.clone()),
@@ -220,7 +227,9 @@ async fn setup(listening_port: u32) -> Option<Env> {
         privileges: None,
     });
     Some(Env {
+        pd,
         port,
+        kv,
         factory,
         sync,
     })
@@ -418,5 +427,403 @@ async fn mdl_off_waits_for_older_statements() {
     let mut s2 = env.session().await;
     env.same(&mut s2, "SELECT * FROM b").await;
     drop(_restore);
+    env.stop().await;
+}
+
+async fn etcd_get_u64_with_lease(etcd: &mut etcd_client::Client, key: &str) -> Option<(u64, i64)> {
+    let resp = etcd.get(key, None).await.unwrap();
+    let kv = resp.kvs().first()?;
+    let val = std::str::from_utf8(kv.value())
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    Some((val, kv.lease()))
+}
+
+async fn wait_next_physical_ts(kv: &KvClient, base_ts: u64) -> u64 {
+    let base_ms = base_ts >> 18;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let ts = kv.current_ts().await.unwrap();
+        if (ts >> 18) > base_ms {
+            return ts;
+        }
+        assert!(Instant::now() < deadline, "PD physical TS did not advance");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+struct RestoreSavedSafePoint {
+    pd: String,
+    prev: Option<String>,
+}
+
+impl Drop for RestoreSavedSafePoint {
+    fn drop(&mut self) {
+        let pd = self.pd.clone();
+        let prev = self.prev.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tokio::task::block_in_place(|| {
+                handle.block_on(async move {
+                    if let Ok(mut etcd) = etcd_client::Client::connect([pd], None).await {
+                        match prev {
+                            Some(v) => {
+                                let _ = etcd
+                                    .put(poc_domain::keys::GC_SAVED_SAFE_POINT, v, None)
+                                    .await;
+                            }
+                            None => {
+                                let _ = etcd
+                                    .delete(poc_domain::keys::GC_SAVED_SAFE_POINT, None)
+                                    .await;
+                            }
+                        }
+                    }
+                });
+            });
+        }
+    }
+}
+
+struct RestoreGcTidbVars {
+    port: String,
+    rows: Vec<(String, Option<String>)>,
+}
+
+impl Drop for RestoreGcTidbVars {
+    fn drop(&mut self) {
+        for (name, prev) in &self.rows {
+            match prev {
+                Some(v) => {
+                    let escaped = v.replace('\'', "''");
+                    go_sql(
+                        &self.port,
+                        &format!(
+                            "UPDATE mysql.tidb SET variable_value = '{escaped}' WHERE variable_name = '{name}'"
+                        ),
+                    );
+                }
+                None => {
+                    go_sql(
+                        &self.port,
+                        &format!("DELETE FROM mysql.tidb WHERE variable_name = '{name}'"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `/tidb/server/minstartts/<ddl_id>` lifecycle on a real cluster:
+/// - populated immediately upon `register()` with the registration etcd lease;
+/// - pinned to the open read-only transaction's `start_ts` across `BEGIN` and lazy `autocommit=0`
+///   reads (verified both via periodic background tick and `report_min_start_ts_now`);
+/// - advances once the transaction ends (`COMMIT`, `ROLLBACK`, `COM_RESET_CONNECTION`, `Session` drop);
+/// - deleted from etcd on `SchemaSync::shutdown()`.
+#[tokio::test(flavor = "multi_thread")]
+async fn min_start_ts_etcd_lease_and_transactions_lifecycle() {
+    let _serial = SERIAL.lock().await;
+    let Some(env) = setup_with(39_105, |cfg| {
+        cfg.min_start_ts_interval = Duration::from_millis(200);
+    })
+    .await
+    else {
+        return;
+    };
+    let mut etcd = etcd_client::Client::connect([env.pd.clone()], None)
+        .await
+        .unwrap();
+    let ddl_id = env.sync.ddl_id().to_owned();
+    let min_key = poc_domain::keys::min_start_ts(&ddl_id);
+
+    // Immediately populated with the same lease as server info.
+    let (_, info_lease) = {
+        let resp = etcd
+            .get(
+                format!("{}{ddl_id}", poc_domain::keys::SERVER_INFO_PREFIX),
+                None,
+            )
+            .await
+            .unwrap();
+        let kv = resp.kvs().first().expect("server info key missing");
+        (kv.value().to_vec(), kv.lease())
+    };
+    let (initial_ts, min_lease) = etcd_get_u64_with_lease(&mut etcd, &min_key)
+        .await
+        .expect("minstartts key missing immediately after registration");
+    assert_ne!(min_lease, 0);
+    assert_eq!(min_lease, info_lease);
+    assert!(initial_ts > 0);
+
+    let mut s = env.session().await;
+
+    // 1. BEGIN pins minstartts via the periodic background tick and advances on COMMIT.
+    s.query("BEGIN").await.unwrap();
+    s.command_done(Duration::ZERO, Duration::ZERO);
+    let begin_ts = s.txn_timestamp();
+    assert_ne!(begin_ts, 0);
+
+    let newer_ts = wait_next_physical_ts(&env.kv, begin_ts).await;
+    assert!(newer_ts > begin_ts);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some((reported, lease)) = etcd_get_u64_with_lease(&mut etcd, &min_key).await
+            && reported == begin_ts
+        {
+            assert_eq!(lease, info_lease);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "periodic tick did not report begin_ts"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    s.query("COMMIT").await.unwrap();
+    s.command_done(Duration::ZERO, Duration::ZERO);
+    let post_commit = env.sync.report_min_start_ts_now().await.unwrap().unwrap();
+    assert!(
+        post_commit > begin_ts,
+        "post_commit={post_commit} <= {begin_ts}"
+    );
+    assert_eq!(
+        etcd_get_u64_with_lease(&mut etcd, &min_key)
+            .await
+            .unwrap()
+            .0,
+        post_commit
+    );
+
+    // 2. autocommit = 0 does not activate a transaction on SET, only on first read; ROLLBACK releases.
+    s.query("SET autocommit = 0").await.unwrap();
+    s.command_done(Duration::ZERO, Duration::ZERO);
+    assert_eq!(s.txn_timestamp(), 0);
+    s.query("SELECT * FROM a WHERE id = 1").await.unwrap();
+    s.command_done(Duration::ZERO, Duration::ZERO);
+    let lazy_ts = s.txn_timestamp();
+    assert_ne!(lazy_ts, 0);
+    wait_next_physical_ts(&env.kv, lazy_ts).await;
+    assert_eq!(
+        env.sync.report_min_start_ts_now().await.unwrap().unwrap(),
+        lazy_ts
+    );
+    s.query("ROLLBACK").await.unwrap();
+    s.command_done(Duration::ZERO, Duration::ZERO);
+    assert!(
+        env.sync.report_min_start_ts_now().await.unwrap().unwrap() > lazy_ts,
+        "ROLLBACK must release minstartts guard"
+    );
+
+    // 3. COM_RESET_CONNECTION releases an open transaction's minstartts guard.
+    s.query("BEGIN").await.unwrap();
+    s.command_done(Duration::ZERO, Duration::ZERO);
+    let reset_ts = s.txn_timestamp();
+    wait_next_physical_ts(&env.kv, reset_ts).await;
+    assert_eq!(
+        env.sync.report_min_start_ts_now().await.unwrap().unwrap(),
+        reset_ts
+    );
+    s.reset_connection().await.unwrap();
+    assert!(
+        env.sync.report_min_start_ts_now().await.unwrap().unwrap() > reset_ts,
+        "COM_RESET_CONNECTION must release minstartts guard"
+    );
+
+    // 4. Session drop releases an open transaction's minstartts guard.
+    let mut s2 = env.session().await;
+    s2.query("BEGIN").await.unwrap();
+    s2.command_done(Duration::ZERO, Duration::ZERO);
+    let drop_ts = s2.txn_timestamp();
+    wait_next_physical_ts(&env.kv, drop_ts).await;
+    assert_eq!(
+        env.sync.report_min_start_ts_now().await.unwrap().unwrap(),
+        drop_ts
+    );
+    drop(s2);
+    assert!(
+        env.sync.report_min_start_ts_now().await.unwrap().unwrap() > drop_ts,
+        "Session drop must release minstartts guard"
+    );
+
+    // 5. Shutdown revokes the lease and removes /tidb/server/minstartts/<ddl_id>.
+    env.stop().await;
+    assert!(etcd_get_u64_with_lease(&mut etcd, &min_key).await.is_none());
+}
+
+/// Safe point `CheckVisibility` parity (`9006` `ErrGCTooEarly`) against a real cluster:
+/// - `KvClient::connect` loads `/tidb/store/gcworker/saved_safe_point` from etcd;
+/// - reads inside an open transaction whose `start_ts` is older than the safe point fail with
+///   exact MySQL error `9006` (`HY000`) and Go's exact timestamp message on BOTH point gets
+///   (`KvSnapshot::get`) and table scans (`ClientRustStore::check_visibility`), plus the ported
+///   store driver (`TikvStore`).
+#[tokio::test(flavor = "multi_thread")]
+async fn gc_safe_point_check_visibility_9006() {
+    let _serial = SERIAL.lock().await;
+    let Some(env) = setup(39_106).await else {
+        return;
+    };
+    let mut etcd = etcd_client::Client::connect([env.pd.clone()], None)
+        .await
+        .unwrap();
+    let prev_sp = etcd
+        .get(poc_domain::keys::GC_SAVED_SAFE_POINT, None)
+        .await
+        .unwrap()
+        .kvs()
+        .first()
+        .map(|kv| String::from_utf8_lossy(kv.value()).into_owned());
+    let _restore = RestoreSavedSafePoint {
+        pd: env.pd.clone(),
+        prev: prev_sp,
+    };
+
+    let mut s = env.session().await;
+    s.query("BEGIN").await.unwrap();
+    s.command_done(Duration::ZERO, Duration::ZERO);
+    let txn_ts = s.txn_timestamp();
+    assert_ne!(txn_ts, 0);
+
+    // Advance cluster safe point in etcd past `txn_ts`, then verify a fresh `KvClient::connect`
+    // picks it up immediately from etcd AND update the existing `env.kv` cache deterministically.
+    let sp = wait_next_physical_ts(&env.kv, txn_ts).await;
+    assert!(sp > txn_ts);
+    etcd.put(poc_domain::keys::GC_SAVED_SAFE_POINT, sp.to_string(), None)
+        .await
+        .unwrap();
+    let kv2 = KvClient::connect(vec![env.pd.clone()]).await.unwrap();
+    assert_eq!(kv2.safe_point_cache().safe_point(), sp);
+
+    // Also test the ported store driver (`TikvStore::get_snapshot`) shares `safe_point_cache`.
+    let drv = kv2.store_driver().unwrap();
+    let drv_snap = drv.get_snapshot(tidb_kv::version::new_version(txn_ts));
+    let drv_key = tidb_distsql::row_key(1, 1);
+    let drv_err = drv_snap
+        .get(&tidb_kv::Context::background(), &tidb_kv::Key(drv_key), &[])
+        .await
+        .unwrap_err();
+    assert_eq!(drv_err.code(), 9006, "{drv_err}");
+
+    env.kv.safe_point_cache().update(sp, Instant::now());
+    let want_msg = format!(
+        "GC life time is shorter than transaction duration, transaction starts at {}, GC safe point is {}",
+        tidb_store::driver::safepoint::oracle_ts_to_go_time_string(txn_ts),
+        tidb_store::driver::safepoint::oracle_ts_to_go_time_string(sp),
+    );
+
+    // Point get path (`KvSnapshot::get`) -> exact 9006.
+    let err_point = s.query("SELECT v FROM a WHERE id = 1").await.unwrap_err();
+    s.command_done(Duration::ZERO, Duration::ZERO);
+    assert_eq!(
+        (err_point.code, err_point.state, err_point.message.as_str()),
+        (9006, "HY000", want_msg.as_str()),
+        "{err_point:?}"
+    );
+
+    // Table scan / coprocessor path (`ClientRustStore::check_visibility`) -> exact 9006.
+    let err_scan = s.query("SELECT * FROM a ORDER BY id").await.unwrap_err();
+    s.command_done(Duration::ZERO, Duration::ZERO);
+    assert_eq!(
+        (err_scan.code, err_scan.state, err_scan.message.as_str()),
+        (9006, "HY000", want_msg.as_str()),
+        "{err_scan:?}"
+    );
+
+    // Committing restores normal reads at newer TSO / MaxTS.
+    s.query("COMMIT").await.unwrap();
+    s.command_done(Duration::ZERO, Duration::ZERO);
+    env.same(&mut s, "SELECT v FROM a WHERE id = 1").await;
+    env.same(&mut s, "SELECT count(*) FROM a").await;
+
+    drop(_restore);
+    env.stop().await;
+}
+
+/// Real Go TiDB GC worker reads `/tidb/server/minstartts/<ddl_id>` and clamps
+/// `/tidb/store/gcworker/saved_safe_point` to `<= min_start_ts - 1` when GC runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn go_gc_worker_respects_minstartts_holdback() {
+    let _serial = SERIAL.lock().await;
+    let Some(env) = setup(39_107).await else {
+        return;
+    };
+    let mut etcd = etcd_client::Client::connect([env.pd.clone()], None)
+        .await
+        .unwrap();
+    let prev_sp = etcd
+        .get(poc_domain::keys::GC_SAVED_SAFE_POINT, None)
+        .await
+        .unwrap()
+        .kvs()
+        .first()
+        .map(|kv| String::from_utf8_lossy(kv.value()).into_owned());
+    let _restore_sp = RestoreSavedSafePoint {
+        pd: env.pd.clone(),
+        prev: prev_sp.clone(),
+    };
+
+    // Snapshot & save existing mysql.tidb GC entries, then trigger Go's GC worker on its next
+    // 1-minute tick (`gcWorkerTickInterval`). Note Go clamps `tikv_gc_life_time >= 10m`, so we
+    // register an active guard 15 minutes in the past (well within 24h `tidb_gc_max_wait_time`)
+    // and verify Go's GC worker clamps `saved_safe_point <= old_ts - 1`.
+    let var_names = [
+        "tikv_gc_run_interval",
+        "tikv_gc_last_run_time",
+        "tikv_gc_safe_point",
+    ];
+    let mut saved_vars = Vec::new();
+    for name in var_names {
+        let out = go_sql(
+            &env.port,
+            &format!("SELECT variable_value FROM mysql.tidb WHERE variable_name = '{name}'"),
+        );
+        let val = out.lines().next().map(str::to_owned);
+        saved_vars.push((name.to_owned(), val));
+    }
+    let _restore_vars = RestoreGcTidbVars {
+        port: env.port.clone(),
+        rows: saved_vars,
+    };
+
+    let now_ts = env.kv.current_ts().await.unwrap();
+    let fifteen_mins_ms = 15_u64 * 60 * 1_000;
+    let old_ms = (now_ts >> 18).saturating_sub(fifteen_mins_ms);
+    let old_ts = old_ms << 18;
+    let guard = env.sync.min_start_ts_tracker().register(old_ts).unwrap();
+    assert_eq!(
+        env.sync.report_min_start_ts_now().await.unwrap().unwrap(),
+        old_ts
+    );
+
+    go_sql(
+        &env.port,
+        "INSERT INTO mysql.tidb (variable_name, variable_value) VALUES \
+         ('tikv_gc_run_interval', '1s'), \
+         ('tikv_gc_last_run_time', '20000101-00:00:00 +0000'), \
+         ('tikv_gc_safe_point', '20000101-00:00:00 +0000') \
+         ON DUPLICATE KEY UPDATE variable_value = VALUES(variable_value)",
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(75);
+    let observed_sp = loop {
+        if let Some((sp, _)) =
+            etcd_get_u64_with_lease(&mut etcd, poc_domain::keys::GC_SAVED_SAFE_POINT).await
+            && Some(sp.to_string()) != prev_sp
+            && sp > 0
+        {
+            break sp;
+        }
+        if Instant::now() >= deadline {
+            panic!("Go GC worker did not publish saved_safe_point within 75s");
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    let max_allowed = old_ts.saturating_sub(1);
+    assert!(
+        observed_sp <= max_allowed,
+        "Go GC worker advanced saved_safe_point={observed_sp} past minstartts-1={max_allowed}"
+    );
+    drop(guard);
+    env.sync.report_min_start_ts_now().await.unwrap();
     env.stop().await;
 }

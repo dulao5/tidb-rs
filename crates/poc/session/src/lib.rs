@@ -38,6 +38,7 @@ use std::time::Instant;
 use poc_domain::Admission;
 use poc_domain::ResultCheck;
 use poc_domain::SchemaSync;
+use poc_domain::StartTsGuard;
 use poc_domain::StmtGuard;
 use poc_executor::ExecContext;
 use poc_kv::KvClient;
@@ -285,6 +286,12 @@ impl SessionFactory for Factory {
                     .clone()
                     .unwrap_or_else(|| Arc::new(tidb_systable::sysvar_cache::SysVarCache::new())),
             ));
+            new.set_min_start_ts_tracker(
+                self.shared
+                    .sync
+                    .as_ref()
+                    .map(|s| Arc::clone(s.min_start_ts_tracker())),
+            );
             if let Some(pm) = privilege_manager {
                 let ns = router::NewStack::session_mut(&mut *new);
                 ns.vars_mut().user = Some(tidb_parser::auth::UserIdentity {
@@ -475,8 +482,30 @@ fn count_expensive(plan: &tidb_sql::Plan) {
     }
 }
 
-fn kv_error(e: impl std::fmt::Display) -> SqlError {
-    SqlError::unknown(e.to_string())
+trait KvSqlError {
+    fn into_sql_error(self) -> SqlError;
+}
+
+impl KvSqlError for poc_kv::Error {
+    fn into_sql_error(self) -> SqlError {
+        match self.as_tidb_error() {
+            Some(err) => SqlError::from_tidb_error(err),
+            None => SqlError::unknown(self.to_string()),
+        }
+    }
+}
+
+impl KvSqlError for tidb_meta::Error {
+    fn into_sql_error(self) -> SqlError {
+        match self.as_kv_error().and_then(poc_kv::Error::as_tidb_error) {
+            Some(err) => SqlError::from_tidb_error(err),
+            None => SqlError::unknown(self.to_string()),
+        }
+    }
+}
+
+fn kv_error(e: impl KvSqlError) -> SqlError {
+    e.into_sql_error()
 }
 
 /// The read ts of a statement the prototype reads at ([`Session::read_at`]).
@@ -723,10 +752,18 @@ impl Session {
         Ok(self.begin_read().await?.1)
     }
 
+    fn track_start_ts(&self, start_ts: u64) -> Option<StartTsGuard> {
+        self.shared
+            .sync
+            .as_ref()
+            .and_then(|s| s.min_start_ts_tracker().register(start_ts))
+    }
+
     /// A start timestamp and the schema visible at it.
     async fn begin_read(&mut self) -> Result<(u64, Arc<InfoSchema>), SqlError> {
         let ts = self.shared.kv.current_ts().await.map_err(kv_error)?;
         self.timer.mark(Phase::Tso);
+        let _ts_guard = self.track_start_ts(ts);
         let is = self
             .shared
             .schema
@@ -878,9 +915,10 @@ impl Session {
 
     /// A SELECT that reads a table in a transaction (D05.4 spec §6.4): at the transaction's
     /// read ts ([`txn::stmt_ts`]), with the schema visible at that ts and not the synced one;
-    /// no metadata-lock entry and no minstartts (spec §6.5, items 1-2; #549). Without a
-    /// transaction (`autocommit = 0`) the statement starts one with the TSO it takes, once it
-    /// has read: a statement that fails does not leave a transaction (spec §6.5, item 4).
+    /// no metadata-lock entry (#549), while its `start_ts` is registered in `MinStartTsTracker`
+    /// for `/tidb/server/minstartts/<ddl_id>` reporting (#550). Without a transaction
+    /// (`autocommit = 0`) the statement starts one with the TSO it takes, once it has read: a
+    /// statement that fails does not leave a transaction (spec §6.5, item 4).
     // glue: the read ts of GetStmtReadTS / ActivateTxn (D05.4 spec §6.1) on the prototype's read
     async fn txn_read(
         &mut self,
@@ -890,12 +928,13 @@ impl Session {
         // `TxnCtx.CreateTime` of a lazy transaction: the context the statement entered.
         let created = Instant::now();
         let stmt_ts = txn::stmt_ts(self.txn.as_ref());
-        let read_ts = match stmt_ts {
-            StmtTs::Start(ts) => ts,
+        let (read_ts, mut stmt_guard) = match stmt_ts {
+            StmtTs::Start(ts) => (ts, None),
             StmtTs::Activate | StmtTs::NewTso => {
                 let ts = TsFuture::request(&self.shared.kv).wait().await?;
                 self.timer.mark(Phase::Tso);
-                ts
+                let g = self.track_start_ts(ts);
+                (ts, g)
             }
         };
         let known = self.txn.as_ref().and_then(|t| t.schema_at(read_ts));
@@ -906,11 +945,18 @@ impl Session {
             let vars = self.default_session()?.vars();
             let mode = txn::lazy_txn_mode(&vars.txn_mode);
             let isolation = vars.isolation_level_for_new_txn();
-            self.txn = Some(PocTxn::new(mode, &isolation, read_ts, created));
+            self.txn = Some(PocTxn::new(
+                mode,
+                &isolation,
+                read_ts,
+                created,
+                stmt_guard.take(),
+            ));
         }
         if let Some(t) = &mut self.txn {
             t.read_with(read_ts, &is);
         }
+        drop(stmt_guard);
         Ok((plan, rows))
     }
 
@@ -932,7 +978,8 @@ impl Session {
         // `EnterNewTxn` rolls back).
         let start_ts = TsFuture::request(&self.shared.kv).wait().await?;
         self.timer.mark(Phase::Tso);
-        self.txn = Some(PocTxn::new(&mode, &isolation, start_ts, created));
+        let ts_guard = self.track_start_ts(start_ts);
+        self.txn = Some(PocTxn::new(&mode, &isolation, start_ts, created, ts_guard));
         Ok(())
     }
 
@@ -1033,13 +1080,14 @@ impl Session {
         guard.set_tables(vec![plan.table.id]);
         self.timer.set_kind(Kind::of(&plan));
         self.timer.mark(Phase::Plan);
-        let (mut snapshot, start_ts) = if max_ts_point_get(&plan) {
-            (self.shared.kv.latest_snapshot(), None)
+        let (mut snapshot, start_ts, _ts_guard) = if max_ts_point_get(&plan) {
+            (self.shared.kv.latest_snapshot(), None, None)
         } else {
             let start_ts = TsFuture::request(&self.shared.kv).wait().await?;
             self.stmt.took_ts = true;
             self.timer.mark(Phase::Tso);
-            (self.shared.kv.snapshot(start_ts), Some(start_ts))
+            let ts_guard = self.track_start_ts(start_ts);
+            (self.shared.kv.snapshot(start_ts), Some(start_ts), ts_guard)
         };
         let cx = ExecContext {
             dag: self.shared.dag.clone(),
@@ -1089,7 +1137,11 @@ impl Session {
             let rows = self.read_source(&plan, &is, start_ts).await?;
             return Ok((plan, rows, is));
         }
-        match self.optimistic_read(sel, params, ts).await? {
+        let mut stmt_guard = None;
+        match self
+            .optimistic_read(sel, params, ts, &mut stmt_guard)
+            .await?
+        {
             Ok(done) => Ok(done),
             Err((start_ts, raw)) => self.checked_read(sel, params, start_ts, raw).await,
         }
@@ -1136,6 +1188,7 @@ impl Session {
         sel: &Select,
         params: &[Literal],
         ts: ReadTs,
+        stmt_guard: &mut Option<StartTsGuard>,
     ) -> Result<
         Result<
             (
@@ -1153,7 +1206,11 @@ impl Session {
             .candidate()
             .and_then(|is| self.plan(sel, &is, params).ok().map(|plan| (is, plan)));
         self.timer.mark(Phase::Plan);
+        let track = matches!(ts, ReadTs::Future(_));
         let start_ts = self.wait_read_ts(ts).await?;
+        if track {
+            *stmt_guard = self.track_start_ts(start_ts);
+        }
         // No cached schema yet, or planning failed with it (it may not be the right one):
         // take the checked path, which reports genuine planning errors.
         let Some((is, plan)) = planned else {
@@ -2985,5 +3042,39 @@ mod fence_tests {
         let stmt4 = tidb_sql::parse_and_lower_with(r#"SELECT "abc""#, &opts(&s)).unwrap();
         let err = eval_const_select(&mut s, &stmt4).unwrap_err();
         assert_eq!(err.code, 1054, "{}", err.message);
+    }
+
+    #[test]
+    fn kv_error_preserves_9006_and_9001_across_kv_and_meta() {
+        let cache = poc_kv::SafePointCache::new();
+        let sp = (1_700_000_060_000_u64 << 18) + 1;
+        cache.update(sp, Instant::now());
+        let e_9006 = cache.check_visibility(sp - 10).unwrap_err();
+
+        let from_kv = kv_error(poc_kv::Error::SafePoint(Box::new(e_9006.clone())));
+        assert_eq!(from_kv.code, 9006);
+        assert_eq!(from_kv.state, "HY000");
+        assert!(from_kv.source_err.is_some());
+
+        let from_meta = kv_error(tidb_meta::Error::Kv(poc_kv::Error::Copr(e_9006.clone())));
+        assert_eq!(from_meta.code, 9006);
+        assert_eq!(from_meta.state, "HY000");
+
+        let shared_meta = kv_error(tidb_meta::Error::Shared(Arc::new(tidb_meta::Error::Kv(
+            poc_kv::Error::Driver(Box::new(e_9006)),
+        ))));
+        assert_eq!(shared_meta.code, 9006);
+        assert_eq!(shared_meta.state, "HY000");
+
+        let stale = poc_kv::SafePointCache::new();
+        stale.update(10, Instant::now() - Duration::from_secs(100));
+        let e_9001 = stale.check_visibility(20).unwrap_err();
+        let timeout = kv_error(poc_kv::Error::SafePoint(Box::new(e_9001)));
+        assert_eq!(timeout.code, 9001);
+        assert_eq!(timeout.state, "HY000");
+        assert_eq!(
+            timeout.message,
+            "PD server timeout: start timestamp may fall behind safe point"
+        );
     }
 }

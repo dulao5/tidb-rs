@@ -63,6 +63,17 @@ impl SqlError {
         self
     }
 
+    /// Builds a [`SqlError`] from a [`tidb_base::Error`], preserving registered MySQL error
+    /// codes (`terror::to_sql_error`, e.g. `9001` / `9006`) and attaching `source_err`.
+    pub fn from_tidb_error(e: &tidb_base::Error) -> Self {
+        if e.is_normalized() {
+            let m = tidb_base::terror::to_sql_error(e);
+            return Self::new(m.code, String::from_utf8_lossy(&m.message).into_owned())
+                .with_source_err(e.clone());
+        }
+        Self::unknown(String::from_utf8_lossy(&e.error()).into_owned()).with_source_err(e.clone())
+    }
+
     /// Error 1105, used for errors without a specific code (e.g. TiDB's `ErrMalformPacket`).
     pub fn unknown(message: impl Into<String>) -> Self {
         Self::new(code::ER_UNKNOWN, message)

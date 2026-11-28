@@ -17,6 +17,8 @@ use tikv_client::{
     Backoff, CopSender, Timestamp, TimestampExt, TransactionClient, TransactionOptions,
 };
 
+use crate::driver::safepoint::SafePointCache;
+
 use super::tikv::{
     Backoffer, ClientHelper, KeyLocation, RPCContext, RegionVerID, TiKVRegionCache, TiKVStore,
     Variables,
@@ -94,11 +96,22 @@ pub struct ClientRustStore {
     client: Arc<TransactionClient>,
     /// The sender used for region-cache calls (any timestamp: they do not read data).
     cache_sender: CopSender,
+    /// Shared GC safe point cache checked before returning coprocessor responses.
+    safe_point: Arc<SafePointCache>,
 }
 
 impl ClientRustStore {
     // glue: constructs the boundary over a client-rust TransactionClient
     pub fn new(client: Arc<TransactionClient>) -> Result<ClientRustStore, Error> {
+        Self::with_safe_point(client, Arc::new(SafePointCache::new()))
+    }
+
+    /// Constructs the boundary sharing an externally updated [`SafePointCache`].
+    // glue: constructs the boundary with a shared safe point cache
+    pub fn with_safe_point(
+        client: Arc<TransactionClient>,
+        safe_point: Arc<SafePointCache>,
+    ) -> Result<ClientRustStore, Error> {
         let cache_sender = client
             .snapshot(
                 Timestamp::from_version(0),
@@ -109,6 +122,7 @@ impl ClientRustStore {
         Ok(ClientRustStore {
             client,
             cache_sender,
+            safe_point,
         })
     }
 }
@@ -223,11 +237,9 @@ impl TiKVStore for ClientRustStore {
         ClientRustBackoffer(Backoff::time_budget(ms).start())
     }
 
-    /// Boundary stub: client-rust has no GC safe-point cache yet, so a read below the safe
-    /// point does not fail with `ErrGCTooEarly` (client-go parity table §4, `CheckVisibility`
-    /// row, P1).
-    // glue: stub, blocked-by:client-rust GC safe point (client-go-parity.md §4 CheckVisibility)
-    fn check_visibility(&self, _start_ts: u64) -> Result<(), Error> {
-        Ok(())
+    /// Checks if reading at `start_ts` is visible relative to the cached GC safe point.
+    // go-l3: ADR-0008 client-go tikv KVStore.CheckVisibility
+    fn check_visibility(&self, start_ts: u64) -> Result<(), Error> {
+        self.safe_point.check_visibility(start_ts)
     }
 }

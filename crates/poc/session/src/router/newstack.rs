@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use poc_domain::{MinStartTsTracker, StartTsGuard};
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_mysql_protocol::{
@@ -33,6 +34,7 @@ use tidb_session::{Dialect, Session};
 use tidb_sessionctx::variable::error::ErrUnknownSystemVar;
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 use tidb_sessionctx::variable::variable::ScopeGlobal;
+use tidb_sessiontxn::sctx::{Oracle, TsFuture};
 use tidb_systable::sysvar_cache::SysVarCache;
 
 use super::{BoxFut, NewPrepared, NewStack};
@@ -154,6 +156,42 @@ impl GlobalVarAccessor for ClusterGlobals {
     }
 }
 
+struct TrackedOracle<O = tidb_session::glue::StoreOracle> {
+    inner: O,
+    tracker: Arc<Mutex<Option<Arc<MinStartTsTracker>>>>,
+    guards: Arc<Mutex<Vec<StartTsGuard>>>,
+}
+
+impl<O: Oracle> Oracle for TrackedOracle<O> {
+    fn get_timestamp_async(&self, txn_scope: &str) -> TsFuture {
+        let fut = self.inner.get_timestamp_async(txn_scope);
+        let tracker = Arc::clone(&self.tracker);
+        let guards = Arc::clone(&self.guards);
+        Box::pin(async move {
+            let ts = fut.await?;
+            let maybe_tracker = tracker.lock().clone();
+            if let Some(t) = maybe_tracker
+                && let Some(guard) = t.register(ts)
+            {
+                guards.lock().push(guard);
+            }
+            Ok(ts)
+        })
+    }
+
+    fn get_low_resolution_timestamp_async(&self, txn_scope: &str) -> TsFuture {
+        self.inner.get_low_resolution_timestamp_async(txn_scope)
+    }
+}
+
+struct ClearGuards(Arc<Mutex<Vec<StartTsGuard>>>);
+
+impl Drop for ClearGuards {
+    fn drop(&mut self) {
+        self.0.lock().clear();
+    }
+}
+
 /// The ported stack of one connection.
 pub struct NewSession {
     session: Session,
@@ -164,9 +202,24 @@ pub struct NewSession {
     rs_encoder: Option<ResultEncoder>,
     /// The loader's sysvar cache the session's global variables come from.
     globals: Arc<SysVarCache>,
+    /// Tracker for active autocommit statement `start_ts` values reported to `/tidb/server/minstartts`.
+    ts_tracker: Arc<Mutex<Option<Arc<MinStartTsTracker>>>>,
+    /// Guards registered during the currently executing statement; cleared on exit/drop.
+    ts_guards: Arc<Mutex<Vec<StartTsGuard>>>,
+}
+
+impl Drop for NewSession {
+    fn drop(&mut self) {
+        self.ts_guards.lock().clear();
+    }
 }
 
 impl NewSession {
+    /// Attaches (or clears) the shared [`MinStartTsTracker`] for autocommit reads on this session.
+    pub fn set_min_start_ts_tracker(&mut self, tracker: Option<Arc<MinStartTsTracker>>) {
+        *self.ts_tracker.lock() = tracker;
+    }
+
     /// A new session in the MySQL dialect (the only protocol and front end, ADR 0010), over
     /// the ported store driver when given (without one, the session's store is the
     /// stand-in whose every read is a boundary of the store driver). Its executors start
@@ -187,9 +240,15 @@ impl NewSession {
             tidb_planner::core::plan_cache_instance::register_instance_plan_cache_factory();
             d.init_instance_plan_cache();
         }
+        let ts_tracker = Arc::new(Mutex::new(None));
+        let ts_guards = Arc::new(Mutex::new(Vec::new()));
         let mut session = match store {
             Some(store) => {
-                let oracle = Arc::new(tidb_session::glue::StoreOracle(store.get_oracle()));
+                let oracle = Arc::new(TrackedOracle {
+                    inner: tidb_session::glue::StoreOracle(store.get_oracle()),
+                    tracker: Arc::clone(&ts_tracker),
+                    guards: Arc::clone(&ts_guards),
+                });
                 let globals = Box::new(ClusterGlobals::new(Arc::clone(&globals)));
                 Session::with_store(Dialect::MySQL, globals, store, oracle)
             }
@@ -205,6 +264,8 @@ impl NewSession {
             domain,
             rs_encoder: None,
             globals,
+            ts_tracker,
+            ts_guards,
         }
     }
 }
@@ -250,6 +311,7 @@ impl NewStack for NewSession {
         sql: &'a str,
     ) -> BoxFut<'a, Result<Response, Error>> {
         Box::pin(async move {
+            let _clear = ClearGuards(Arc::clone(&self.ts_guards));
             let rs = self.session.execute_stmt(stmt, sql).await?;
             self.write_result(rs, false).await
         })
@@ -257,6 +319,7 @@ impl NewStack for NewSession {
 
     fn prepare<'a>(&'a mut self, sql: &'a str) -> BoxFut<'a, Result<NewPrepared, Error>> {
         Box::pin(async move {
+            let _clear = ClearGuards(Arc::clone(&self.ts_guards));
             // Go `TiDBContext.Prepare`: the statement, then its columns (ConvertColumnInfo).
             let info = self.session.prepare_stmt(sql).await?;
             let columns: Vec<Info> = info.fields.iter().map(convert_column_info).collect();
@@ -286,6 +349,7 @@ impl NewStack for NewSession {
         raw: &'a RawParams,
     ) -> BoxFut<'a, Result<Response, Error>> {
         Box::pin(async move {
+            let _clear = ClearGuards(Arc::clone(&self.ts_guards));
             // Go `executePreparedStmtAndWriteResult`: parseBinaryParams with the statement's
             // long data and parameter types, then ExecBinaryParam with the type context of
             // the session's current statement context.
@@ -375,5 +439,59 @@ fn column_def(c: Info) -> ColumnDef {
         column_type: ColumnType::from_u8(c.tp).unwrap_or(ColumnType::LongBlob),
         flags: c.flag,
         decimals: c.decimal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+
+    struct FixedOracle(u64);
+
+    impl Oracle for FixedOracle {
+        fn get_timestamp_async(&self, _txn_scope: &str) -> TsFuture {
+            let ts = self.0;
+            Box::pin(async move { Ok(ts) })
+        }
+
+        fn get_low_resolution_timestamp_async(&self, _txn_scope: &str) -> TsFuture {
+            let ts = self.0;
+            Box::pin(async move { Ok(ts) })
+        }
+    }
+
+    #[test]
+    fn tracked_oracle_registers_real_tso_until_clear_and_skips_max_ts() {
+        let tracker = MinStartTsTracker::new();
+        let guards = Arc::new(Mutex::new(Vec::new()));
+        let tso = (1_700_000_000_000_u64 << 18) + 1;
+        let oracle = TrackedOracle {
+            inner: FixedOracle(tso),
+            tracker: Arc::new(Mutex::new(Some(Arc::clone(&tracker)))),
+            guards: Arc::clone(&guards),
+        };
+        {
+            let _clear = ClearGuards(Arc::clone(&guards));
+            let got = block_on(oracle.get_timestamp_async("global")).unwrap();
+            assert_eq!(got, tso);
+            assert_eq!(tracker.active_count(), 1);
+            assert_eq!(tracker.compute(tso + (1000 << 18), 86_400), tso);
+        }
+        assert_eq!(tracker.active_count(), 0);
+
+        let max_oracle = TrackedOracle {
+            inner: FixedOracle(u64::MAX),
+            tracker: Arc::new(Mutex::new(Some(Arc::clone(&tracker)))),
+            guards: Arc::clone(&guards),
+        };
+        {
+            let _clear = ClearGuards(Arc::clone(&guards));
+            assert_eq!(
+                block_on(max_oracle.get_timestamp_async("global")).unwrap(),
+                u64::MAX
+            );
+            assert_eq!(tracker.active_count(), 0);
+        }
     }
 }

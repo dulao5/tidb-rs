@@ -36,6 +36,15 @@ impl Error {
     fn corrupt(what: String, e: serde_json::Error) -> Error {
         Error::Corrupt(format!("{what}: {e}"))
     }
+
+    /// Returns the underlying KV error when this meta error originated from a KV read.
+    pub fn as_kv_error(&self) -> Option<&poc_kv::Error> {
+        match self {
+            Error::Kv(e) => Some(e),
+            Error::Shared(e) => e.as_kv_error(),
+            Error::Corrupt(_) => None,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

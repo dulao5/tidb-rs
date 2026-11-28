@@ -12,10 +12,13 @@
 
 pub mod backoff;
 pub mod error;
+pub mod safepoint;
 pub mod tikv;
 pub mod txn;
 
 use std::sync::Arc;
+
+use safepoint::SafePointCache;
 
 use tidb_base::Error;
 use tidb_kv::kv::{Client, KvFuture, Snapshot, Storage, Transaction, TxnOption};
@@ -51,14 +54,30 @@ impl TikvStore {
     /// (part 2) builds it from a path.
     // glue: stand-in for TiKVDriver.OpenWithOptions (D07.1 part 2)
     pub fn new(client: Arc<TransactionClient>, pool: Option<ExecPool>) -> Result<TikvStore, Error> {
-        let copr = ClientRustStore::new(client.clone())?;
+        Self::new_with_safe_point(client, pool, Arc::new(SafePointCache::new()))
+    }
+
+    /// A store sharing an externally managed [`SafePointCache`] (e.g. fed from PD's etcd).
+    // glue: shares a safe point cache between store driver and coprocessor store
+    pub fn new_with_safe_point(
+        client: Arc<TransactionClient>,
+        pool: Option<ExecPool>,
+        safe_point: Arc<SafePointCache>,
+    ) -> Result<TikvStore, Error> {
+        let copr = ClientRustStore::with_safe_point(client.clone(), safe_point.clone())?;
         Ok(TikvStore {
-            kv_store: KVStore::new(client),
+            kv_store: KVStore::new_with_safe_point(client, safe_point),
             copr_store: Arc::new(new_copr_store(Arc::new(copr), pool, 0)),
             codec: Codec {
                 api_version: kvrpcpb::ApiVersion::V1,
             },
         })
+    }
+
+    /// The shared GC safe point cache of this store.
+    // glue: accessor of the shared SafePointCache
+    pub fn safe_point_cache(&self) -> &Arc<SafePointCache> {
+        self.kv_store.safe_point_cache()
     }
 
     /// Name gets the name of the storage engine

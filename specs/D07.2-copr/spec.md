@@ -106,7 +106,7 @@ Go `make(chan *copResponse, 2 或 18)`；移植用容量相同的 `tokio::sync::
 2. **region bucket**：client-rust 没有 bucket，位置不带 bucket，`UpdateBucketsIfNeeded` 为空操作（对照表 §2，P2）。
 3. **store 的估计等待时间**恒为 0：store batch 不会因 leader 繁忙而退回（`BuildBatchTask` 的 busy 分支）。
 4. **client-go 的请求统计**（`RegionRequestRuntimeStats`、backoff 次数）没有对应：`CopRuntimeStats` 只记录 TiKV 返回的时间 / 扫描明细与被调用地址（地址在 client-rust 中未知，为空）。
-5. **`CheckVisibility`**：client-rust 没有 GC safe point 缓存，恒为可见。这是边界桩（`blocked-by`：client-rust 的 safe point），登记在 [client-go 对等对照表](../D07.1-store/client-go-parity.md) §4 的 `CheckVisibility` 一行（P1，正确性：低于 safe point 的读不报错，可能读到已被 GC 的数据）。
+5. **`CheckVisibility`**：**已实现**（#550）。`ClientRustStore` 持有共享的 `SafePointCache`（`crates/store/src/driver/safepoint.rs`），由 `poc-kv` 后台从 etcd `/tidb/store/gcworker/saved_safe_point` 定期更新（10 s / 错误 1 s）；缓存超过 99 s 返回 `9001` `ErrPDServerTimeout`，`start_ts < safe_point` 返回 `9006` `ErrGCTooEarly`。
 6. **错误转换**：D07.1 的 `derr.ToTiDBErr` 还没有，client-rust 的错误转成带原消息的普通错误。
 7. **锁集合**：client-rust 的锁提示从空开始，不预先放入 `start_ts`（Go `resolvedLocks.Put(req.StartTs)`，只对 pipelined DML 写入的锁有意义，属于写路径）。
 8. **未移植的 `kv.Request` 字段**（D07.0 spec §4 第 3 条）：`CoprRequestRateLimit`（`GetRequestRateLimit` 返回 None）、`ResourceGroupTagger`（N9，D07.0 T8）、`RunawayChecker`（N10）。`ResourceControlContext` 只填组名（N10 未定）。

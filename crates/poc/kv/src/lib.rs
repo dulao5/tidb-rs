@@ -20,10 +20,16 @@
 mod error;
 
 use std::sync::Arc;
+use std::sync::Weak;
 use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 use std::time::Instant;
 
+use etcd_client::{Client as EtcdClient, ConnectOptions};
+pub use tidb_store::SafePointCache;
+use tidb_store::driver::safepoint::{
+    GC_SAFE_POINT_QUICK_REPEAT_INTERVAL, GC_SAFE_POINT_UPDATE_INTERVAL, GC_SAVED_SAFE_POINT,
+};
 use tikv_client::Backoff;
 use tikv_client::BoundRange;
 use tikv_client::RetryOptions;
@@ -113,6 +119,105 @@ pub struct KvClient {
     /// The ExecPool of [`with_exec_pool`](KvClient::with_exec_pool), for the store driver
     /// of the new stack ([`KvClient::store_driver`]).
     pool: Option<tidb_runtime::pool::ExecPool>,
+    /// Shared GC safe point cache refreshed from PD's etcd.
+    safe_point: Arc<SafePointCache>,
+    /// Stops the background safe point checker once all [`KvClient`] clones drop.
+    _safe_point_checker: Option<Arc<SafePointCheckerGuard>>,
+}
+
+struct SafePointCheckerGuard {
+    stop: tokio::sync::watch::Sender<bool>,
+}
+
+impl Drop for SafePointCheckerGuard {
+    fn drop(&mut self) {
+        self.stop.send_replace(true);
+    }
+}
+
+const ETCD_OP_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn connect_etcd(pd_endpoints: &[String]) -> std::result::Result<EtcdClient, String> {
+    EtcdClient::connect(
+        pd_endpoints,
+        Some(
+            ConnectOptions::new()
+                .with_connect_timeout(ETCD_OP_TIMEOUT)
+                .with_keep_alive(Duration::from_secs(10), Duration::from_secs(5)),
+        ),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+async fn load_safe_point_once(etcd: &mut EtcdClient) -> std::result::Result<u64, String> {
+    let resp = tokio::time::timeout(ETCD_OP_TIMEOUT, etcd.get(GC_SAVED_SAFE_POINT, None))
+        .await
+        .map_err(|_| "etcd get saved_safe_point timed out".to_owned())?
+        .map_err(|e| e.to_string())?;
+    let Some(kv) = resp.kvs().first() else {
+        return Ok(0);
+    };
+    let s = std::str::from_utf8(kv.value())
+        .map_err(|e| format!("invalid utf-8 in saved_safe_point: {e}"))?;
+    if s.is_empty() {
+        return Ok(0);
+    }
+    s.parse::<u64>()
+        .map_err(|e| format!("invalid saved_safe_point {s:?}: {e}"))
+}
+
+async fn run_safe_point_checker(
+    pd_endpoints: Vec<String>,
+    mut etcd: Option<EtcdClient>,
+    safe_point: Weak<SafePointCache>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    mut delay: Duration,
+) {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = stop.changed() => break,
+        }
+        if *stop.borrow() {
+            break;
+        }
+        let Some(cache) = safe_point.upgrade() else {
+            break;
+        };
+        let sp_cached_time = Instant::now();
+        if etcd.is_none() {
+            match connect_etcd(&pd_endpoints).await {
+                Ok(cli) => etcd = Some(cli),
+                Err(err_str) => {
+                    tidb_base::log_error!(
+                        "fail to load safepoint from pd",
+                        "error" => err_str.as_str(),
+                    );
+                    delay = GC_SAFE_POINT_QUICK_REPEAT_INTERVAL;
+                    continue;
+                }
+            }
+        }
+        let res = match etcd.as_mut() {
+            Some(cli) => load_safe_point_once(cli).await,
+            None => unreachable!(),
+        };
+        match res {
+            Ok(sp) => {
+                cache.update(sp, sp_cached_time);
+                delay = GC_SAFE_POINT_UPDATE_INTERVAL;
+            }
+            Err(err_str) => {
+                tidb_base::log_error!(
+                    "fail to load safepoint from pd",
+                    "error" => err_str.as_str(),
+                );
+                etcd = None;
+                delay = GC_SAFE_POINT_QUICK_REPEAT_INTERVAL;
+            }
+        }
+    }
 }
 
 /// Reads `TIDB_RS_POINT_GET`: unset or empty means this crate's own reads, `store-driver`
@@ -143,10 +248,13 @@ fn driver_point_gets() -> bool {
 fn copr_store(
     inner: &TransactionClient,
     pool: Option<tidb_runtime::pool::ExecPool>,
+    safe_point: &Arc<SafePointCache>,
 ) -> Result<CoprStore> {
-    let store =
-        tidb_store::copr::client_rust::ClientRustStore::new(std::sync::Arc::new(inner.clone()))
-            .map_err(Error::Copr)?;
+    let store = tidb_store::copr::client_rust::ClientRustStore::with_safe_point(
+        std::sync::Arc::new(inner.clone()),
+        Arc::clone(safe_point),
+    )
+    .map_err(Error::Copr)?;
     Ok(tidb_store::copr::store::new_store(
         std::sync::Arc::new(store),
         pool,
@@ -174,24 +282,80 @@ impl KvClient {
         store_connections: usize,
     ) -> Result<KvClient> {
         let config = tikv_client::Config::default().with_grpc_connection_count(store_connections);
-        let inner = TransactionClient::new_with_config(pd_endpoints, config)
+        let inner = TransactionClient::new_with_config(pd_endpoints.clone(), config)
             .await
             .map_err(Error::from)?;
-        let driver = driver_point_gets()
-            .then(|| tidb_store::driver::tikv::KVStore::new(std::sync::Arc::new(inner.clone())));
-        let copr = std::sync::Arc::new(copr_store(&inner, None)?);
+        let safe_point = Arc::new(SafePointCache::new());
+        let mut etcd = None;
+        let mut initial_ok = false;
+        if !pd_endpoints.is_empty() {
+            match connect_etcd(&pd_endpoints).await {
+                Ok(mut cli) => {
+                    match load_safe_point_once(&mut cli).await {
+                        Ok(sp) => {
+                            safe_point.update(sp, Instant::now());
+                            initial_ok = true;
+                        }
+                        Err(err_str) => {
+                            tidb_base::log_warn!(
+                                "initial GC safe point load failed; retrying in background",
+                                "error" => err_str.as_str(),
+                            );
+                        }
+                    }
+                    etcd = Some(cli);
+                }
+                Err(err_str) => {
+                    tidb_base::log_warn!(
+                        "connecting to PD etcd for safe point failed; retrying in background",
+                        "error" => err_str.as_str(),
+                    );
+                }
+            }
+        }
+        let checker_guard = if !pd_endpoints.is_empty() {
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            let delay = if initial_ok {
+                GC_SAFE_POINT_UPDATE_INTERVAL
+            } else {
+                GC_SAFE_POINT_QUICK_REPEAT_INTERVAL
+            };
+            tokio::spawn(run_safe_point_checker(
+                pd_endpoints,
+                etcd,
+                Arc::downgrade(&safe_point),
+                stop_rx,
+                delay,
+            ));
+            Some(Arc::new(SafePointCheckerGuard { stop: stop_tx }))
+        } else {
+            None
+        };
+        let driver = driver_point_gets().then(|| {
+            tidb_store::driver::tikv::KVStore::new_with_safe_point(
+                std::sync::Arc::new(inner.clone()),
+                Arc::clone(&safe_point),
+            )
+        });
+        let copr = std::sync::Arc::new(copr_store(&inner, None, &safe_point)?);
         Ok(KvClient {
             inner,
             retry: tidb_retry_options(),
             driver,
             copr,
             pool: None,
+            safe_point,
+            _safe_point_checker: checker_guard,
         })
     }
 
     /// Run the coprocessor client's workers on `pool` (M-GO) instead of the current runtime.
     pub fn with_exec_pool(mut self, pool: tidb_runtime::pool::ExecPool) -> Result<KvClient> {
-        self.copr = std::sync::Arc::new(copr_store(&self.inner, Some(pool.clone()))?);
+        self.copr = std::sync::Arc::new(copr_store(
+            &self.inner,
+            Some(pool.clone()),
+            &self.safe_point,
+        )?);
         self.pool = Some(pool);
         Ok(self)
     }
@@ -202,13 +366,19 @@ impl KvClient {
         self.pool.clone()
     }
 
+    /// The shared GC safe point cache refreshed from PD's etcd (for inspection or tests).
+    pub fn safe_point_cache(&self) -> &Arc<SafePointCache> {
+        &self.safe_point
+    }
+
     /// The ported store driver (`tidb_store::driver::TikvStore`, D07.1) over this client's
     /// TiKV connections, for the new stack's sessions (VS1 plan §4.1); its coprocessor
     /// workers run on the same ExecPool.
     pub fn store_driver(&self) -> Result<tidb_store::driver::TikvStore> {
-        tidb_store::driver::TikvStore::new(
+        tidb_store::driver::TikvStore::new_with_safe_point(
             std::sync::Arc::new(self.inner.clone()),
             self.pool.clone(),
+            Arc::clone(&self.safe_point),
         )
         .map_err(Error::Copr)
     }
@@ -269,6 +439,7 @@ impl KvClient {
                 .as_ref()
                 .map(|kv| tidb_store::driver::txn::snapshot::new_snapshot(kv.get_snapshot(ts))),
             copr: self.copr.clone(),
+            safe_point: Arc::clone(&self.safe_point),
         }
     }
 }
@@ -310,6 +481,7 @@ pub struct KvSnapshot {
     /// The ported store driver's snapshot at the same timestamp (`TIDB_RS_POINT_GET=store-driver`).
     driver: Option<tidb_store::driver::txn::snapshot::TikvSnapshot>,
     copr: std::sync::Arc<CoprStore>,
+    safe_point: Arc<SafePointCache>,
 }
 
 /// Batch size of [`KvSnapshot::scan_all`].
@@ -319,6 +491,12 @@ impl KvSnapshot {
     /// The snapshot timestamp.
     pub fn ts(&self) -> u64 {
         self.ts
+    }
+
+    fn check_visibility(&self) -> Result<()> {
+        self.safe_point
+            .check_visibility(self.ts)
+            .map_err(|e| Error::SafePoint(Box::new(e)))
     }
 
     pub async fn get(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
@@ -331,7 +509,9 @@ impl KvSnapshot {
                 Err(e) => Err(Error::Driver(Box::new(e))),
             };
         }
-        self.inner.get(key).await.map_err(Error::from)
+        let val = self.inner.get(key).await.map_err(Error::from)?;
+        self.check_visibility()?;
+        Ok(val)
     }
 
     /// Values of the keys that exist, in no particular order.
@@ -347,6 +527,7 @@ impl KvSnapshot {
             return Ok(values.into_iter().map(|(k, v)| (k, v.value)).collect());
         }
         let pairs = self.inner.batch_get(keys).await.map_err(Error::from)?;
+        self.check_visibility()?;
         Ok(pairs.map(|p| (p.0.into(), p.1)).collect())
     }
 
@@ -357,6 +538,7 @@ impl KvSnapshot {
             .scan(BoundRange::from(range), limit)
             .await
             .map_err(Error::from)?;
+        self.check_visibility()?;
         Ok(pairs.map(|p| (p.0.into(), p.1)).collect())
     }
 

@@ -161,7 +161,10 @@ tidb-rs 是只读节点；显式事务里的写语句和加锁读由会话拒绝
    - 读 start ts 的事务（RR 等）用 **start ts 上可见的 schema**。Go 的事务 InfoSchema 是初始化时 domain 最新的（`pkg/sessiontxn/isolation/base.go:116`），MDL 开着（默认）时第一次访问一张表还会换成最新的表定义（`pkg/planner/core/preprocess.go:1667-1668`、`:2057-2185`）。所以 `BEGIN` 之后、第一次读这张表之前提交的 DDL：`ADD COLUMN` 在 Go 中可见、原型不可见；列 id 变化 Go 报 8028；表被删除 Go 报 1146，原型仍读旧表。
    - RC 事务每条语句用自己 ts 上的 schema，事务进行中提交的 DDL 对后续语句可见（Go 中这个 DDL 会等到事务结束）。
    临时差异，与新栈的 MDL（#252）一起解决；跟踪 issue #549。
-2. **minstartts**：负责人决定（#550，2026-11-28）按 N11 §4.5 通过已有的 etcd 租约上报 `/tidb/server/minstartts/<id>`，并保留 Go 的 9006 检查（start ts 低于 safe point 时）。由 Nora 在本分支上实现；实现之前，事务长于 GC 保留时间时可能读到 GC 已回收的数据（结果错误，不是 GC 错误）。跟踪 issue #549。
+2. **minstartts**：已按负责人决定（#550，2026-11-28，N11 §4.5）在本分支实现（跟踪 issue #549 中的该项关闭）：
+   - 同步模式（`--schema-sync` 默认开启）通过已有的注册 etcd lease 上报 `/tidb/server/minstartts/<ddl_id>`（注册成功后立即写入，随后每 30 s 更新，遵循 `tidb_gc_max_wait_time` 下界；覆盖开启中的只读事务与原型 / 新栈非 MaxTS 的自动提交读语句），GC worker 计算安全点时会将其计入并留出缓冲（`minstartts - 1`）。
+   - 同时保留 Go 的 `CheckVisibility` 检查（`crates/store/src/driver/safepoint.rs` + `poc-kv` 每 10 s 从 `/tidb/store/gcworker/saved_safe_point` 刷新）：缓存超期（> 99 s）报 `9001`（`ErrPDServerTimeout`），`start_ts < safe_point` 时对点查、批量点查、扫描与 coprocessor 均报 `9006`（`ErrGCTooEarly`）。
+   - 边界：单机模式（`--schema-sync=false`）不建立 etcd 租约，不上报 `/tidb/server/minstartts/<id>`，仅保留 `9006` / `9001` 的 `CheckVisibility` 检查。
 3. **同步模式**：事务内读 schema 版本键（RC 的每条语句、RR 的第一条），meta region 不可用时这些语句会等待；autocommit 语句在同步模式下不读（#136）。
 4. 延迟事务中激活事务的语句在取得 start ts 之后失败（例如读 TiKV 出错）时，Go 保留事务（`base.go:303-305`），原型不保留，下一条语句重新开始事务。
 5. 每个事务的语句数直方图（`tidb_session_transaction_statement_num`）不记录（autocommit 语句也不记录）。
@@ -179,7 +182,7 @@ tidb-rs 是只读节点；显式事务里的写语句和加锁读由会话拒绝
 ### 6.6 需要负责人决定
 
 - `READ ONLY` 与 1792 已由 D8 决定。
-- 6.5 第 2 条（GC 越过长事务的 start ts，结果错误的风险）已由负责人在 #550 决定：上报 minstartts 并保留 9006 检查。
+- 6.5 第 2 条（GC 越过长事务的 start ts，结果错误的风险）已由负责人在 #550 决定并已在本分支实现：同步模式通过 etcd 租约上报 `/tidb/server/minstartts/<ddl_id>`，全路径保留 `9006` / `9001` `CheckVisibility` 检查。
 - 6.5 第 1 条的 RR schema 差异由负责人确认为已知差异，与 #252 关联。
 
 ### 6.7 测试
@@ -191,3 +194,4 @@ tidb-rs 是只读节点；显式事务里的写语句和加锁读由会话拒绝
 - 路由器：事务内写语句（查询与 `PREPARE`）报 1792，逐字比对代码、SQLSTATE 和消息。
 - `crates/metrics`：`commit` / `rollback` / `abort` 与 `txn_mode` 标签、空闲时间的 `in_txn` 标签与 Go 相同。
 - `crates/poc/session/tests/cluster.rs`（需要集群，`TIDB_RS_PD` / `TIDB_RS_TIDB_PORT`）：RR 事务中两条 SELECT 之间 Go 插入的行不出现、RC 出现、`autocommit=0` 同样，事务内写 1792（完整消息），`SERVER_STATUS_IN_TRANS`；`BEGIN` 与 `autocommit=0` 取 start ts 的时机（`BEGIN` 之后、第一次读之前插入的行不可见，`SET autocommit=0` 之后插入的行可见）；事务中途 `COM_RESET_CONNECTION` 之后读不到旧快照、`@@autocommit` 回到全局值。
+- `crates/poc/domain` / `crates/store` / `crates/poc/kv` / `crates/poc/session`：`compute_min_start_ts` 与 `MinStartTsTracker` 守卫生命周期、`SafePointCache::check_visibility`（`9006` / `9001` 与 Go 消息一致）以及错误码透传的单元测试；`crates/poc/session/tests/schema_sync.rs` 中的真实集群集成测试（`BEGIN` / `autocommit=0` 时 `/tidb/server/minstartts/<ddl_id>` 持住长事务 `start_ts` 并在 `COMMIT`/`ROLLBACK`/`COM_RESET_CONNECTION`/`shutdown` 时释放、阻止 GC safe point 越过、以及安全点越过时点查和全表扫描均返回 `9006`）。

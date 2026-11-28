@@ -19,6 +19,10 @@ pub enum Error {
     /// An error of the coprocessor client (`tidb_store::copr`, D07.2): already a TiDB error.
     #[error("{0}")]
     Copr(tidb_base::errors::Error),
+    /// A GC safe point visibility check failed (`9006` `ErrGCTooEarly` or `9001`
+    /// `ErrPDServerTimeout`).
+    #[error("{0}")]
+    SafePoint(Box<tidb_base::Error>),
     /// Any other client error.
     #[error("TiKV client error: {0}")]
     Other(#[source] Box<tikv_client::Error>),
@@ -26,6 +30,18 @@ pub enum Error {
     /// (`TIDB_RS_POINT_GET=store-driver`).
     #[error("{0}")]
     Driver(Box<tidb_base::Error>),
+}
+
+impl Error {
+    /// Returns the underlying normalized TiDB error when this KV error already carries one
+    /// (`SafePoint`, `Copr`, or `Driver`), so SQL error mapping preserves its MySQL error code.
+    pub fn as_tidb_error(&self) -> Option<&tidb_base::Error> {
+        match self {
+            Error::SafePoint(e) | Error::Driver(e) => Some(e),
+            Error::Copr(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -113,5 +129,26 @@ mod tests {
             Error::from(tikv_client::Error::StringError("x".to_owned())),
             Error::Other(_)
         ));
+    }
+
+    #[test]
+    fn safepoint_and_driver_errors_expose_normalized_tidb_error() {
+        let cache = crate::SafePointCache::new();
+        let sp = (1_700_000_060_000_u64 << 18) + 1;
+        cache.update(sp, std::time::Instant::now());
+        let tidb_err = cache.check_visibility(sp - 10).unwrap_err();
+        let kv_err = Error::SafePoint(Box::new(tidb_err.clone()));
+        assert_eq!(kv_err.as_tidb_error().unwrap().code(), 9006);
+
+        let drv_err = Error::Driver(Box::new(tidb_err));
+        assert_eq!(drv_err.as_tidb_error().unwrap().code(), 9006);
+
+        let stale = crate::SafePointCache::new();
+        stale.update(
+            10,
+            std::time::Instant::now() - std::time::Duration::from_secs(100),
+        );
+        let timeout_err = Error::SafePoint(Box::new(stale.check_visibility(20).unwrap_err()));
+        assert_eq!(timeout_err.as_tidb_error().unwrap().code(), 9001);
     }
 }

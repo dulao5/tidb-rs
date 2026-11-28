@@ -44,11 +44,13 @@ tidb-types = { workspace = true }
 tidb-systable = { workspace = true }
 # The ExecPool the new sessions' executors start their tasks on (N3).
 tidb-runtime = { workspace = true }
+# `Oracle` / `TsFuture` for new-stack autocommit TSO tracking (`router::newstack`).
+tidb-sessiontxn = { workspace = true }
 
 [dev-dependencies]
+etcd-client = "0.14"
 tidb-distsql = { workspace = true }
-# The tidb_rc_read_check_ts error of the new stack (router test, N11 D11).
-tidb-sessiontxn = { workspace = true }
+tidb-kv = { workspace = true }
 tokio = { workspace = true }
 # An InfoSchema with sbtest1 for the real new session (router tests).
 tidb-infoschema = { workspace = true }
