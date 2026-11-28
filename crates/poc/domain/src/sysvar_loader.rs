@@ -39,7 +39,7 @@ use tidb_systable::session_io::{
 };
 use tidb_systable::sysvar_cache::{SysVarCache, decode_global_variables};
 
-use crate::privilege_loader::{load_mysql_table_infos, scan_table_records};
+use crate::privilege_loader::{load_mysql_table_infos_filtered, scan_table_records};
 use crate::systable_io::EtcdNotifier;
 
 /// Timeout of connecting to etcd and of creating the watch.
@@ -197,7 +197,9 @@ fn run(
 async fn fetch_table_values(kv: &KvClient) -> Result<HashMap<String, String>, Error> {
     let err = |e: crate::Error| tidb_base::errors::new(e.to_string());
     let ts = kv.current_ts().await.map_err(|e| err(e.into()))?;
-    let tables = load_mysql_table_infos(kv, ts).await.map_err(err)?;
+    let tables = load_mysql_table_infos_filtered(kv, ts, &["global_variables"])
+        .await
+        .map_err(err)?;
     let Some(tbl) = tables.get("global_variables") else {
         return Err(tidb_base::errors::new(
             "mysql.global_variables not found in the cluster's metadata",
