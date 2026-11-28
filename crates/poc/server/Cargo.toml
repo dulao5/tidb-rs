@@ -15,7 +15,7 @@ path = "src/main.rs"
 bytes = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 http-body-util = "0.1"
-hyper = { version = "1", features = ["http1", "http2", "server"] }
+hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "http2", "server-auto", "tokio"] }
 serde_json = { workspace = true }
 # gostd::time::parse_duration for --lease (Go's duration flag syntax).
@@ -23,6 +23,9 @@ tidb-base = { workspace = true }
 # Unified logging, startup banner, version injection, and panic hook (D00.3).
 tidb-log = { workspace = true }
 # Startup override of `version` sysvar via OVERLAY without modifying generated sysvar_data.rs.
+tidb-executor = { workspace = true }
+tidb-planner = { workspace = true }
+tidb-server = { workspace = true }
 tidb-sessionctx = { workspace = true }
 tidb-distsql = { workspace = true }
 poc-domain = { workspace = true }
@@ -44,10 +47,6 @@ tikv-jemallocator = { workspace = true }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 # Wire TiKV shim redaction hook to tidb_base::errors::redact_log_enabled_load() at startup (D00.3 Batch 4).
 log_wrappers = { workspace = true }
-
-[dev-dependencies]
-# status.rs tests: an HTTP/2 client for the gRPC routing.
-hyper = { version = "1", features = ["client", "http2"] }
 
 [lints]
 workspace = true

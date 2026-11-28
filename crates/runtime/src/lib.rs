@@ -22,6 +22,7 @@
 
 pub mod admission;
 pub mod blocking;
+pub mod cancel;
 pub mod channel;
 pub mod local;
 pub mod metrics;
@@ -37,6 +38,8 @@ pub use admission::TokenLimiter;
 pub use blocking::BlockingConfig;
 pub use blocking::BlockingKind;
 pub use blocking::BlockingPool;
+pub use cancel::ChildToken;
+pub use cancel::KillCancel;
 pub use pool::ExecPool;
 pub use pool::PanicError;
 pub use pool::Runtime;

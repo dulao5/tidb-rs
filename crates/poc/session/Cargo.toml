@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+arc-swap = "1"
 parking_lot = "0.12"
 futures = { workspace = true }
 tidb-distsql = { workspace = true }
@@ -23,6 +24,7 @@ tokio = { workspace = true }
 # boundary-stub error, the ported function registry.
 tidb-base = { workspace = true }
 tidb-expression = { workspace = true }
+tidb-memory = { workspace = true }
 tidb-parser = { workspace = true }
 tidb-privilege = { workspace = true }
 tidb-session = { workspace = true }

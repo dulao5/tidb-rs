@@ -23,6 +23,8 @@ tidb-kv = { workspace = true }
 tidb-codec = { workspace = true }
 # MemTotal (parseMemoryLimit).
 tidb-memory = { workspace = true }
+# KillCancel for DistSQLContext (N3 §3.3, rank 1 < rank 7).
+tidb-runtime = { workspace = true }
 # parser/charset (checkCharacterSet).
 tidb-parser = { workspace = true }
 # tipb.TiFlashPreAggMode (ToTiPBTiFlashPreAggMode).

@@ -2781,3 +2781,126 @@ fn router_error_clears_the_poc_warnings() {
     block_on(s.execute(&mut p, 2, vec![])).unwrap();
     assert_eq!(p.warnings_cleared, 1);
 }
+
+#[test]
+fn runtime_kill_oom_runaway_never_fallback_and_restore_preserves_kill() {
+    use tidb_base::dbterror::exeerrors;
+
+    let cases: &[(u16, Error)] = &[
+        (
+            1317,
+            exeerrors::ErrQueryInterrupted.gen_with_stack_by_args(vec![]),
+        ),
+        (
+            3024,
+            exeerrors::ErrMaxExecTimeExceeded.gen_with_stack_by_args(vec![]),
+        ),
+        (
+            8175,
+            exeerrors::ErrMemoryExceedForQuery.gen_with_stack_by_args(tidb_base::go_args![1u64]),
+        ),
+        (
+            8176,
+            exeerrors::ErrMemoryExceedForInstance.gen_with_stack_by_args(tidb_base::go_args![1u64]),
+        ),
+        (
+            8253,
+            exeerrors::ErrResourceGroupQueryRunawayInterrupted
+                .fast_gen_by_args(tidb_base::go_args!["runaway exceed tidb side"]),
+        ),
+    ];
+
+    for (code, err) in cases {
+        let mut p = poc();
+        p.columns = vec![col("1")];
+        let mut ns = NewSession::default();
+        let captured = Arc::new(err.clone());
+        let cap_cb = Arc::clone(&captured);
+        struct ErrNew {
+            inner: NewSession,
+            err: Arc<Error>,
+        }
+        impl NewStack for ErrNew {
+            fn session(&self) -> &Session {
+                self.inner.session()
+            }
+            fn session_mut(&mut self) -> &mut Session {
+                self.inner.session_mut()
+            }
+            fn info_schema_version(&self) -> Option<i64> {
+                None
+            }
+            fn execute<'a>(
+                &'a mut self,
+                _stmt: ast::Stmt,
+                _sql: &'a str,
+            ) -> BoxFut<'a, Result<Response, Error>> {
+                let err = (*self.err).clone();
+                Box::pin(async move { Err(err) })
+            }
+            fn prepare<'a>(&'a mut self, _sql: &'a str) -> BoxFut<'a, Result<NewPrepared, Error>> {
+                Box::pin(async { Err(blocked("D13.1", "prepare")) })
+            }
+            fn execute_prepared<'a>(
+                &'a mut self,
+                _stmt_id: u32,
+                _params: &'a [Param],
+                _raw: &'a RawParams,
+            ) -> BoxFut<'a, Result<Response, Error>> {
+                let err = (*self.err).clone();
+                Box::pin(async move { Err(err) })
+            }
+            fn close(&mut self, stmt_id: u32) {
+                self.inner.close(stmt_id);
+            }
+        }
+        ns.session_mut()
+            .vars_mut()
+            .set_system_var("max_execution_time", "0")
+            .unwrap();
+        let mut r = Router::new(
+            NewStackMode::Fallback,
+            Box::new(ErrNew {
+                inner: ns,
+                err: cap_cb,
+            }),
+            &p.values,
+        );
+        let got = block_on(r.query(&mut p, "SELECT 1")).expect_err("must return kill/oom error");
+        assert_eq!(got.code, *code, "code mismatch for {code}");
+        assert_eq!(
+            p.log,
+            vec!["start Select".to_owned()],
+            "kill/OOM/runaway ({code}) must NEVER fall back to PoC: {:?}",
+            p.log
+        );
+    }
+
+    // Legal Blocked fallback via StmtCheckpoint::restore() must preserve in-flight SqlKiller.
+    let mut p = poc();
+    p.columns = vec![col("1")];
+    let (mut r, script) = scripted(NewStackMode::Fallback, &p);
+    script.lock().unwrap().answer = Some(Answer::Blocked("D09.1"));
+    r.new
+        .session()
+        .sql_killer()
+        .send_kill_signal(tidb_memory::sqlkiller::QueryInterrupted);
+    let _ = block_on(r.query(&mut p, "SELECT 1"));
+    assert_eq!(
+        r.new.session().sql_killer().get_kill_signal(),
+        tidb_memory::sqlkiller::QueryInterrupted,
+        "Blocked restore must preserve in-flight SqlKiller signal"
+    );
+}
+
+#[test]
+fn kill_stmt_routes_to_poc_even_in_strict_mode() {
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
+        let mut p = poc();
+        let (mut r, script) = scripted(mode, &p);
+        // FakePoc returns 1235 for unimplemented `_` arm, proving Router sent KILL to Poc.
+        let err = block_on(r.query(&mut p, "KILL QUERY 42")).unwrap_err();
+        assert_eq!(err.code, 1235);
+        assert!(script.lock().unwrap().log.is_empty());
+    }
+}

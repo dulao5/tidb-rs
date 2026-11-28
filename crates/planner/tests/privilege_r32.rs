@@ -219,6 +219,7 @@ fn plan_as(
         domain_info_schema: Some(Arc::clone(&is_dyn)),
         instance_plan_cache: None,
         privilege_manager: Some(pm),
+        session_manager: None,
     };
     let (_plan, names) = optimize_ast_node(&parts, &mut vars, &mut node_w, &*is_dyn)?;
     Ok(names)

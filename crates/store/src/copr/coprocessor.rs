@@ -22,6 +22,7 @@ use tidb_base::kv::{StoreType, TiDB, TiKV};
 use tidb_kv::kv::{IsoLevel, PriorityHigh, PriorityLow, RC, RCCheckTS, ReqTypeDAG, Request, SI};
 use tidb_kv::option::ReplicaReadLeader;
 use tidb_kv::{Key, KeyRange};
+use tidb_runtime::KillCancel;
 use tikv_client::proto::{coprocessor, kvrpcpb, metapb};
 use tokio::sync::mpsc;
 
@@ -882,12 +883,14 @@ impl<S: TiKVStore> tidb_kv::kv::Client for CopClient<S> {
     // glue: async eager CopClient.Send (D07.3 spec §4.3: builds and opens CopIterator immediately)
     fn send_async<'a>(
         &'a self,
-        _ctx: &'a tidb_kv::Context,
+        ctx: &'a tidb_kv::Context,
         req: &'a Request,
         vars: Option<tidb_kv::kv::OptionValue>,
         option: &'a tidb_kv::kv::ClientSendOption,
     ) -> tidb_kv::kv::KvFuture<'a, Box<dyn tidb_kv::kv::Response>> {
-        Box::pin(async move { Ok(CopClient::send_async(self, req, vars.as_ref(), option).await) })
+        Box::pin(async move {
+            Ok(CopClient::send_async_with_ctx(self, ctx, req, vars.as_ref(), option).await)
+        })
     }
     /// Go's `CopClient` embeds `kv.RequestTypeSupportedChecker`.
     // glue: dispatch (Go RequestTypeSupportedChecker.IsRequestTypeSupported, embedded in CopClient)
@@ -956,14 +959,26 @@ impl<S: TiKVStore> CopClient<S> {
         variables: Option<&tidb_kv::kv::OptionValue>,
         option: &tidb_kv::kv::ClientSendOption,
     ) -> Box<dyn tidb_kv::kv::Response> {
-        let vars = match Self::prepare_send(req, variables) {
-            Ok(v) => v,
+        self.send_async_with_ctx(&tidb_kv::Context::background(), req, variables, option)
+            .await
+    }
+
+    // go-part: CopClient.Send (threads KillCancel from kv::Context when vars omitted it)
+    async fn send_async_with_ctx(
+        &self,
+        ctx: &tidb_kv::Context,
+        req: &Request,
+        variables: Option<&tidb_kv::kv::OptionValue>,
+        option: &tidb_kv::kv::ClientSendOption,
+    ) -> Box<dyn tidb_kv::kv::Response> {
+        let mut vars = match Self::prepare_send(req, variables) {
+            Ok(v) => v.clone(),
             Err(e) => return Box::new(CopErrorResponse(Some(e))),
         };
-        match self
-            .build_cop_iterator(req.clone(), vars.clone(), option)
-            .await
-        {
+        if vars.kill_cancel.is_none() {
+            vars.kill_cancel = ctx.kill_cancel().cloned();
+        }
+        match self.build_cop_iterator(req.clone(), vars, option).await {
             Ok(mut it) => {
                 it.open(option.try_cop_lite_worker.as_ref());
                 Box::new(LazyCopResponse {
@@ -1305,17 +1320,31 @@ impl<S: TiKVStore> CopIterator<S> {
         &mut self,
         ctx: &tidb_kv::Context,
         idx: Option<usize>,
-    ) -> (Option<RespMsg>, bool, bool) {
-        let _ = ctx; // cancellation: dropping the future (N3 3.1 point 6)
+    ) -> Result<(Option<RespMsg>, bool, bool), Error> {
+        let kill_cancel = ctx
+            .kill_cancel()
+            .cloned()
+            .or_else(|| self.shared.vars.kill_cancel.clone());
         let mut finish = self.shared.finish.clone();
         let resp = match idx {
             Some(i) => {
                 let Some(rx) = self.task_rx[i].as_mut() else {
-                    return (None, false, false);
+                    return Ok((None, false, false));
                 };
                 tokio::select! {
+                    biased;
+                    sig = wait_kill_cancel(kill_cancel.as_ref()) => {
+                        if self
+                            .closed
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            let _ = self.finish_tx.send(true);
+                        }
+                        return Err(crate::driver::error::store_signal_to_error(sig));
+                    }
                     r = rx.recv() => r.map(RespMsg::Resp),
-                    _ = finish.wait_for(|d| *d) => return (None, false, true),
+                    _ = finish.wait_for(|d| *d) => return Ok((None, false, true)),
                 }
             }
             None => {
@@ -1324,8 +1353,19 @@ impl<S: TiKVStore> CopIterator<S> {
                     .as_mut()
                     .expect("unordered iterator has respChan");
                 tokio::select! {
+                    biased;
+                    sig = wait_kill_cancel(kill_cancel.as_ref()) => {
+                        if self
+                            .closed
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            let _ = self.finish_tx.send(true);
+                        }
+                        return Err(crate::driver::error::store_signal_to_error(sig));
+                    }
                     r = rx.recv() => r,
-                    _ = finish.wait_for(|d| *d) => return (None, false, true),
+                    _ = finish.wait_for(|d| *d) => return Ok((None, false, true)),
                 }
             }
         };
@@ -1333,7 +1373,7 @@ impl<S: TiKVStore> CopIterator<S> {
         if let Some(RespMsg::Resp(r)) = &resp {
             mem_tracker_consume_resp(self.shared.mem_tracker.as_ref(), r);
         }
-        (resp, ok, false)
+        Ok((resp, ok, false))
     }
 
     /// GetConcurrency returns the concurrency and small task concurrency.
@@ -1385,9 +1425,27 @@ impl<S: TiKVStore> CopIterator<S> {
         &mut self,
         ctx: &tidb_kv::Context,
     ) -> Result<Option<Box<CopResponse>>, Error> {
+        let kill_cancel = ctx
+            .kill_cancel()
+            .cloned()
+            .or_else(|| self.shared.vars.kill_cancel.clone());
+        if let Some(kc) = &kill_cancel
+            && kc.is_killed()
+        {
+            if self
+                .closed
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                let _ = self.finish_tx.send(true);
+            }
+            self.action_on_exceed.close();
+            return Err(crate::driver::error::store_signal_to_error(kc.signal()));
+        }
+
         let mut resp: Box<CopResponse>;
         if self.lite_worker.is_some() {
-            match self.lite_send_req().await {
+            match self.lite_send_req(kill_cancel.as_ref()).await {
                 None => {
                     self.action_on_exceed.close();
                     return Ok(None);
@@ -1401,7 +1459,13 @@ impl<S: TiKVStore> CopIterator<S> {
         } else if self.resp_chan.is_some() {
             loop {
                 // Get next fetched resp from chan
-                let (r, ok, closed) = self.recv_from_resp_ch(ctx, None).await;
+                let (r, ok, closed) = match self.recv_from_resp_ch(ctx, None).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.action_on_exceed.close();
+                        return Err(e);
+                    }
+                };
                 if !ok || closed {
                     self.action_on_exceed.close();
                     return Ok(None);
@@ -1427,7 +1491,13 @@ impl<S: TiKVStore> CopIterator<S> {
                     self.action_on_exceed.close();
                     return Ok(None);
                 }
-                let (r, ok, closed) = self.recv_from_resp_ch(ctx, Some(self.curr)).await;
+                let (r, ok, closed) = match self.recv_from_resp_ch(ctx, Some(self.curr)).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.action_on_exceed.close();
+                        return Err(e);
+                    }
+                };
                 if closed {
                     // Close() is called or context cancelled/timeout, so Next() is invalid.
                     return Ok(None);
@@ -1460,7 +1530,10 @@ impl<S: TiKVStore> CopIterator<S> {
 
     // go: liteCopIteratorWorker.liteSendReq L1 [M-PANIC]
     #[allow(clippy::collapsible_if)] // Go's nested ifs
-    async fn lite_send_req(&mut self) -> Option<Box<CopResponse>> {
+    async fn lite_send_req(
+        &mut self,
+        kill_cancel: Option<&KillCancel>,
+    ) -> Option<Box<CopResponse>> {
         let lite = self.lite_worker.as_mut().unwrap();
         if let Some(r) = lite.batch_cop_resp_list.pop_front() {
             return Some(r);
@@ -1470,10 +1543,18 @@ impl<S: TiKVStore> CopIterator<S> {
             let cur_task = self.tasks.remove(0);
             let lite = self.lite_worker.as_mut().unwrap();
             let bo = choose_backoffer(&mut backoffermap, &cur_task, &lite.worker);
-            let result = tidb_base::panic_guard::catch_unwind_future(
-                lite.worker.handle_task_once(bo, cur_task),
-            )
-            .await;
+            let result = tokio::select! {
+                biased;
+                sig = wait_kill_cancel(kill_cancel) => {
+                    return Some(Box::new(CopResponse {
+                        err: Some(crate::driver::error::store_signal_to_error(sig)),
+                        ..Default::default()
+                    }));
+                }
+                res = tidb_base::panic_guard::catch_unwind_future(
+                    lite.worker.handle_task_once(bo, cur_task),
+                ) => res,
+            };
             let result = match result {
                 Ok(r) => r,
                 Err((p, bt)) => {
@@ -2645,7 +2726,28 @@ impl<S: TiKVStore> CopIteratorWorker<S> {
                 return true;
             }
         }
+        if self
+            .shared
+            .vars
+            .kill_cancel
+            .as_ref()
+            .is_some_and(KillCancel::is_killed)
+        {
+            return true;
+        }
         *self.shared.finish.borrow()
+    }
+}
+
+/// Awaits [`KillCancel::cancelled`] if present, otherwise pends forever.
+// glue: helper for optional KillCancel branch in tokio::select!
+async fn wait_kill_cancel(kc: Option<&KillCancel>) -> u32 {
+    match kc {
+        Some(kc) => {
+            kc.cancelled().await;
+            kc.signal()
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -2715,7 +2817,10 @@ impl<S: TiKVStore> tidb_kv::kv::Response for LazyCopResponse<S> {
             if let Some(e) = &self.err {
                 return Err(e.clone());
             }
-            if let Some((req, vars, option)) = self.pending.take() {
+            if let Some((req, mut vars, option)) = self.pending.take() {
+                if vars.kill_cancel.is_none() {
+                    vars.kill_cancel = ctx.kill_cancel().cloned();
+                }
                 let client = CopClient {
                     store: self.store.clone(),
                     replica_read_seed: self.replica_read_seed,

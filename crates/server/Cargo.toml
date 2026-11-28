@@ -24,11 +24,23 @@ tidb-executor = { workspace = true }
 tidb-session = { workspace = true }
 # The instance variable system_time_zone (setSystemTimeZoneVariable).
 tidb-sessionctx = { workspace = true }
+# Shared cancellation primitives, SQL killer, and kill metrics (ranks 1 & 2 < 16).
+tidb-runtime = { workspace = true }
+tidb-memory = { workspace = true }
+tidb-metrics = { workspace = true }
+arc-swap = "1"
+parking_lot = "0.12"
 
 [dev-dependencies]
 serde_json = { workspace = true }
 flate2 = "1.0"
+futures = { workspace = true }
+tidb-infoschema = { workspace = true }
+tidb-kv = { workspace = true }
 tidb-log = { workspace = true }
+tidb-model = { workspace = true }
+tidb-sessiontxn = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

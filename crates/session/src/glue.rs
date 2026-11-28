@@ -95,6 +95,7 @@ pub fn stmt_kind(node: &ast::Stmt) -> &'static str {
         ast::Stmt::Set(_) => "Set",
         ast::Stmt::Show(_) => "Show",
         ast::Stmt::Execute(_) => "Execute",
+        ast::Stmt::Kill(_) => "Kill",
         ast::Stmt::Unported(_) => "other",
     }
 }
@@ -104,6 +105,7 @@ pub fn stmt_kind(node: &ast::Stmt) -> &'static str {
 pub fn get_stmt_label(node: &ast::Stmt) -> Result<String, Error> {
     match node {
         ast::Stmt::Select(_) => Ok("Select".to_owned()),
+        ast::Stmt::Kill(_) => Ok("Kill".to_owned()),
         _ => Err(blocked("D12.0", "stmtctx.GetStmtLabel")),
     }
 }

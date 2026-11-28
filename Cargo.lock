@@ -2526,6 +2526,7 @@ dependencies = [
  "tidb-mysql-protocol",
  "tidb-parser",
  "tidb-privilege",
+ "tidb-sessionctx",
  "tidb-sql",
  "tidb-systable",
  "tidb-tablecodec",
@@ -2540,12 +2541,15 @@ name = "poc-executor"
 version = "0.0.0"
 dependencies = [
  "poc-kv",
+ "tidb-base",
  "tidb-distsql",
+ "tidb-memory",
  "tidb-meta",
  "tidb-mysql-protocol",
  "tidb-runtime",
  "tidb-sql",
  "tidb_query_datatype",
+ "tokio",
 ]
 
 [[package]]
@@ -2581,11 +2585,14 @@ dependencies = [
  "serde_json",
  "tidb-base",
  "tidb-distsql",
+ "tidb-executor",
  "tidb-log",
  "tidb-meta",
  "tidb-metrics",
  "tidb-mysql-protocol",
+ "tidb-planner",
  "tidb-runtime",
+ "tidb-server",
  "tidb-sessionctx",
  "tikv-jemallocator",
  "tipb",
@@ -2596,6 +2603,7 @@ dependencies = [
 name = "poc-session"
 version = "0.0.0"
 dependencies = [
+ "arc-swap 1.9.3",
  "futures",
  "parking_lot 0.12.5",
  "poc-domain",
@@ -2607,6 +2615,7 @@ dependencies = [
  "tidb-executor",
  "tidb-expression",
  "tidb-infoschema",
+ "tidb-memory",
  "tidb-meta",
  "tidb-metrics",
  "tidb-model",
@@ -3739,7 +3748,9 @@ dependencies = [
  "protobuf",
  "serde_json",
  "thiserror 1.0.69",
+ "tidb-base",
  "tidb-kv",
+ "tidb-memory",
  "tidb-meta",
  "tidb-metrics",
  "tidb-runtime",
@@ -3905,6 +3916,7 @@ dependencies = [
  "tidb-codec",
  "tidb-execdetails",
  "tidb-memory",
+ "tidb-runtime",
  "tidb-types",
  "tipb",
  "tokio",
@@ -3985,6 +3997,7 @@ dependencies = [
 name = "tidb-mysql-protocol"
 version = "0.0.0"
 dependencies = [
+ "arc-swap 1.9.3",
  "futures",
  "getrandom 0.3.4",
  "mysql_async",
@@ -3997,10 +4010,12 @@ dependencies = [
  "tidb-expression",
  "tidb-kv",
  "tidb-log",
+ "tidb-memory",
  "tidb-metrics",
  "tidb-model",
  "tidb-parser",
  "tidb-runtime",
+ "tidb-server",
  "tidb-sessionctx",
  "tidb-types",
  "time 0.3.55",
@@ -4112,23 +4127,35 @@ dependencies = [
 name = "tidb-server"
 version = "0.0.0"
 dependencies = [
+ "arc-swap 1.9.3",
  "flate2",
+ "futures",
+ "parking_lot 0.12.5",
  "serde_json",
  "tidb-base",
  "tidb-chunk",
  "tidb-executor",
  "tidb-expression",
+ "tidb-infoschema",
+ "tidb-kv",
  "tidb-log",
+ "tidb-memory",
+ "tidb-metrics",
+ "tidb-model",
  "tidb-parser",
+ "tidb-runtime",
  "tidb-session",
  "tidb-sessionctx",
+ "tidb-sessiontxn",
  "tidb-types",
+ "tokio",
 ]
 
 [[package]]
 name = "tidb-session"
 version = "0.0.0"
 dependencies = [
+ "arc-swap 1.9.3",
  "flate2",
  "futures",
  "parking_lot 0.12.5",
@@ -4175,6 +4202,7 @@ dependencies = [
  "tidb-memory",
  "tidb-model",
  "tidb-parser",
+ "tidb-runtime",
  "tidb-types",
  "tipb",
 ]

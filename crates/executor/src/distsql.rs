@@ -506,6 +506,8 @@ impl IndexReaderExecutor {
                 Some(&schema),
                 self.by_items.clone(),
                 self.mem_tracker.as_ref().map(Arc::clone),
+                self.ctx.dctx.sql_killer.clone(),
+                self.ctx.dctx.kill_cancel.clone(),
             )?;
             self.result = Some(sorted);
         }
@@ -1690,6 +1692,7 @@ impl IndexLookUpExecutor {
         let idx_id = shared.get_index_plan_root_id();
         let need_merge = shared.keep_order && need_merge_sort(&shared.by_items, kv_ranges.len());
 
+        let index_exec_ctx = ctx.clone();
         let handle = spawn_lookup_worker(ctx, "IndexLookUpIndexWorker", async move {
             let panic_result_tx = result_tx.clone();
             let mut panic_finished_rx = finished_rx.clone();
@@ -1698,6 +1701,7 @@ impl IndexLookUpExecutor {
                 let max_batch_size = shared.ctx.index_lookup_size;
                 let batch_size = shared.calculate_batch_size(init_batch_size, max_batch_size);
                 let mut worker = IndexWorker {
+                    exec_ctx: index_exec_ctx,
                     shared: Arc::clone(&shared),
                     work_tx: Some(work_tx),
                     result_tx: Some(result_tx),
@@ -1857,6 +1861,8 @@ impl IndexLookUpExecutor {
                     None,
                     shared.by_items.clone(),
                     Some(Arc::clone(&shared.mem_tracker)),
+                    shared.ctx.table_ctx.dctx.sql_killer.clone(),
+                    shared.ctx.table_ctx.dctx.kill_cancel.clone(),
                 ) {
                     Ok(s) => s,
                     Err(e) => {
@@ -2305,6 +2311,7 @@ struct ExtractedLookupTaskData {
 }
 
 struct IndexWorker {
+    exec_ctx: ExecCtx,
     shared: Arc<IndexLookUpShared>,
     work_tx: Option<mpsc::Sender<LookupTableWorkTask>>,
     result_tx: Option<mpsc::Sender<ResultTaskHandle>>,
@@ -2778,8 +2785,7 @@ impl IndexWorker {
                     sel_row.channel_index
                 )));
             }
-            let _ = stride.checkpoint(&()).await;
-            self.shared.base.killer.handle_sql_killer_signal()?;
+            stride.checkpoint(&self.exec_ctx).await?;
         }
 
         self.batch_size = self.batch_size.saturating_mul(2).min(self.max_batch_size);
@@ -2857,8 +2863,7 @@ impl IndexWorker {
                     GetHandleType::FromIndex,
                 )?;
                 handles.push(h);
-                let _ = stride.checkpoint(&()).await;
-                self.shared.base.killer.handle_sql_killer_signal()?;
+                stride.checkpoint(&self.exec_ctx).await?;
             }
             if let Some(check) = &self.check_index_value {
                 let target = ret_chk.get_or_insert_with(|| {
@@ -3182,8 +3187,7 @@ impl TableWorker {
                     )));
                 };
                 task_res.row_idx.push(pos);
-                let _ = stride.checkpoint(&()).await;
-                self.shared.base.killer.handle_sql_killer_signal()?;
+                stride.checkpoint(exec_ctx).await?;
             }
             self.mem_tracker.checkpoint()?;
             task_res.sort_by_index_order();
@@ -3204,8 +3208,7 @@ impl TableWorker {
                     GetHandleType::FromTable,
                 )?;
                 obtained_handles_map.set(&handle, true);
-                let _ = stride.checkpoint(&()).await;
-                self.shared.base.killer.handle_sql_killer_signal()?;
+                stride.checkpoint(exec_ctx).await?;
             }
             let miss_hds = get_lack_handles(&handles_for_consistency, &mut obtained_handles_map);
             let tbl_meta = self

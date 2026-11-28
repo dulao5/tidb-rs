@@ -278,6 +278,16 @@ static EXECUTE_ERROR_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     )
 });
 
+static SERVER_EVENT_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    counter_vec(
+        ("tidb", "server", "event_total"),
+        "Counter of tidb-server event.",
+        &["type"],
+    )
+});
+static SERVER_EVENT_KILL: LazyLock<IntCounter> =
+    LazyLock::new(|| SERVER_EVENT_TOTAL.with_label_values(&["kill"]));
+
 static PLAN_CACHE_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     counter_vec(
         ("tidb", "server", "plan_cache_total"),
@@ -558,6 +568,7 @@ fn register_all() {
         DISCONNECTION_TOTAL.with_label_values(&[r]);
     }
     LazyLock::force(&EXECUTE_ERROR_TOTAL);
+    LazyLock::force(&SERVER_EVENT_KILL);
     for t in ["prepared", "non-prepared"] {
         PLAN_CACHE_TOTAL.with_label_values(&[t]);
     }
@@ -681,6 +692,16 @@ pub fn panicked(kind: &str) {
 /// `tidb_server_panic_total{type}` (tests).
 pub fn panic_total(kind: &str) -> u64 {
     PANIC_TOTAL.with_label_values(&[kind]).get()
+}
+
+/// Go `metrics.ServerEventCounter.WithLabelValues(metrics.EventKill).Inc()`.
+pub fn server_event_kill() {
+    SERVER_EVENT_KILL.inc();
+}
+
+/// Current `tidb_server_event_total{type="kill"}` (tests).
+pub fn server_event_kill_total() -> u64 {
+    SERVER_EVENT_KILL.get()
 }
 
 pub fn disconnected(how: Disconnect) {

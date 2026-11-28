@@ -748,3 +748,45 @@ async fn copr_request_rate_limit_caps_inflight_and_releases_tokens() {
     assert!(!rl.get_token(&mut done).await);
     rl.put_token();
 }
+
+#[tokio::test]
+async fn cop_iterator_cancels_immediately_on_kill_cancel() {
+    use tidb_memory::sqlkiller::{QueryInterrupted, SqlKiller};
+    use tidb_runtime::KillCancel;
+
+    let mut mock = MockStore::new(&[b"m"], echo);
+    mock.send_delay = Some(Duration::from_secs(30));
+    let mock = Arc::new(mock);
+
+    let killer = SqlKiller::new();
+    let kc = KillCancel::new(killer.signal_handle());
+    let kc_hook = kc.clone();
+    let killer2 = Arc::clone(&killer);
+    killer.set_on_kill(Some(Box::new(move || kc_hook.notify())));
+
+    let store = Arc::new(new_store(Arc::new(Shared(mock)), None, 0));
+    let vars = Variables {
+        killed: Some(killer.signal_handle()),
+        kill_cancel: Some(kc.clone()),
+        ..Variables::default()
+    };
+    let mut it = store
+        .get_client()
+        .build_cop_iterator(request(&[b"a", b"z"]), vars, &ClientSendOption::default())
+        .await
+        .unwrap();
+    it.open(None);
+
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        killer2.send_kill_signal(QueryInterrupted);
+    });
+
+    let ctx = tidb_kv::Context::background().with_kill_cancel(kc);
+    let err = tokio::time::timeout(Duration::from_secs(2), it.next(&ctx))
+        .await
+        .expect("kill_cancel must wake CopIterator::next promptly")
+        .unwrap_err();
+    assert_eq!(err.code(), tidb_base::errno::ErrQueryInterrupted as isize);
+    it.close().await.unwrap();
+}

@@ -603,6 +603,11 @@ impl Router {
         &*self.new
     }
 
+    /// Mutable access to the new stack (for connection control / command state sync).
+    pub fn new_stack_mut(&mut self) -> &mut dyn NewStack {
+        &mut *self.new
+    }
+
     /// Step 0: the session condition that keeps statements on the PoC, if any.
     pub fn session_condition(&self, poc: &dyn PocEngine) -> Option<&'static str> {
         let vars = self.new.session().vars();
@@ -793,6 +798,10 @@ impl Router {
                     Ok(Err(sql_error(&e)))
                 }
                 Some(block) => {
+                    debug_assert!(
+                        !tidb_memory::sqlkiller::is_runtime_kill_or_oom_error(&e),
+                        "kill/OOM/runaway errors must never carry a blocked-by tag"
+                    );
                     let block = block.to_owned();
                     if let Err(e) = self.new.session_mut().restore(cp) {
                         // Checked idle above: a bug of the checkpoint.
@@ -807,6 +816,8 @@ impl Router {
                     Err(NotRun::Blocked(block))
                 }
                 None => {
+                    // Kill, timeout, OOM, and runaway errors (1317/3024/8175/8176/8253) always take
+                    // this branch and never fall back to the PoC.
                     drop(cp);
                     self.finish_new();
                     self.note(Engine::New.label(), "error");

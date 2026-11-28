@@ -739,7 +739,8 @@ pub fn is_physical_plan_cacheable(
         | PhysicalKind::Limit
         | PhysicalKind::Sort
         | PhysicalKind::TopN
-        | PhysicalKind::NominalSort => {}
+        | PhysicalKind::NominalSort
+        | PhysicalKind::Simple => {}
     }
 
     sub_plans.extend(p.children());

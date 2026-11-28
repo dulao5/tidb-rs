@@ -139,14 +139,40 @@ impl Compiler {
     /// hands the same `Arc` to the transaction manager). An `Execute` plan of a point get
     /// takes the point plan short path when `IsSafeToReusePointGetExecutor` says so (D05.3
     /// spec §10).
-    // go: Compiler.Compile L2 (panics at the task boundary, M-PANIC; the statement text is passed in)
+    // go: Compiler.Compile L2 (emits Go's compile SQL panic error log on 1317/3024/8175/8176, N3 §3.4 & Decision 10)
     pub fn compile(
+        &self,
+        sctx: &mut dyn SessionContext,
+        stmt_node: ast::Stmt,
+        text: &str,
+    ) -> Result<ExecStmt, Error> {
+        let res = self.compile_inner(sctx, stmt_node, text);
+        if let Err(err) = &res
+            && tidb_memory::sqlkiller::is_runtime_kill_or_oom_error(err)
+        {
+            let vars = sctx.get_session_vars();
+            let stack = tidb_base::errors::format_backtrace_string(
+                &std::backtrace::Backtrace::force_capture(),
+            );
+            tidb_base::log_error!(
+                "compile SQL panic",
+                "conn" => vars.connection_id,
+                "session_alias" => vars.session_alias.as_str(),
+                "SQL" => text,
+                "stack" => stack.as_str(),
+                "recover" => err,
+            );
+        }
+        res
+    }
+
+    // go-part: Compiler.Compile
+    fn compile_inner(
         &self,
         sctx: &mut dyn SessionContext,
         mut stmt_node: ast::Stmt,
         text: &str,
     ) -> Result<ExecStmt, Error> {
-        // log-skip: Compiler.Compile:62 panics are caught at the task boundary (M-PANIC)
         let is_read_only =
             tidb_planner::optimize::is_read_only(&stmt_node, sctx.get_session_vars())?;
         sctx.get_session_vars_mut().stmt_ctx_mut().is_read_only = is_read_only;

@@ -231,11 +231,12 @@ struct Rows {
 // glue: test double
 async fn busy_loop(per_next: Duration, checkpoints: bool) {
     let mut stride = tidb_runtime::CheckpointStride::new(16);
+    let hook = crate::exec::ExecCtx::new(Arc::new(tidb_sessionctx::stmtctx::new_stmt_ctx()));
     let until = Instant::now() + per_next;
     while Instant::now() < until {
         std::hint::spin_loop();
         if checkpoints {
-            let Ok(()) = stride.checkpoint(&()).await;
+            let _ = stride.checkpoint(&hook).await;
         }
     }
 }

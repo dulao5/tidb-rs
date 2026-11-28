@@ -1211,6 +1211,8 @@ fn exec_sorted(spec: &Value) -> Value {
         schema.as_ref(),
         by_items,
         Some(Arc::clone(&tracker)),
+        None,
+        None,
     )
     .unwrap();
 

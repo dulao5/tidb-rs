@@ -39,7 +39,7 @@ use tikv_client::{
     Backoff, RetryOptions, Timestamp, TimestampExt, TransactionClient, TransactionOptions,
 };
 
-use super::error::TiKVError;
+use super::error::{TiKVError, store_signal_to_error};
 use crate::copr::tikv::Variables;
 
 /// client-go `txnsnapshot.getMaxBackoff` / `batchGetMaxBackoff` (ms).
@@ -466,15 +466,29 @@ impl KVSnapshot {
     // go-l3: ADR-0008 client-go txnkv/txnsnapshot KVSnapshot.Get
     pub async fn get(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         k: &[u8],
         options: &[GetOption],
     ) -> Result<ValueEntry, TiKVError> {
         let return_commit_ts = options.contains(&GetOption::ReturnCommitTS);
         self.check_supported()?;
-        let value = {
-            let mut inner = self.inner.lock().await;
-            self.client_snapshot(&mut inner).get(k.to_vec()).await?
+        let value = match ctx.kill_cancel() {
+            Some(kc) => {
+                tokio::select! {
+                    biased;
+                    _ = kc.cancelled() => {
+                        return Err(TiKVError::Plain(store_signal_to_error(kc.signal())));
+                    }
+                    res = async {
+                        let mut inner = self.inner.lock().await;
+                        self.client_snapshot(&mut inner).get(k.to_vec()).await
+                    } => res?,
+                }
+            }
+            None => {
+                let mut inner = self.inner.lock().await;
+                self.client_snapshot(&mut inner).get(k.to_vec()).await?
+            }
         };
         let entry = match value {
             Some(v) if !v.is_empty() => tidb_kv::kv::new_value_entry(v, 0),
@@ -488,7 +502,7 @@ impl KVSnapshot {
     // go-l3: ADR-0008 client-go txnkv/txnsnapshot KVSnapshot.BatchGet
     pub async fn batch_get(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         keys: &[Vec<u8>],
         options: &[BatchGetOption],
     ) -> Result<std::collections::HashMap<Vec<u8>, ValueEntry>, TiKVError> {
@@ -498,12 +512,26 @@ impl KVSnapshot {
             return Ok(m);
         }
         self.check_supported()?;
-        let pairs: Vec<tikv_client::KvPair> = {
-            let mut inner = self.inner.lock().await;
-            self.client_snapshot(&mut inner)
-                .batch_get(keys.to_vec())
-                .await?
-                .collect()
+        let pairs: Vec<tikv_client::KvPair> = match ctx.kill_cancel() {
+            Some(kc) => {
+                tokio::select! {
+                    biased;
+                    _ = kc.cancelled() => {
+                        return Err(TiKVError::Plain(store_signal_to_error(kc.signal())));
+                    }
+                    res = async {
+                        let mut inner = self.inner.lock().await;
+                        self.client_snapshot(&mut inner).batch_get(keys.to_vec()).await
+                    } => res?.collect(),
+                }
+            }
+            None => {
+                let mut inner = self.inner.lock().await;
+                self.client_snapshot(&mut inner)
+                    .batch_get(keys.to_vec())
+                    .await?
+                    .collect()
+            }
         };
         for pair in pairs {
             let (k, v) = (Vec::<u8>::from(pair.0), pair.1);
@@ -685,5 +713,40 @@ mod tests {
         let o = TxnOptions::default();
         assert!(o.txn_scope.is_empty() && o.start_ts.is_none());
         assert_eq!(GlobalTxnScope, "global");
+    }
+
+    #[test]
+    fn tikv_store_cancel_maps_all_five_signals() {
+        use tidb_memory::sqlkiller::{
+            MaxExecTimeExceeded, QueryInterrupted, QueryMemoryExceeded, RunawayQueryExceeded,
+            ServerMemoryExceeded,
+        };
+        let cases = [
+            (
+                QueryInterrupted,
+                "[tikv:1317]Query execution was interrupted",
+            ),
+            (
+                MaxExecTimeExceeded,
+                "[executor:3024]Query execution was interrupted, maximum statement execution time exceeded",
+            ),
+            (
+                QueryMemoryExceeded,
+                "[executor:8175]Your query has been cancelled due to exceeding the allowed memory limit for a single SQL query. Please try narrowing your query scope or increase the tidb_mem_quota_query limit and try again.[conn=-1]",
+            ),
+            (
+                ServerMemoryExceeded,
+                "[executor:8176]Your query has been cancelled due to exceeding the allowed memory limit for the tidb-server instance and this query is currently using the most memory. Please try narrowing your query scope or increase the tidb_server_memory_limit and try again.[conn=-1]",
+            ),
+            (
+                RunawayQueryExceeded,
+                "[executor:8253]Query execution was interrupted, identified as runaway query [exceed tidb side]",
+            ),
+        ];
+        for (sig, exp) in cases {
+            let err =
+                crate::driver::error::to_tidb_err(TiKVError::Plain(store_signal_to_error(sig)));
+            assert_eq!(err.to_string(), exp, "signal {sig}");
+        }
     }
 }

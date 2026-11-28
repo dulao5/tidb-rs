@@ -737,6 +737,7 @@ fn test_parts() -> crate::planctx::SessionPlanCtx {
         domain_info_schema: None,
         instance_plan_cache: None,
         privilege_manager: None,
+        session_manager: None,
     }
 }
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use tidb_sessionctx::session_mgr::SessionManager as _;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -129,11 +130,23 @@ impl<F: SessionFactory> Server<F> {
                         }
                     };
                     tidb_base::log_debug!("accept new connection success");
+                    let mgr = self.factory.session_manager();
+                    if mgr
+                        .as_deref()
+                        .is_some_and(tidb_server::session_mgr::ServerSessionManager::is_lost_connection_to_pd)
+                    {
+                        tidb_base::log_warn!("reject connection due to lost connection to PD");
+                        drop(stream);
+                        continue;
+                    }
                     if let Err(e) = stream.set_nodelay(true) {
                         let err_str = e.to_string();
                         tidb_base::log_warn!("set TCP_NODELAY failed", "error" => err_str.as_str());
                     }
-                    let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
+                    let id = match mgr {
+                        Some(mgr) => mgr.next_conn_id(),
+                        None => self.next_connection_id.fetch_add(1, Ordering::Relaxed),
+                    };
                     let config = Arc::clone(&self.config);
                     let factory = Arc::clone(&self.factory);
                     let admission = self.admission.clone();
@@ -175,19 +188,27 @@ impl<F: SessionFactory> Server<F> {
             }
         }
         // Go server.go:1065 unconditionally calls s.KillAllConnections().
-        tidb_base::log_info!("kill all connections.", "category" => "server");
-        conns.retain(|(h, _)| !h.is_finished());
-        for (h, _) in &conns {
-            h.abort();
+        if let Some(mgr) = self.factory.session_manager() {
+            mgr.kill_all_connections();
+        } else {
+            tidb_base::log_info!("kill all connections.", "category" => "server");
+            conns.retain(|(h, _)| !h.is_finished());
+            for (h, _) in &conns {
+                h.abort();
+            }
         }
+        conns.retain(|(h, _)| !h.is_finished());
         if !conns.is_empty() {
             let cancel_res = tokio::time::timeout(self.config.cancel_wait, async {
-                for (h, _) in conns {
+                for (h, _) in &mut conns {
                     let _ = h.await;
                 }
             })
             .await;
             if cancel_res.is_err() {
+                for (h, _) in &conns {
+                    h.abort();
+                }
                 tidb_base::log_warn!("some sessions do not quit in cancel wait time");
             }
         }

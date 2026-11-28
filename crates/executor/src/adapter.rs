@@ -90,31 +90,34 @@ impl RecordSet {
     /// indicating we already finished current query, we need prepare for next query.
     /// If stmt is not nil and chunk with some rows inside, we simply update last query found
     /// rows by the number of row in chunk.
-    // go: recordSet.Next L2 (panics are caught at the task boundary, M-PANIC)
+    // go: recordSet.Next L1
     pub async fn next(
         &mut self,
         stmt: &mut ExecStmt,
         sctx: &mut dyn SessionContext,
         req: &mut Chunk,
     ) -> Result<(), Error> {
-        // log-skip: recordSet.Next:164 panics are caught at the task boundary (M-PANIC)
+        // log-skip: recordSet.Next:164 only recover() logs in Go; HandleSignal() returns directly
         sctx.sql_killer().handle_signal()?;
-
         let (Some(e), Some(ctx)) = (self.executor.as_deref_mut(), self.exec_ctx.as_ref()) else {
             return Err(Error::plain("the record set is closed"));
         };
-        if let Err(err) = stmt.next(ctx, e, req).await {
-            self.last_errs.push(err.clone());
-            return Err(err);
+        match stmt.next(ctx, e, req).await {
+            Ok(()) => {
+                let num_rows = req.num_rows();
+                let vars = sctx.get_session_vars_mut();
+                if num_rows == 0 {
+                    vars.last_found_rows = vars.stmt_ctx().found_rows();
+                } else {
+                    vars.stmt_ctx().add_found_rows(num_rows as u64);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.last_errs.push(err.clone());
+                Err(err)
+            }
         }
-        let num_rows = req.num_rows();
-        let vars = sctx.get_session_vars_mut();
-        if num_rows == 0 {
-            vars.last_found_rows = vars.stmt_ctx().found_rows();
-            return Ok(());
-        }
-        vars.stmt_ctx().add_found_rows(num_rows as u64);
-        Ok(())
     }
 
     /// NewChunk create a chunk base on top-level executor's exec.NewFirstChunk().
@@ -218,6 +221,22 @@ impl RecordSet {
     pub fn txn_start_ts(&self) -> u64 {
         self.txn_start_ts
     }
+}
+
+/// Computes Go's `"execute sql panic"` structured fields so `RecordSet::next` and
+/// `ExecStmt::exec` each emit one literal `log_warn!` matching Go's call sites.
+// glue: shared fields for recordSet.Next and ExecStmt.Exec (M-PANIC log parity, Decision 10)
+fn execute_sql_panic_fields<'a>(
+    stmt: &ExecStmt,
+    sctx: &'a dyn SessionContext,
+) -> (u64, &'a str, String, String) {
+    let vars = sctx.get_session_vars();
+    let sql = stmt
+        .get_text_to_log(sctx, false)
+        .unwrap_or_else(|_| stmt.origin_text().to_owned());
+    let stack =
+        tidb_base::errors::format_backtrace_string(&std::backtrace::Backtrace::force_capture());
+    (vars.connection_id, vars.session_alias.as_str(), sql, stack)
 }
 
 /// `errors.Join(errs...)`: `None` for none, the messages joined by newlines otherwise.
@@ -379,11 +398,15 @@ impl ExecStmt {
         self.stmt_node.as_ref()
     }
 
-    /// The context the executors run with (N3): the statement context they share (N2) and
-    /// the session's `ExecPool`, on which they start their tasks.
+    /// The context the executors run with (N3): the statement context they share (N2),
+    /// paired `SqlKiller`/`KillCancel`, and the session's `ExecPool`.
     // glue: N3 ExecCtx of the statement
     fn exec_ctx(sctx: &dyn SessionContext) -> ExecCtx {
-        let mut ctx = ExecCtx::new(sctx.get_session_vars().stmt_ctx_arc());
+        let mut ctx = ExecCtx::with_killer(
+            sctx.get_session_vars().stmt_ctx_arc(),
+            sctx.sql_killer(),
+            sctx.kill_cancel(),
+        );
         ctx.pool = sctx.exec_pool();
         ctx
     }
@@ -538,12 +561,32 @@ impl ExecStmt {
     /// sqlexec.RecordSet Next method.
     ///
     /// `Ok(None)` is Go's nil record set (a statement without a result).
-    // go: ExecStmt.Exec L2 (no Analyze / runaway / Top SQL branches: delegated, N10, D14.2; panics at the task boundary)
+    // go: ExecStmt.Exec L2 (emits Go's execute sql panic warning on 1317/3024/8175/8176, N3 §3.4 & Decision 10)
     pub async fn exec(
         &mut self,
         sctx: &mut dyn SessionContext,
     ) -> Result<Option<RecordSet>, Error> {
-        // log-skip: ExecStmt.Exec:539 panics are caught at the task boundary (M-PANIC)
+        let res = self.exec_inner(sctx).await;
+        if let Err(err) = &res
+            && tidb_memory::sqlkiller::is_runtime_kill_or_oom_error(err)
+        {
+            let (conn, session_alias, sql, stack) = execute_sql_panic_fields(self, sctx);
+            tidb_base::log_warn!(
+                "execute sql panic",
+                "conn" => conn,
+                "session_alias" => session_alias,
+                "sql" => sql.as_str(),
+                "stack" => stack.as_str(),
+            );
+        }
+        res
+    }
+
+    // go-part: ExecStmt.Exec
+    async fn exec_inner(
+        &mut self,
+        sctx: &mut dyn SessionContext,
+    ) -> Result<Option<RecordSet>, Error> {
         // The Analyze plan is delegated to Go TiDB (constitution §4.3); no plan of the new
         // stack is one.
         // HasMemQuotaHint / MemQuotaQuery: the MEMORY_QUOTA hint is D13.3 (A1 sets the limit).
@@ -679,8 +722,9 @@ impl ExecStmt {
             }
             let r = self.handle_no_delay_executor(sctx, ctx, to_check).await;
             if handled {
-                // sc.DetachMemDiskTracker() and resetCTEStorageMap (deferred in Go): the
-                // trackers are detached with the statement context (A1); no CTE storages.
+                // sc.DetachMemDiskTracker(): no-result statements are detached by the session's
+                // statement guard (parent `children` holds an `Arc<Tracker>`, so Drop alone does
+                // not detach); no CTE storages exist.
             }
             return (handled, r);
         }
@@ -913,8 +957,8 @@ impl ExecStmt {
     ) {
         self.finish_execute_stmt(sctx, txn_start_ts, last_err.as_ref(), false);
         // a.logAudit(): audit plugins are not ported.
-        // StmtCtx.DetachMemDiskTracker(): the A1 trackers detach when the statement context
-        // is dropped.
+        // sc.DetachMemDiskTracker(): the session's finish / tracker guard explicitly detaches the
+        // statement trackers from the session root (`children` holds strong Arc refs).
     }
 
     // go: ExecStmt.recordLastQueryInfo L2 (no RU details: resource control, N10)

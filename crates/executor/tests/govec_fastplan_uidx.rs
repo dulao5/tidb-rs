@@ -348,6 +348,7 @@ impl SessionContext for Session {
             domain_info_schema: None,
             instance_plan_cache: None,
             privilege_manager: None,
+            session_manager: None,
         }
     }
     fn get_snapshot_with_stmt_read_ts(

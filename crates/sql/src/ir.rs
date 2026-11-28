@@ -22,6 +22,20 @@ pub enum Statement {
     ShowWarnings {
         errors: bool,
     },
+    /// `KILL [TIDB] [CONNECTION | QUERY] <id | expr>`.
+    Kill(KillIr),
+}
+
+/// Lowered representation of [`ast::KillStmt`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KillIr {
+    pub query: bool,
+    pub connection_id: u64,
+    pub tidb_extension: bool,
+    /// `Some(name)` when an expression was supplied (`CONNECTION_ID()` or another function).
+    pub expr_name: Option<String>,
+    /// True when the expression had arguments or was not a zero-arg function call.
+    pub expr_invalid: bool,
 }
 
 /// One assignment of a `SET` statement.
@@ -341,6 +355,20 @@ pub fn lower_statement(stmt: &ast::Stmt, sql: &str) -> Result<Lowered, SqlError>
         ast::Stmt::SetOpr(_) => return Err(unsupported("UNION/EXCEPT/INTERSECT")),
         ast::Stmt::Execute(_) => {
             return Err(unsupported("EXECUTE statements (read-only prototype)"));
+        }
+        ast::Stmt::Kill(k) => {
+            let (expr_name, expr_invalid) = match &k.expr {
+                None => (None, false),
+                Some(ast::Expr::FuncCall(fc)) => (Some(fc.fn_name.l()), false),
+                Some(_) => (None, true),
+            };
+            Statement::Kill(KillIr {
+                query: k.query,
+                connection_id: k.connection_id,
+                tidb_extension: k.tidb_extension,
+                expr_name,
+                expr_invalid,
+            })
         }
         ast::Stmt::Unported(n) => {
             return Err(unsupported(format!(
@@ -1032,5 +1060,23 @@ mod tests {
             value("SET max_execution_time = -2e3"),
             SetValue::Literal(Literal::Float(-2000.0))
         );
+    }
+
+    #[test]
+    fn kill_connection_id_with_args_matches_go() {
+        for sql in [
+            "KILL CONNECTION_ID()",
+            "KILL CONNECTION_ID(1)",
+            "KILL TIDB CONNECTION_ID(1, 2)",
+        ] {
+            let lowered = parse_and_lower(sql).expect(sql);
+            match lowered.stmt {
+                Statement::Kill(k) => {
+                    assert_eq!(k.expr_name.as_deref(), Some("connection_id"), "{sql}");
+                    assert!(!k.expr_invalid, "{sql}");
+                }
+                other => panic!("expected KillIr for {sql}, got {other:?}"),
+            }
+        }
     }
 }

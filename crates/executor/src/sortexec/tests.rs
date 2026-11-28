@@ -244,12 +244,20 @@ fn build_top_n_exec(
 /// An execution context whose statement tracker hangs under a session tracker (as Go's
 /// tests set `StmtCtx.MemTracker` under `MemTracker`).
 fn exec_ctx() -> (ExecCtx, Arc<Tracker>) {
+    exec_ctx_with_killer(&SqlKiller::new())
+}
+
+fn exec_ctx_with_killer(killer: &Arc<SqlKiller>) -> (ExecCtx, Arc<Tracker>) {
     let session = new_tracker(LabelForSQLText, -1);
     let mut stmt = new_stmt_ctx();
     let stmt_tracker = new_tracker(LabelForSQLText, -1);
     stmt_tracker.attach_to(&session).unwrap();
     stmt.mem_tracker = Some(Arc::clone(&stmt_tracker));
-    (ExecCtx::new(Arc::new(stmt)), stmt_tracker)
+    let cancel = tidb_runtime::cancel::KillCancel::new(killer.signal_handle());
+    (
+        ExecCtx::with_killer(Arc::new(stmt), Arc::clone(killer), cancel),
+        stmt_tracker,
+    )
 }
 
 async fn execute(exe: &mut dyn Executor, ctx: &ExecCtx) -> Result<Vec<Chunk>, Error> {
@@ -823,7 +831,7 @@ async fn parallel_sort_killed() {
     let child = data_source(&vars, gen_data(5000, false));
     let mut exe =
         build_sort_exec_with_killer(&vars, child.exec, by_items(&[(col(0), false)]), &killer);
-    let (ctx, _) = exec_ctx();
+    let (ctx, _) = exec_ctx_with_killer(&killer);
     exe.open(&ctx).await.unwrap();
     killer.send_kill_signal(QueryInterrupted);
     let mut chk = new_first_chunk(&exe);
@@ -835,6 +843,99 @@ async fn parallel_sort_killed() {
     exe.close().await.unwrap();
     assert_eq!(exe.parallel_state_for_test(), (0, 0, 1));
     assert!(!child.opened.load(Ordering::SeqCst));
+}
+
+/// Polls `fut` until either it completes (`Some(out)`) or it has suspended `max_polls` times,
+/// dropping it in place at that exact `.await` boundary.
+async fn poll_until_suspension<F: std::future::Future + Unpin>(
+    mut fut: F,
+    max_polls: usize,
+) -> Option<F::Output> {
+    let mut suspensions = 0usize;
+    std::future::poll_fn(|cx| match std::pin::Pin::new(&mut fut).poll(cx) {
+        std::task::Poll::Ready(out) => std::task::Poll::Ready(Some(out)),
+        std::task::Poll::Pending => {
+            suspensions += 1;
+            if suspensions >= max_polls {
+                std::task::Poll::Ready(None)
+            } else {
+                std::task::Poll::Pending
+            }
+        }
+    })
+    .await
+}
+
+/// Drop-at-every-`.await` safety net for `SortExec`: dropping `SortExec` mid-execution at any
+/// suspension point aborts background workers, zeroes `stmt_tracker`, and preserves an
+/// in-flight `SqlKiller` signal without calling `SqlKiller::reset`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_sort_drop_at_every_await_zeroes_memory_and_preserves_killer() {
+    let mut vars = vars(32);
+    vars.executor_concurrency = 4;
+    let data = gen_data(4096, false);
+
+    let mut completed = false;
+    for max_polls in 1..=256 {
+        let killer = SqlKiller::new();
+        let (ctx, stmt_tracker) = exec_ctx_with_killer(&killer);
+        let child = data_source(&vars, data.copy_construct());
+        let alive = child.alive;
+        let mut exe =
+            build_sort_exec_with_killer(&vars, child.exec, by_items(&[(col(0), false)]), &killer);
+        let killer_ref = Arc::clone(&killer);
+        let ctx_ref = ctx.clone();
+        let fut = Box::pin(async move {
+            exe.open(&ctx_ref).await?;
+            let mut chk = new_first_chunk(&exe);
+            let mut rows = 0usize;
+            loop {
+                if rows > 0 {
+                    killer_ref.send_kill_signal(QueryInterrupted);
+                }
+                exe.next(&ctx_ref, &mut chk).await?;
+                if chk.num_rows() == 0 {
+                    break;
+                }
+                rows += chk.num_rows();
+            }
+            exe.close().await
+        });
+
+        let finished = poll_until_suspension(fut, max_polls).await;
+        for _ in 0..1000 {
+            if Arc::strong_count(&alive) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        assert_eq!(
+            Arc::strong_count(&alive),
+            1,
+            "child leaked at max_polls={max_polls}"
+        );
+        assert_eq!(
+            stmt_tracker.bytes_consumed(),
+            0,
+            "memory leaked at max_polls={max_polls}"
+        );
+        if max_polls > 2 && killer.get_kill_signal() != 0 {
+            assert_eq!(killer.get_kill_signal(), QueryInterrupted);
+        }
+        if let Some(res) = finished {
+            assert!(
+                tidb_base::dbterror::exeerrors::ErrQueryInterrupted
+                    .equal(res.as_ref().unwrap_err())
+                    || res.is_ok()
+            );
+            completed = true;
+            break;
+        }
+    }
+    assert!(
+        completed,
+        "expected sort future to finish within 256 suspensions"
+    );
 }
 
 /// Dropping the executor without `Close` (the safety net of N3 3.5): its tasks are aborted

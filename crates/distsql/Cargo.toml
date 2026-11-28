@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 # N3 checkpoint between coprocessor responses (chunk-level, like Go's exec.Next).
+tidb-base = { workspace = true }
+tidb-memory = { workspace = true }
 tidb-runtime = { workspace = true }
 collections = { workspace = true }
 protobuf = { workspace = true }

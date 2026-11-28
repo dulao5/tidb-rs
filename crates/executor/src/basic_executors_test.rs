@@ -265,6 +265,93 @@ async fn parallel_projection_close_dropped_halfway_still_stops_its_tasks() {
     );
 }
 
+/// Polls `fut` until either it completes (`Some(out)`) or it has suspended `max_polls` times,
+/// dropping it in place at that exact `.await` boundary.
+async fn poll_until_suspension<F: std::future::Future + Unpin>(
+    mut fut: F,
+    max_polls: usize,
+) -> Option<F::Output> {
+    let mut suspensions = 0usize;
+    std::future::poll_fn(|cx| match std::pin::Pin::new(&mut fut).poll(cx) {
+        std::task::Poll::Ready(out) => std::task::Poll::Ready(Some(out)),
+        std::task::Poll::Pending => {
+            suspensions += 1;
+            if suspensions >= max_polls {
+                std::task::Poll::Ready(None)
+            } else {
+                std::task::Poll::Pending
+            }
+        }
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_projection_drop_at_every_await_zeroes_memory_and_preserves_killer() {
+    let mut completed = false;
+    for max_polls in 1..=256 {
+        let sctx = default_ctx();
+        let ctx = exec_ctx(&sctx);
+        let (child, probe) = source(&sctx, 5000, Fault::None);
+        let mut e = projection_over(&sctx, child, 2);
+        let stmt_tracker = sctx.vars.stmt_ctx().mem_tracker.clone().unwrap();
+        let killer = sctx.sql_killer();
+        let ctx_ref = ctx.clone();
+        let fut = Box::pin(async move {
+            e.open(&ctx_ref).await?;
+            let mut chk = exec::new_first_chunk(e.as_ref());
+            let mut seen = 0usize;
+            loop {
+                exec::next(&ctx_ref, e.as_mut(), &mut chk).await?;
+                if chk.num_rows() == 0 {
+                    break;
+                }
+                seen += chk.num_rows();
+                if seen >= 64 {
+                    killer.send_kill_signal(tidb_memory::sqlkiller::QueryInterrupted);
+                }
+            }
+            e.close().await
+        });
+
+        let finished = poll_until_suspension(fut, max_polls).await;
+        for _ in 0..200 {
+            if probe.dropped.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            probe.dropped.load(Ordering::SeqCst),
+            "child leaked at max_polls={max_polls}"
+        );
+        assert_eq!(
+            stmt_tracker.bytes_consumed(),
+            0,
+            "projection memory leaked at max_polls={max_polls}"
+        );
+        if max_polls > 2 && sctx.sql_killer().get_kill_signal() != 0 {
+            assert_eq!(
+                sctx.sql_killer().get_kill_signal(),
+                tidb_memory::sqlkiller::QueryInterrupted
+            );
+        }
+        if let Some(res) = finished {
+            assert!(
+                res.is_ok()
+                    || tidb_base::dbterror::exeerrors::ErrQueryInterrupted
+                        .equal(res.as_ref().unwrap_err())
+            );
+            completed = true;
+            break;
+        }
+    }
+    assert!(
+        completed,
+        "expected projection future to finish within 256 suspensions"
+    );
+}
+
 #[tokio::test]
 async fn parallel_projection_runs_on_a_current_thread_runtime() {
     // A projection asked for workers falls back to one task when its expressions cannot be

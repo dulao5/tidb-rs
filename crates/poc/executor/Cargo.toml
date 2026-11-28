@@ -8,8 +8,11 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-# N3 checkpoint.
+# N3 checkpoint & kill propagation.
+tidb-base = { workspace = true }
+tidb-memory = { workspace = true }
 tidb-runtime = { workspace = true }
+tokio = { workspace = true }
 tidb-distsql = { workspace = true }
 poc-kv = { workspace = true }
 tidb-meta = { workspace = true }

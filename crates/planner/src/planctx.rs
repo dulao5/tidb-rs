@@ -14,6 +14,7 @@ use tidb_privilege::PrivilegeManagerRef;
 use tidb_sessionctx::context::InstancePlanCache;
 use tidb_sessionctx::exprctx::{BuildContextRef, EvalContextRef, ExprContext, ExprContextRef};
 use tidb_sessionctx::ranger::context::RangerContext;
+use tidb_sessionctx::session_mgr::SessionManager;
 use tidb_sessionctx::variable::session::SessionVars;
 
 use crate::arena::PlanArena;
@@ -56,6 +57,8 @@ pub struct PlanCtx<'s> {
     /// `privilege.GetPrivilegeManager(sctx)`: the session's privilege manager (D04.1). `None`
     /// when unbound (Go's `pm == nil` path, skipping runtime privilege checks).
     pub privilege_manager: Option<PrivilegeManagerRef>,
+    /// `p.SCtx().GetSessionManager()`: session registry used by `KILL` privilege checks.
+    pub session_manager: Option<Arc<dyn SessionManager>>,
 }
 
 /// `HasDirtyContent(tid)` of the session.
@@ -87,6 +90,8 @@ pub struct SessionPlanCtx {
     pub instance_plan_cache: Option<Arc<dyn InstancePlanCache>>,
     /// `privilege.GetPrivilegeManager(sctx)` (`None`: no privilege manager bound).
     pub privilege_manager: Option<PrivilegeManagerRef>,
+    /// `sctx.GetSessionManager()` (`None`: no session manager bound).
+    pub session_manager: Option<Arc<dyn SessionManager>>,
 }
 
 impl SessionPlanCtx {
@@ -94,12 +99,13 @@ impl SessionPlanCtx {
     // glue: N2 (sctx.GetPlanCtx())
     pub fn plan_ctx<'s>(&self, vars: &'s mut SessionVars) -> PlanCtx<'s> {
         let mut ctx = PlanCtx::new(vars, Arc::clone(&self.expr_ctx));
-        ctx.client = self.client.clone();
-        ctx.has_dirty_content = self.has_dirty_content.clone();
-        ctx.advise_txn_warmup = self.advise_txn_warmup.clone();
-        ctx.domain_info_schema = self.domain_info_schema.clone();
-        ctx.instance_plan_cache = self.instance_plan_cache.clone();
-        ctx.privilege_manager = self.privilege_manager.clone();
+        ctx.client = self.client.as_ref().map(Arc::clone);
+        ctx.has_dirty_content = self.has_dirty_content.as_ref().map(Arc::clone);
+        ctx.advise_txn_warmup = self.advise_txn_warmup.as_ref().map(Arc::clone);
+        ctx.domain_info_schema = self.domain_info_schema.as_ref().map(Arc::clone);
+        ctx.instance_plan_cache = self.instance_plan_cache.as_ref().map(Arc::clone);
+        ctx.privilege_manager = self.privilege_manager.as_ref().map(Arc::clone);
+        ctx.session_manager = self.session_manager.as_ref().map(Arc::clone);
         ctx
     }
 
@@ -109,12 +115,13 @@ impl SessionPlanCtx {
     pub fn of(ctx: &PlanCtx<'_>) -> SessionPlanCtx {
         SessionPlanCtx {
             expr_ctx: Arc::clone(&ctx.expr_ctx),
-            client: ctx.client.clone(),
-            has_dirty_content: ctx.has_dirty_content.clone(),
-            advise_txn_warmup: ctx.advise_txn_warmup.clone(),
-            domain_info_schema: ctx.domain_info_schema.clone(),
-            instance_plan_cache: ctx.instance_plan_cache.clone(),
-            privilege_manager: ctx.privilege_manager.clone(),
+            client: ctx.client.as_ref().map(Arc::clone),
+            has_dirty_content: ctx.has_dirty_content.as_ref().map(Arc::clone),
+            advise_txn_warmup: ctx.advise_txn_warmup.as_ref().map(Arc::clone),
+            domain_info_schema: ctx.domain_info_schema.as_ref().map(Arc::clone),
+            instance_plan_cache: ctx.instance_plan_cache.as_ref().map(Arc::clone),
+            privilege_manager: ctx.privilege_manager.as_ref().map(Arc::clone),
+            session_manager: ctx.session_manager.as_ref().map(Arc::clone),
         }
     }
 }
@@ -133,6 +140,7 @@ impl<'s> PlanCtx<'s> {
             domain_info_schema: None,
             instance_plan_cache: None,
             privilege_manager: None,
+            session_manager: None,
         }
     }
 

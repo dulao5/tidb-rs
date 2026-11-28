@@ -334,7 +334,7 @@ impl HeapSizer {
                 self.names(&x.names);
             }
             // Not cacheable (instance_cacheable is false): never walked.
-            PhysicalKind::NominalSort => {}
+            PhysicalKind::NominalSort | PhysicalKind::Simple => {}
         }
     }
 

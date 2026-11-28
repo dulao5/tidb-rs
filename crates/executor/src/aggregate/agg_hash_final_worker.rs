@@ -20,12 +20,12 @@ use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_chunk::ColAlloc;
 use tidb_chunk::chunk::Chunk;
-use tidb_runtime::{CheckpointHook, CheckpointStride, DoneGuard, WaitGroup};
+use tidb_runtime::{CheckpointStride, DoneGuard, WaitGroup};
 use tidb_sessionctx::exprctx::EvalContextRef;
 use tokio::sync::mpsc;
 
 use crate::aggfuncs::AggPartialResultMapper;
-use crate::internal::exec::executor::ExecutorKillerHandler;
+use crate::exec::ExecCtx;
 
 use super::agg_hash_base_worker::{BaseHashAggWorker, wait_finish};
 use super::agg_hash_executor::nil_agg_func;
@@ -78,18 +78,6 @@ impl Drop for WaitTimeGuard<'_> {
     }
 }
 
-/// `CheckpointHook` checking the statement's `SqlKiller` inside final-worker loops (spec §4.7).
-struct KillerHook<'a>(&'a ExecutorKillerHandler);
-
-impl CheckpointHook for KillerHook<'_> {
-    type Error = Error;
-
-    // glue: M-KILL CheckpointHook checking ExecutorKillerHandler
-    fn check(&self) -> Result<(), Error> {
-        self.0.handle_sql_killer_signal()
-    }
-}
-
 /// `HashAggFinalWorker` indicates the final workers of parallel hash agg execution,
 /// the number of which is controlled by `tidb_hashagg_final_concurrency`.
 pub struct HashAggFinalWorker {
@@ -103,7 +91,7 @@ pub struct HashAggFinalWorker {
 
     pub(crate) spill_helper: Arc<ParallelHashAggSpillHelper>,
     pub(crate) eval_ctx: EvalContextRef,
-    pub(crate) sql_killer: ExecutorKillerHandler,
+    pub(crate) exec_ctx: ExecCtx,
 }
 
 impl HashAggFinalWorker {
@@ -138,12 +126,11 @@ impl HashAggFinalWorker {
 
         let exec_start = Instant::now();
         let eval_ctx = &*self.eval_ctx;
-        let killer = self.sql_killer.clone();
-        let kill_hook = KillerHook(&killer);
+        let exec_ctx = self.exec_ctx.clone();
         let mut stride = CheckpointStride::new(FINAL_WORKER_CHECKPOINT_STRIDE);
 
         for (key, mut value) in input.m {
-            stride.checkpoint(&kill_hook).await?;
+            stride.checkpoint(&exec_ctx).await?;
             if let Some(dst_val) = self.partial_result_map.m.get_mut(&key) {
                 for (j, af) in self.base.agg_funcs.iter().enumerate() {
                     nil_agg_func(af)?.merge_partial_result(
@@ -189,10 +176,9 @@ impl HashAggFinalWorker {
                 0,
             ),
         );
-        let killer = self.sql_killer.clone();
-        let kill_hook = KillerHook(&killer);
+        let exec_ctx = self.exec_ctx.clone();
         for (_, mut results) in map.m.drain() {
-            stride.checkpoint(&kill_hook).await?;
+            stride.checkpoint(&exec_ctx).await?;
             let eval_ctx = &*self.eval_ctx;
             for (j, af) in self.base.agg_funcs.iter().enumerate() {
                 let f = nil_agg_func(af)?;

@@ -18,6 +18,7 @@ use tidb_kv::kv::Client;
 use tidb_kv::option::{ReplicaReadLeader, ReplicaReadType};
 use tidb_memory::sqlkiller::SqlKiller;
 use tidb_memory::tracker::Tracker;
+use tidb_runtime::KillCancel;
 
 use crate::errctx;
 
@@ -42,6 +43,7 @@ pub struct DistSQLContext {
     pub location: Arc<Location>,
     pub runtime_stats_coll: Option<Arc<RuntimeStatsColl>>,
     pub sql_killer: Option<Arc<SqlKiller>>,
+    pub kill_cancel: Option<KillCancel>,
     pub cpu_usage: Arc<SQLCPUUsages>,
     pub err_ctx: errctx::Context,
 
@@ -91,6 +93,7 @@ impl Default for DistSQLContext {
             location: utc(),
             runtime_stats_coll: None,
             sql_killer: None,
+            kill_cancel: None,
             cpu_usage: Arc::new(SQLCPUUsages::default()),
             err_ctx: errctx::StrictNoWarningContext.clone(),
             dist_sql_concurrency: 0,
@@ -169,6 +172,7 @@ impl DistSQLContext {
             location: Arc::clone(&self.location),
             runtime_stats_coll: self.runtime_stats_coll.clone(),
             sql_killer: self.sql_killer.clone(),
+            kill_cancel: self.kill_cancel.clone(),
             cpu_usage: new_cpu_usages,
             err_ctx: self.err_ctx.clone(),
             dist_sql_concurrency: self.dist_sql_concurrency,
@@ -221,6 +225,7 @@ mod tests {
         let kv_vars = Variables {
             backoff_weight: 2,
             killed: Some(killer.signal_handle()),
+            kill_cancel: Some(KillCancel::new(killer.signal_handle())),
         };
         let warn_handler = Arc::new(new_static_warn_handler(5));
 
@@ -236,6 +241,7 @@ mod tests {
             location: utc(),
             runtime_stats_coll: Some(Arc::new(RuntimeStatsColl::default())),
             sql_killer: Some(Arc::clone(&killer)),
+            kill_cancel: Some(KillCancel::new(killer.signal_handle())),
             cpu_usage: Arc::clone(&cpu),
             err_ctx: errctx::new_context_with_levels([errctx::LevelWarn; 7], warn_handler.clone()),
             dist_sql_concurrency: 1,
@@ -327,6 +333,7 @@ mod tests {
             detached.kv_vars.killed.as_ref().unwrap(),
             obj.kv_vars.killed.as_ref().unwrap()
         ));
+        assert!(detached.kill_cancel.as_ref().unwrap().is_killed());
 
         // Detached copies have independent storage with equal initial values.
         assert!(!Arc::ptr_eq(&detached.cpu_usage, &obj.cpu_usage));

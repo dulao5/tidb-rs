@@ -741,11 +741,11 @@ DefaultValueExpr -> Expr:
   | '(' SignedLiteral ')' { $2 }
   ;
 BuiltinFunction -> Expr:
-    '(' BuiltinFunction ')' { ph("BuiltinFunction#0", $span, vec![Box::new($2) as Item]) }
-  | identifier '(' ')' { ph("BuiltinFunction#1", $span, vec![]) }
-  | identifier '(' ExpressionList ')' { ph("BuiltinFunction#2", $span, vec![Box::new($3) as Item]) }
-  | uuid '(' ')' { ph("BuiltinFunction#3", $span, vec![]) }
-  | replace '(' ExpressionList ')' { ph("BuiltinFunction#4", $span, vec![Box::new($3) as Item]) }
+    '(' BuiltinFunction ')' { $2 }
+  | identifier '(' ')' { call(tok_text($lexer, &$1), Vec::new()) }
+  | identifier '(' ExpressionList ')' { call(tok_text($lexer, &$1), $3) }
+  | uuid '(' ')' { call(tok_text($lexer, &$1), Vec::new()) }
+  | replace '(' ExpressionList ')' { call(tok_text($lexer, &$1), $3) }
   ;
 NowSymOptionFractionParentheses -> Expr:
     '(' NowSymOptionFractionParentheses ')' { ph("NowSymOptionFractionParentheses#0", $span, vec![Box::new($2) as Item]) }
@@ -5212,10 +5212,10 @@ OptimizeTableStmt -> Stmt:
     optimize NoWriteToBinLogAliasOpt TableOrTables TableNameList { ph("OptimizeTableStmt#0", $span, vec![Box::new($2) as Item, Box::new($4) as Item]) }
   ;
 KillStmt -> Stmt:
-    KillOrKillTiDB NUM { ph("KillStmt#0", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
-  | KillOrKillTiDB connection NUM { ph("KillStmt#1", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
-  | KillOrKillTiDB query NUM { ph("KillStmt#2", $span, vec![Box::new($1) as Item, Box::new($3) as Item]) }
-  | KillOrKillTiDB BuiltinFunction { ph("KillStmt#3", $span, vec![Box::new($1) as Item, Box::new($2) as Item]) }
+    KillOrKillTiDB NUM { Stmt::Kill(Box::new(KillStmt { connection_id: kill_num($lexer.src_str($span), $span, p), tidb_extension: $1, ..Default::default() })) }
+  | KillOrKillTiDB connection NUM { Stmt::Kill(Box::new(KillStmt { connection_id: kill_num($lexer.src_str($span), $span, p), tidb_extension: $1, ..Default::default() })) }
+  | KillOrKillTiDB query NUM { Stmt::Kill(Box::new(KillStmt { connection_id: kill_num($lexer.src_str($span), $span, p), query: true, tidb_extension: $1, ..Default::default() })) }
+  | KillOrKillTiDB BuiltinFunction { Stmt::Kill(Box::new(KillStmt { tidb_extension: $1, expr: Some($2), ..Default::default() })) }
   ;
 KillOrKillTiDB -> bool:
     kill { false }
@@ -5856,6 +5856,19 @@ fn int_lit_datum(s: &str) -> Datum {
             Err(_) => Datum::Decimal(normalize_decimal(s)),
         },
     }
+}
+
+/// Extract the trailing unsigned integer literal (`NUM`) of a `KILL` statement.
+fn kill_num(src: &str, span: Span, p: &Ctx) -> u64 {
+    let s = src
+        .trim_end()
+        .rsplit(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or("");
+    s.parse::<u64>().unwrap_or_else(|_| {
+        p.fail(format!("{s} is out of range [0,18446744073709551615]"), span.start());
+        0
+    })
 }
 
 /// MyDecimal.FromString + String(): no leading zeros in the integer part, no trailing '.'.

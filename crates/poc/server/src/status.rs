@@ -37,7 +37,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
 /// What `/status` reports.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StatusInfo {
     /// The MySQL server version string (Go: `mysql.ServerVersion`).
     pub version: String,
@@ -46,6 +46,19 @@ pub struct StatusInfo {
     /// for `"listening on addr"` rather than the dual-stack listener address). Empty falls back
     /// to `listener.local_addr()`.
     pub listen_host: String,
+    /// Shared session manager for handling incoming `TypeKill` gRPC calls.
+    pub session_mgr: Option<Arc<tidb_server::session_mgr::ServerSessionManager>>,
+}
+
+impl std::fmt::Debug for StatusInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StatusInfo")
+            .field("version", &self.version)
+            .field("git_hash", &self.git_hash)
+            .field("listen_host", &self.listen_host)
+            .field("has_session_mgr", &self.session_mgr.is_some())
+            .finish()
+    }
 }
 
 /// Go's `net.JoinHostPort(host, port)`: wraps IPv6 literals (containing `:`) in `[...]`.
@@ -108,12 +121,14 @@ pub async fn serve(listener: TcpListener, info: StatusInfo, shutdown: impl Futur
             },
         };
         let info = Arc::clone(&info);
+        let peer_ip = peer.ip().to_string();
         conns.spawn(async move {
             let service = service_fn(move |req| {
                 let info = Arc::clone(&info);
+                let peer_ip = peer_ip.clone();
                 async move {
                     let resp = if crate::rpc::is_grpc(&req) {
-                        crate::rpc::serve(req).await
+                        crate::rpc::serve(req, info.session_mgr.as_deref(), &peer_ip).await
                     } else {
                         handle(req, &info).await
                     };
@@ -446,7 +461,9 @@ mod tests {
         }
     }
 
-    async fn start() -> TestServer {
+    async fn start_with_mgr(
+        session_mgr: Option<Arc<tidb_server::session_mgr::ServerSessionManager>>,
+    ) -> TestServer {
         let guard = STATUS_SERVER_LOCK.lock().await;
         tidb_metrics::init(&tidb_metrics::ServerFacts {
             version: "v8.5.8-tidb-rs-test".to_owned(),
@@ -460,6 +477,7 @@ mod tests {
             version: "8.0.11-TiDB-v8.5.8-tidb-rs".to_owned(),
             git_hash: "abc".to_owned(),
             listen_host: "127.0.0.1".to_owned(),
+            session_mgr,
         };
         let handle = tokio::spawn(serve(listener, info, async move {
             let _ = rx.await;
@@ -470,6 +488,10 @@ mod tests {
             handle,
             _guard: guard,
         }
+    }
+
+    async fn start() -> TestServer {
+        start_with_mgr(None).await
     }
 
     #[tokio::test]
@@ -589,6 +611,7 @@ mod tests {
         let addr = srv.addr;
 
         let req = crate::rpc::CopRequest {
+            context: Some(crate::rpc::CopContext::default()),
             tp: 103,
             data: dag(
                 vec![broadcast("FLUSH STATS_DELTA `a`.`t` CLUSTER")],
@@ -606,6 +629,7 @@ mod tests {
         assert!(select_response(&resp.data).get_chunks().is_empty());
 
         let req = crate::rpc::CopRequest {
+            context: Some(crate::rpc::CopContext::default()),
             tp: 103,
             data: dag(vec![table_scan(1)], EncodeType::TypeChunk, false),
         };
@@ -655,6 +679,36 @@ mod tests {
         srv.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn grpc_type_kill_reaches_session_manager() {
+        use prost::Message as _;
+        let mgr = tidb_server::session_mgr::ServerSessionManager::new_with_server_id(3, true);
+        let c1 = mgr.register_new_conn();
+        let srv = start_with_mgr(Some(Arc::clone(&mgr))).await;
+
+        let mut kill_exec = tipb::Executor::default();
+        kill_exec.set_tp(tipb::ExecType::TypeKill);
+        kill_exec.mut_kill().set_conn_id(c1.conn_id);
+        kill_exec.mut_kill().set_query(true);
+        let req = crate::rpc::CopRequest {
+            context: Some(crate::rpc::CopContext::default()),
+            tp: 103,
+            data: crate::rpc::testdata::dag(
+                vec![kill_exec],
+                crate::rpc::testdata::EncodeType::TypeDefault,
+                false,
+            ),
+        };
+        let (_, messages, trailers) =
+            grpc_call(srv.addr, crate::rpc::COPROCESSOR, &req.encode_to_vec()).await;
+        assert_eq!(trailers.unwrap()["grpc-status"], "0");
+        let resp = crate::rpc::CopResponse::decode(&messages[0][..]).unwrap();
+        assert_eq!(resp.other_error, "");
+        assert!(c1.kill_cancel.is_killed());
+        assert!(!c1.is_wait_shutdown());
+        srv.shutdown().await;
+    }
+
     /// Go TiDB with `tikv-client.grpc-compression-type = "gzip"` compresses its requests to
     /// status ports too: they are answered, not refused (which client-go would retry for 40 s).
     #[tokio::test]
@@ -664,6 +718,7 @@ mod tests {
         let srv = start().await;
         let addr = srv.addr;
         let req = crate::rpc::CopRequest {
+            context: Some(crate::rpc::CopContext::default()),
             tp: 103,
             data: dag(
                 vec![broadcast("FLUSH STATS_DELTA `a`.`t` CLUSTER")],
@@ -762,6 +817,7 @@ mod tests {
                 version: "8.5.8-TiDB-v8.5.8".into(),
                 git_hash: "test".into(),
                 listen_host: bind_host.to_owned(),
+                session_mgr: None,
             };
             let handle = tokio::spawn(async move {
                 serve(listener, info, async move {

@@ -30,9 +30,9 @@ pub mod timing;
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use poc_domain::Admission;
 use poc_domain::ResultCheck;
@@ -60,9 +60,13 @@ use tidb_mysql_protocol::SessionHandler;
 use tidb_mysql_protocol::SqlError;
 use tidb_mysql_protocol::Value;
 use tidb_mysql_protocol::constants::collation;
+use tidb_planner::core::common_plans::SimpleKillStmt;
+use tidb_server::session_mgr::{ConnControl, ServerSessionManager};
+use tidb_sessionctx::session_mgr::{OOMAlarmVariablesInfo, ProcessInfo, SessionManager};
 use tidb_sql::Lowered;
 use tidb_sql::PlanContext;
 use tidb_sql::Statement;
+use tidb_sql::ir::KillIr;
 use tidb_sql::ir::Literal;
 use tidb_sql::ir::Select;
 use tidb_sql::ir::SetAssignment;
@@ -111,6 +115,8 @@ pub struct Factory {
     /// on the PoC (step 0, "global variables not loaded"); with `off`, the plan-cache
     /// decision uses the compiled defaults.
     new_globals: Option<Arc<tidb_systable::sysvar_cache::SysVarCache>>,
+    /// Server-wide connection & processlist registry for `KILL` and ID lifecycle.
+    session_mgr: Option<Arc<ServerSessionManager>>,
 }
 
 impl Factory {
@@ -120,6 +126,7 @@ impl Factory {
             new_stack: NewStackMode::Off,
             new_store: None,
             new_globals: None,
+            session_mgr: None,
         }
     }
 
@@ -149,6 +156,13 @@ impl Factory {
         self
     }
 
+    /// Attaches the shared [`ServerSessionManager`] used for connection ID allocation,
+    /// `ProcessInfo` tracking, and `KILL` execution.
+    pub fn with_session_manager(mut self, session_mgr: Arc<ServerSessionManager>) -> Factory {
+        self.session_mgr = Some(session_mgr);
+        self
+    }
+
     /// The state shared by this factory's sessions.
     pub fn shared(&self) -> &Shared {
         &self.shared
@@ -157,6 +171,10 @@ impl Factory {
 
 impl SessionFactory for Factory {
     type Session = Session;
+
+    fn session_manager(&self) -> Option<Arc<ServerSessionManager>> {
+        self.session_mgr.clone()
+    }
 
     async fn lookup_user(&self, user: &str, host: &str) -> Option<Credential> {
         self.lookup_account(user, host).await.map(|a| a.credential)
@@ -180,22 +198,17 @@ impl SessionFactory for Factory {
     }
 
     fn open_session(&self, info: &ConnectionInfo) -> Result<Session, SqlError> {
-        let host = {
-            let h = info
-                .peer
-                .rsplit_once(':')
-                .map_or(info.peer.as_str(), |(h, _)| h)
-                .trim_matches(|c| c == '[' || c == ']');
-            if let Some(v4) = h
-                .strip_prefix("::ffff:")
-                .or_else(|| h.strip_prefix("::FFFF:"))
-                .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
-            {
-                v4
-            } else {
-                h
+        let (raw_host, port) = match info.peer.rsplit_once(':') {
+            Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => {
+                (h.trim_matches(|c| c == '[' || c == ']'), p)
             }
+            _ => (info.peer.trim_matches(|c| c == '[' || c == ']'), ""),
         };
+        let host = raw_host
+            .strip_prefix("::ffff:")
+            .or_else(|| raw_host.strip_prefix("::FFFF:"))
+            .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
+            .unwrap_or(raw_host);
         // Go: the handshake collation sets character_set_client/connection/results and
         // collation_connection; unknown ids fall back to the server default.
         let (charset, collation) = match info.collation {
@@ -226,9 +239,27 @@ impl SessionFactory for Factory {
             } else {
                 (info.user.clone(), "%".to_owned(), Vec::new(), None)
             };
-        let mut session = Session {
+        let ctrl = ConnControl::new(info.connection_id);
+        ctrl.process_info.store(Some(Arc::new(ProcessInfo {
+            id: info.connection_id,
+            user: info.user.clone(),
+            host: host.to_owned(),
+            port: port.to_owned(),
+            db: info.database.clone().unwrap_or_default(),
+            command: tidb_base::mysql::ComSleep,
+            time: SystemTime::now(),
+            state: tidb_mysql_protocol::constants::status::AUTOCOMMIT,
+            redact_sql: tidb_base::errors::redact_log_enabled_load().to_owned(),
+            ..ProcessInfo::default()
+        })));
+        let state = PocState {
             shared: self.shared.clone(),
+            session_mgr: self.session_mgr.clone(),
+            ctrl: Arc::clone(&ctrl),
             current_db: None,
+            raw_user: info.user.clone(),
+            peer_host: host.to_owned(),
+            peer_port: port.to_owned(),
             user: format!("{}@{host}", info.user),
             current_user: format!("{auth_user}@{auth_host}"),
             auth_user: auth_user.clone(),
@@ -256,11 +287,10 @@ impl SessionFactory for Factory {
             timer: Timer::default(),
             mdl: None,
             stmt: StmtMetrics::default(),
-            router: None,
             prev_stmt: router::LastStmtInfo::default(),
             set_applied: 0,
         };
-        if self.new_stack != NewStackMode::Off {
+        let router = if self.new_stack != NewStackMode::Off {
             let domain = self
                 .shared
                 .sync
@@ -276,37 +306,109 @@ impl SessionFactory for Factory {
                     .clone()
                     .unwrap_or_else(|| Arc::new(tidb_systable::sysvar_cache::SysVarCache::new())),
             ));
-            if let Some(pm) = privilege_manager {
+            {
                 let ns = router::NewStack::session_mut(&mut *new);
-                ns.vars_mut().user = Some(tidb_parser::auth::UserIdentity {
-                    username: info.user.clone(),
-                    hostname: host.to_owned(),
-                    auth_username: auth_user,
-                    auth_hostname: auth_host,
-                    ..Default::default()
-                });
-                ns.vars_mut().active_roles = active_roles;
-                ns.set_privilege_manager(Some(pm));
+                ns.vars_mut().connection_id = info.connection_id;
+                ns.vars_mut().port = port.to_owned();
+                ns.bind_conn_control(
+                    Arc::clone(&ctrl.killer),
+                    ctrl.kill_cancel.clone(),
+                    self.session_mgr
+                        .clone()
+                        .map(|m| m as Arc<dyn SessionManager>),
+                    Arc::clone(&ctrl.process_info),
+                );
+                if let Some(pm) = privilege_manager {
+                    ns.vars_mut().user = Some(tidb_parser::auth::UserIdentity {
+                        username: info.user.clone(),
+                        hostname: host.to_owned(),
+                        auth_username: auth_user,
+                        auth_hostname: auth_host,
+                        ..Default::default()
+                    });
+                    ns.vars_mut().active_roles = active_roles;
+                    ns.set_privilege_manager(Some(pm));
+                }
             }
-            let mut r = Router::new(self.new_stack, new, &session.poc_values());
-            r.set_connection_id(session.connection_id);
-            session.router = Some(Box::new(r));
-        }
-        Ok(session)
+            let mut r = Router::new(self.new_stack, new, &state.poc_values());
+            r.set_connection_id(state.connection_id);
+            Some(Box::new(r))
+        } else {
+            None
+        };
+        Ok(Session { state, router })
     }
 }
 
-impl Drop for Session {
+impl Drop for PocState {
     fn drop(&mut self) {
         router::trace::forget(self.connection_id);
     }
 }
 
+/// RAII guard temporarily taking [`Session::router`] onto the stack and returning it
+/// unconditionally on drop (including async future cancellation at any `.await` point or unwind),
+/// preventing permanent router loss (`#542`).
+struct RouterGuard<'a> {
+    slot: &'a mut Option<Box<Router>>,
+    router: Option<Box<Router>>,
+}
+
+impl<'a> RouterGuard<'a> {
+    fn take(slot: &'a mut Option<Box<Router>>) -> Option<Self> {
+        let router = slot.take()?;
+        Some(Self {
+            slot,
+            router: Some(router),
+        })
+    }
+}
+
+impl Deref for RouterGuard<'_> {
+    type Target = Router;
+
+    fn deref(&self) -> &Self::Target {
+        self.router
+            .as_deref()
+            .expect("RouterGuard holds router until drop")
+    }
+}
+
+impl DerefMut for RouterGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.router
+            .as_deref_mut()
+            .expect("RouterGuard holds router until drop")
+    }
+}
+
+impl Drop for RouterGuard<'_> {
+    fn drop(&mut self) {
+        if self.slot.is_none() {
+            *self.slot = self.router.take();
+        }
+    }
+}
+
 /// One client connection's session.
 pub struct Session {
+    state: PocState,
+    /// The router between the PoC and the ported stack (`--new-stack=fallback|strict`); `None` with `off`.
+    router: Option<Box<Router>>,
+}
+
+/// Inner PoC session state, split from `Session::router` so [`RouterGuard`] can lend `&mut PocState`
+/// across `.await` points without losing the router if a future is dropped mid-execution.
+struct PocState {
     shared: Arc<Shared>,
+    session_mgr: Option<Arc<ServerSessionManager>>,
+    ctrl: Arc<ConnControl>,
     /// Current database as given to `USE` (Go `CurrentDB`).
     current_db: Option<String>,
+    /// Raw MySQL login username (Go `ProcessInfo.User` / `UserIdentity.Username`).
+    raw_user: String,
+    peer_host: String,
+    peer_port: String,
     user: String,
     current_user: String,
     auth_user: String,
@@ -354,8 +456,6 @@ pub struct Session {
     mdl: Option<StmtGuard>,
     /// Prometheus bookkeeping of the statement in flight.
     stmt: StmtMetrics,
-    /// The router between the PoC and the ported stack (`--new-stack=fallback|strict`); `None` with `off`.
-    router: Option<Box<Router>>,
     /// How many assignments of the current statement's `SET` were applied (`run_set`); 0 for
     /// any other statement.
     set_applied: usize,
@@ -430,6 +530,7 @@ pub(crate) fn stmt_type(stmt: &Statement) -> StmtType {
         Statement::Commit => StmtType::Commit,
         Statement::Rollback => StmtType::Rollback,
         Statement::ShowWarnings { .. } => StmtType::Show,
+        Statement::Kill(_) => StmtType::General,
     }
 }
 
@@ -540,7 +641,7 @@ fn autocommit_fence(normalized: &str) -> Result<(), SqlError> {
 ///
 /// The SET executor (`SetExecutor.setSysVariable`) is D12.12 and not ported: the prototype
 /// runs SET, so the validation runs here, against `vars`: the prototype's session variables
-/// (`Session::default_session`), over the cluster's global values (the loader's sysvar
+/// (`PocState::default_session`), over the cluster's global values (the loader's sysvar
 /// cache, D06.5 spec §8), or the compiled defaults while the cache is not built yet.
 /// Validations that read another variable (`tidb_skip_isolation_level_check` for
 /// `transaction_isolation`, `tidb_enable_noop_functions` for `transaction_read_only`) read
@@ -658,7 +759,90 @@ const IGNORED_SYSVARS: &[&str] = &[
 /// accepts (Go's `buildSelect` adds a Limit for any other value; the prototype has none).
 const NO_SELECT_LIMIT: &str = "18446744073709551615";
 
-impl Session {
+impl PocState {
+    fn check_killed(&self) -> Result<(), SqlError> {
+        self.ctrl
+            .killer
+            .handle_signal()
+            .map_err(|err| SqlError::from_tidb_error(&err))
+    }
+
+    fn exec_ctx(&self, schema_version: i64) -> ExecContext {
+        ExecContext {
+            dag: self.shared.dag.clone(),
+            schema_version,
+            killer: Some(Arc::clone(&self.ctrl.killer)),
+            kill_cancel: Some(self.ctrl.kill_cancel.clone()),
+        }
+    }
+
+    fn current_max_execution_time_ms(&self) -> u64 {
+        if let Some(dv) = &self.default_vars {
+            return dv.vars().get_max_execution_time();
+        }
+        if let Some((_, val)) = self
+            .session_values
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "max_execution_time")
+            && let Some(v) = val
+        {
+            return v.parse::<u64>().unwrap_or(0);
+        }
+        if let Some(cache) = &self.globals
+            && !cache.needs_rebuild()
+            && let Ok(v) = cache.global_var("max_execution_time")
+        {
+            return v.parse::<u64>().unwrap_or(0);
+        }
+        0
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_process_info(
+        &self,
+        sql: &str,
+        command: u8,
+        state_flags: u16,
+        redact_sql: &str,
+        session_alias: &str,
+        txn_start_ts: u64,
+        max_execution_time: u64,
+    ) {
+        let oom_alarm_variables_info = self
+            .default_vars
+            .as_deref()
+            .map(|dv| {
+                let v = dv.vars();
+                OOMAlarmVariablesInfo {
+                    session_analyze_version: v.analyze_version as isize,
+                    session_enabled_rate_limit_action: v.enabled_rate_limit_action,
+                    session_mem_quota_query: v.mem_quota_query,
+                }
+            })
+            .unwrap_or_default();
+        store_process_info_entry(
+            &self.ctrl,
+            &self.raw_user,
+            &self.peer_host,
+            &self.peer_port,
+            self.current_db.as_deref().unwrap_or_default(),
+            sql,
+            command,
+            state_flags,
+            redact_sql,
+            session_alias,
+            txn_start_ts,
+            max_execution_time,
+            oom_alarm_variables_info,
+        );
+    }
+
+    fn mark_process_info_in_select(&self) {
+        let max_exec = self.current_max_execution_time_ms();
+        mark_process_info_in_select_entry(&self.ctrl, max_exec);
+    }
+
     /// A SELECT without FROM ([`constant`]), over the prototype's session variables; the
     /// warnings it appends go to the statement's.
     fn const_select(&mut self, sel: &Select, params: &[Literal]) -> Result<ResultSet, SqlError> {
@@ -760,7 +944,7 @@ impl Session {
         match &lowered.stmt {
             Statement::Select(sel) => self.select(sel, params, ts).await.map(Response::ResultSet),
             Statement::Use(db) => {
-                self.use_db(db).await?;
+                self.use_db_inner(db).await?;
                 Ok(ok())
             }
             Statement::Set(assignments) => {
@@ -774,7 +958,30 @@ impl Session {
                 &self.warnings,
                 *errors,
             ))),
+            Statement::Kill(kill_ir) => {
+                self.run_kill(kill_ir).await?;
+                Ok(ok())
+            }
         }
+    }
+
+    async fn run_kill(&mut self, kill_ir: &KillIr) -> Result<(), SqlError> {
+        let sm_dyn = self
+            .session_mgr
+            .as_deref()
+            .map(|m| m as &dyn SessionManager);
+        execute_poc_kill(
+            kill_ir,
+            self.connection_id,
+            &self.raw_user,
+            &self.peer_host,
+            &self.active_roles,
+            self.privilege_manager.as_deref(),
+            sm_dyn,
+            &self.ctrl.killer,
+            &mut self.warnings,
+        )
+        .await
     }
 
     async fn select(
@@ -783,6 +990,8 @@ impl Session {
         params: &[Literal],
         ts: Option<TsFuture>,
     ) -> Result<ResultSet, SqlError> {
+        self.check_killed()?;
+        self.mark_process_info_in_select();
         if sel.from.is_none() {
             let mut rs = self.const_select(sel, params)?;
             for c in &mut rs.columns {
@@ -815,6 +1024,7 @@ impl Session {
                 }
             }
         };
+        self.check_killed()?;
         count_expensive(&plan);
         let rows = poc_executor::finish(&plan, rows, self.shared.dag.new_collation_enabled)?;
         self.timer.mark(Phase::Finish);
@@ -897,14 +1107,12 @@ impl Session {
             (self.shared.kv.latest_snapshot(), None)
         } else {
             let start_ts = TsFuture::request(&self.shared.kv).wait().await?;
+            self.check_killed()?;
             self.stmt.took_ts = true;
             self.timer.mark(Phase::Tso);
             (self.shared.kv.snapshot(start_ts), Some(start_ts))
         };
-        let cx = ExecContext {
-            dag: self.shared.dag.clone(),
-            schema_version: schema.version(),
-        };
+        let cx = self.exec_ctx(schema.version());
         let rows = poc_executor::read_source(&plan, &mut snapshot, &cx).await;
         self.timer.mark(Phase::KvRead);
         // Fencing, then the schema lease at the read TS (Go: `SchemaChecker.Check`).
@@ -924,7 +1132,7 @@ impl Session {
     /// Plan with the newest cached schema and read at `start_ts` while checking, concurrently
     /// and at the same `start_ts`, that this schema is the one visible there. Returns the plan
     /// and source rows if the check passed (read errors are returned only then), else
-    /// `Err((start_ts, raw version key if read))` for [`Session::checked_read`].
+    /// `Err((start_ts, raw version key if read))` for [`PocState::checked_read`].
     #[allow(clippy::type_complexity)]
     async fn optimistic_read(
         &mut self,
@@ -940,6 +1148,7 @@ impl Session {
             .and_then(|is| self.plan(sel, &is, params).ok().map(|plan| (is, plan)));
         self.timer.mark(Phase::Plan);
         let start_ts = ts.wait().await?;
+        self.check_killed()?;
         self.stmt.took_ts = true;
         self.timer.mark(Phase::Tso);
         // No cached schema yet, or planning failed with it (it may not be the right one):
@@ -949,10 +1158,7 @@ impl Session {
         };
         self.timer.set_kind(Kind::of(&plan));
         let mut snapshot = self.shared.kv.snapshot(start_ts);
-        let cx = ExecContext {
-            dag: self.shared.dag.clone(),
-            schema_version: is.version(),
-        };
+        let cx = self.exec_ctx(is.version());
         let (check, rows) = futures::join!(
             self.shared.schema.check_at(&is, start_ts),
             poc_executor::read_source(&plan, &mut snapshot, &cx)
@@ -979,15 +1185,13 @@ impl Session {
             None => schema.info_schema_at(start_ts).await,
         }
         .map_err(kv_error)?;
+        self.check_killed()?;
         self.timer.mark(Phase::Schema);
         let plan = self.plan(sel, &is, params)?;
         self.timer.set_kind(Kind::of(&plan));
         self.timer.mark(Phase::Plan);
         let mut snapshot = self.shared.kv.snapshot(start_ts);
-        let cx = ExecContext {
-            dag: self.shared.dag.clone(),
-            schema_version: is.version(),
-        };
+        let cx = self.exec_ctx(is.version());
         let rows = poc_executor::read_source(&plan, &mut snapshot, &cx).await?;
         self.timer.mark(Phase::KvRead);
         Ok((plan, rows))
@@ -1021,6 +1225,121 @@ impl Session {
         self.set_applied = applied;
         result
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_poc_kill(
+    kill_ir: &KillIr,
+    connection_id: u64,
+    raw_user: &str,
+    peer_host: &str,
+    active_roles: &[tidb_parser::auth::RoleIdentity],
+    privilege_manager: Option<&dyn tidb_privilege::PrivilegeManager>,
+    session_mgr: Option<&dyn SessionManager>,
+    killer: &tidb_memory::sqlkiller::SqlKiller,
+    warnings: &mut Vec<SQLWarn>,
+) -> Result<(), SqlError> {
+    // Match Go PlanBuilder.Build (*ast.KillStmt): shared privilege check helper (allows when
+    // privilege_manager is absent, matching new stack's check_build_privileges_and_mode).
+    tidb_planner::core::planbuilder::check_kill_privilege(
+        active_roles,
+        privilege_manager,
+        session_mgr,
+        Some(raw_user),
+        kill_ir.connection_id,
+        kill_ir.expr_name.is_some() || kill_ir.expr_invalid,
+    )
+    .map_err(|err| router::sql_error(&err))?;
+    let sc = tidb_sessionctx::stmtctx::new_stmt_ctx();
+    let simple_kill = SimpleKillStmt {
+        query: kill_ir.query,
+        connection_id: kill_ir.connection_id,
+        tidb_extension: kill_ir.tidb_extension,
+        expr_func_name: kill_ir.expr_name.clone(),
+        expr_invalid: kill_ir.expr_invalid,
+    };
+    let res = tidb_executor::simple::execute_kill_stmt(
+        Some(&sc),
+        connection_id,
+        session_mgr,
+        false,
+        peer_host,
+        &simple_kill,
+    )
+    .await;
+    warnings.extend(sc.get_warnings());
+    res.map_err(|e| router::sql_error(&e))?;
+    // Match Go executor.Next post-check: KILL QUERY <self> immediately interrupts this stmt.
+    killer
+        .handle_signal()
+        .map_err(|err| SqlError::from_tidb_error(&err))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn store_process_info_entry(
+    ctrl: &ConnControl,
+    user: &str,
+    host: &str,
+    port: &str,
+    db: &str,
+    sql: &str,
+    command: u8,
+    state_flags: u16,
+    redact_sql: &str,
+    session_alias: &str,
+    txn_start_ts: u64,
+    max_execution_time: u64,
+    oom_alarm_variables_info: OOMAlarmVariablesInfo,
+) {
+    let old = ctrl.process_info.load();
+    let time = match old.as_deref() {
+        Some(prev) if prev.info == sql && prev.command == command => prev.time,
+        _ => SystemTime::now(),
+    };
+    ctrl.process_info.store(Some(Arc::new(ProcessInfo {
+        id: ctrl.conn_id,
+        user: user.to_owned(),
+        host: host.to_owned(),
+        port: port.to_owned(),
+        db: db.to_owned(),
+        command,
+        time,
+        state: state_flags,
+        info: sql.to_owned(),
+        max_execution_time,
+        redact_sql: redact_sql.to_owned(),
+        session_alias: session_alias.to_owned(),
+        cur_txn_start_ts: txn_start_ts,
+        oom_alarm_variables_info,
+        ..ProcessInfo::default()
+    })));
+}
+
+fn mark_process_info_in_select_entry(ctrl: &ConnControl, max_execution_time: u64) {
+    if max_execution_time == 0 {
+        return;
+    }
+    let Some(prev) = ctrl.process_info.load_full() else {
+        return;
+    };
+    ctrl.process_info.store(Some(Arc::new(ProcessInfo {
+        id: prev.id,
+        user: prev.user.clone(),
+        host: prev.host.clone(),
+        port: prev.port.clone(),
+        db: prev.db.clone(),
+        command: prev.command,
+        time: prev.time,
+        state: prev.state,
+        info: prev.info.clone(),
+        max_execution_time,
+        redact_sql: prev.redact_sql.clone(),
+        session_alias: prev.session_alias.clone(),
+        cur_txn_start_ts: prev.cur_txn_start_ts,
+        oom_alarm_variables_info: prev.oom_alarm_variables_info.clone(),
+        ..ProcessInfo::default()
+    })));
 }
 
 /// A session value of the prototype's session variables: the variable, and its value
@@ -1318,46 +1637,34 @@ fn params_to_literals(params: Vec<Param>) -> Result<Vec<Literal>, SqlError> {
 
 impl SessionHandler for Session {
     async fn query(&mut self, sql: &str) -> Result<Response, SqlError> {
-        let r = match self.router.take() {
+        let r = match RouterGuard::take(&mut self.router) {
             None => {
-                router::trace::record(self.connection_id, "poc", "new_stack_off");
-                self.query_inner(sql).await
+                router::trace::record(self.state.connection_id, "poc", "new_stack_off");
+                self.state.query_inner(sql).await
             }
-            Some(mut router) => {
-                let r = router.query(self, sql).await;
-                self.router = Some(router);
-                r
-            }
+            Some(mut router) => router.query(&mut self.state, sql).await,
         };
-        self.stmt.failed = r.is_err();
+        self.state.stmt.failed = r.is_err();
         r
     }
 
     async fn prepare(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
-        self.stmt.stmt_type = None;
-        match self.router.take() {
-            None => self.prepare_inner(stmt_id, sql).await,
-            Some(mut router) => {
-                let r = router.prepare(self, stmt_id, sql).await;
-                self.router = Some(router);
-                r
-            }
+        self.state.stmt.stmt_type = None;
+        match RouterGuard::take(&mut self.router) {
+            None => self.state.prepare_inner(stmt_id, sql).await,
+            Some(mut router) => router.prepare(&mut self.state, stmt_id, sql).await,
         }
     }
 
     async fn execute(&mut self, stmt_id: u32, params: Vec<Param>) -> Result<Response, SqlError> {
-        let r = match self.router.take() {
+        let r = match RouterGuard::take(&mut self.router) {
             None => {
-                router::trace::record(self.connection_id, "poc", "new_stack_off");
-                self.execute_inner(stmt_id, params).await
+                router::trace::record(self.state.connection_id, "poc", "new_stack_off");
+                self.state.execute_inner(stmt_id, params).await
             }
-            Some(mut router) => {
-                let r = router.execute(self, stmt_id, params).await;
-                self.router = Some(router);
-                r
-            }
+            Some(mut router) => router.execute(&mut self.state, stmt_id, params).await,
         };
-        self.stmt.failed = r.is_err();
+        self.state.stmt.failed = r.is_err();
         r
     }
 
@@ -1374,37 +1681,32 @@ impl SessionHandler for Session {
     }
 
     fn command_done(&mut self, write: std::time::Duration, total: std::time::Duration) {
-        self.mdl = None;
-        self.timer.end(write, total);
-        self.stmt.finish(total);
+        self.state.mdl = None;
+        self.state.timer.end(write, total);
+        self.state.stmt.finish(total);
     }
 
     fn stmt_type(&self) -> StmtType {
-        self.stmt.stmt_type.unwrap_or(StmtType::General)
+        self.state.stmt.stmt_type.unwrap_or(StmtType::General)
     }
 
     fn close(&mut self, stmt_id: u32) {
-        match self.router.take() {
+        match RouterGuard::take(&mut self.router) {
             None => {
-                self.stmts.remove(&stmt_id);
+                self.state.stmts.remove(&stmt_id);
             }
-            Some(mut router) => {
-                router.close(self, stmt_id);
-                self.router = Some(router);
-            }
+            Some(mut router) => router.close(&mut self.state, stmt_id),
         }
     }
 
     async fn use_db(&mut self, db: &str) -> Result<(), SqlError> {
         // COM_INIT_DB and the handshake's database: Go runs them as a `USE` statement.
         tidb_metrics::statement(StmtType::Use);
-        let r = self.use_db_inner(db).await;
+        let r = self.state.use_db_inner(db).await;
         if r.is_ok()
-            && let Some(router) = self.router.take()
+            && let Some(mut router) = RouterGuard::take(&mut self.router)
         {
-            let mut router = router;
-            router.use_db(self);
-            self.router = Some(router);
+            router.use_db(&self.state);
         }
         r
     }
@@ -1460,15 +1762,46 @@ impl SessionHandler for Session {
     }
 
     fn collation_name(&self) -> &str {
-        if !self.collation.is_empty() {
-            &self.collation
+        if !self.state.collation.is_empty() {
+            &self.state.collation
         } else {
             "utf8mb4_bin"
         }
     }
+
+    fn conn_control(&self) -> Option<Arc<ConnControl>> {
+        Some(Arc::clone(&self.state.ctrl))
+    }
+
+    fn should_install_connection_alive_during_execute(&self) -> bool {
+        // Until D03.1 streams RecordSet rows inside `write_result_set`, both the new stack
+        // (`Router::query`) and PoC (`PocState::query`) pull all chunks inside `query()` /
+        // `execute()`. Install the liveness probe here so slow SELECTs detect peer TCP
+        // disconnect at ~1s just like Go's `handleStmt` -> `setSQLKillerConnectionAlive()`.
+        true
+    }
+
+    fn set_process_info_command(&mut self, sql: &str, command: u8) {
+        if let Some(router) = &mut self.router {
+            router
+                .new_stack_mut()
+                .session_mut()
+                .vars_mut()
+                .command_value = u32::from(command);
+        }
+        if let Some(dv) = &mut self.state.default_vars {
+            dv.vars_mut().command_value = u32::from(command);
+        }
+        let status = self.status_flags();
+        let redact = self.redact_mode().to_owned();
+        let alias = self.session_alias().to_owned();
+        let ts = self.txn_timestamp();
+        self.state
+            .update_process_info(sql, command, status, &redact, &alias, ts, 0);
+    }
 }
 
-impl Session {
+impl PocState {
     fn parse_options(&mut self) -> Result<tidb_parser::ParseOptions, SqlError> {
         let vars = self.default_vars()?;
         Ok(tidb_parser::ParseOptions {
@@ -1476,7 +1809,6 @@ impl Session {
             sql_mode: tidb_base::mysql::SQLMode(vars.sql_mode),
         })
     }
-
     async fn query_inner(&mut self, sql: &str) -> Result<Response, SqlError> {
         self.timer.begin();
         self.mdl = None;
@@ -1573,10 +1905,10 @@ impl Session {
         Ok(self.default_session()?.vars())
     }
 
-    /// The session behind [`Session::default_vars`], also the one the prototype's `SET`
+    /// The session behind [`PocState::default_vars`], also the one the prototype's `SET`
     /// validates its values against and writes them into ([`run_set`]): the cluster's global
     /// values once the sysvar cache is built, the compiled defaults before, with the
-    /// session's own values ([`Session::session_values`]) written over them.
+    /// session's own values ([`PocState::session_values`]) written over them.
     fn default_session(&mut self) -> Result<&mut tidb_session::Session, SqlError> {
         let built = self.globals.as_ref().is_some_and(|c| !c.needs_rebuild());
         if built && !self.default_vars_loaded {
@@ -1730,7 +2062,7 @@ pub(crate) fn router_schema_version(
     registry?.new_stack_schema_version(now).ok()
 }
 
-impl router::PocEngine for Session {
+impl router::PocEngine for PocState {
     fn admissible_schema_version(&self) -> Option<i64> {
         router_schema_version(
             self.shared.sync.as_ref().map(|s| &**s.registry()),
@@ -1886,6 +2218,8 @@ async fn tidb_table_rows(kv: &KvClient, schema: &SchemaCache) -> Result<Vec<Vec<
     let cx = ExecContext {
         dag: DagContext::select_utc(),
         schema_version: is.version(),
+        killer: None,
+        kill_cancel: None,
     };
     poc_executor::execute(&plan, &mut snapshot, &cx).await
 }
@@ -2689,5 +3023,469 @@ mod fence_tests {
         let stmt4 = tidb_sql::parse_and_lower_with(r#"SELECT "abc""#, &opts(&s)).unwrap();
         let err = eval_const_select(&mut s, &stmt4).unwrap_err();
         assert_eq!(err.code, 1054, "{}", err.message);
+    }
+}
+
+#[cfg(test)]
+mod kill_and_guard_tests {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Waker};
+
+    use tidb_parser::ast;
+    use tidb_privilege::{DynamicPrivRecord, MySQLPrivilege, UserPrivileges, UserRecord};
+
+    use super::*;
+    use crate::router::{NewStack, PocEngine};
+
+    #[test]
+    fn router_guard_drop_at_every_await_never_loses_router() {
+        struct YieldingNew {
+            inner: router::newstack::NewSession,
+            yields: usize,
+        }
+        impl router::NewStack for YieldingNew {
+            fn session(&self) -> &tidb_session::Session {
+                self.inner.session()
+            }
+            fn session_mut(&mut self) -> &mut tidb_session::Session {
+                self.inner.session_mut()
+            }
+            fn info_schema_version(&self) -> Option<i64> {
+                Some(1)
+            }
+            fn globals_ready(&self) -> bool {
+                true
+            }
+            fn execute<'a>(
+                &'a mut self,
+                _stmt: ast::Stmt,
+                _sql: &'a str,
+            ) -> router::BoxFut<'a, Result<Response, tidb_base::Error>> {
+                let yields = self.yields;
+                Box::pin(async move {
+                    for _ in 0..yields {
+                        tokio::task::yield_now().await;
+                    }
+                    Ok(Response::Ok(OkInfo::default()))
+                })
+            }
+            fn prepare<'a>(
+                &'a mut self,
+                _sql: &'a str,
+            ) -> router::BoxFut<'a, Result<router::NewPrepared, tidb_base::Error>> {
+                let yields = self.yields;
+                Box::pin(async move {
+                    for _ in 0..yields {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(tidb_base::blocked::blocked("D13.1", "prepare"))
+                })
+            }
+            fn execute_prepared<'a>(
+                &'a mut self,
+                _stmt_id: u32,
+                _params: &'a [Param],
+                _raw: &'a tidb_mysql_protocol::RawParams,
+            ) -> router::BoxFut<'a, Result<Response, tidb_base::Error>> {
+                Box::pin(async { Ok(Response::Ok(OkInfo::default())) })
+            }
+            fn close(&mut self, stmt_id: u32) {
+                self.inner.close(stmt_id);
+            }
+        }
+
+        #[derive(Default)]
+        struct DummyPoc {
+            log: Vec<String>,
+        }
+        impl router::PocEngine for DummyPoc {
+            fn admissible_schema_version(&self) -> Option<i64> {
+                Some(1)
+            }
+            fn in_txn(&self) -> bool {
+                false
+            }
+            fn values(&self) -> PocValues {
+                PocValues {
+                    current_db: None,
+                    charset: "utf8mb4".into(),
+                    collation: "utf8mb4_bin".into(),
+                    results_charset: Some("utf8mb4".into()),
+                }
+            }
+            fn set_applied(&self) -> usize {
+                0
+            }
+            fn begin_command(&mut self) {}
+            fn start_statement(&mut self, _: StmtType, _: Duration) {}
+            fn run<'a>(
+                &'a mut self,
+                _: &'a Lowered,
+            ) -> router::BoxFut<'a, Result<Response, SqlError>> {
+                self.log.push("poc_run".into());
+                Box::pin(async { Ok(ok()) })
+            }
+            fn prepare(
+                &mut self,
+                _: u32,
+                _: Lowered,
+            ) -> router::BoxFut<'_, Result<PreparedInfo, SqlError>> {
+                self.log.push("poc_prepare".into());
+                Box::pin(async { Ok(PreparedInfo::default()) })
+            }
+            fn execute(
+                &mut self,
+                _: u32,
+                _: Vec<Param>,
+            ) -> router::BoxFut<'_, Result<Response, SqlError>> {
+                Box::pin(async { Ok(ok()) })
+            }
+            fn close(&mut self, _: u32) {}
+        }
+
+        struct CappedWaker(Arc<AtomicBool>);
+        impl std::task::Wake for CappedWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn drive_until_limit<F: Future>(fut: F, max_polls: usize) -> Option<F::Output> {
+            let mut fut = std::pin::pin!(fut);
+            let woke = Arc::new(AtomicBool::new(false));
+            let waker = Waker::from(Arc::new(CappedWaker(Arc::clone(&woke))));
+            let mut cx = Context::from_waker(&waker);
+            for _ in 0..max_polls {
+                match fut.as_mut().poll(&mut cx) {
+                    Poll::Ready(out) => return Some(out),
+                    Poll::Pending => {}
+                }
+            }
+            None
+        }
+
+        let make_slot = |yields: usize, poc: &DummyPoc| -> Option<Box<Router>> {
+            let mut ns = router::newstack::NewSession::default();
+            ns.session_mut()
+                .vars_mut()
+                .set_system_var("max_execution_time", "0")
+                .unwrap();
+            let r = Router::new(
+                NewStackMode::Fallback,
+                Box::new(YieldingNew { inner: ns, yields }),
+                &poc.values(),
+            );
+            assert_eq!(r.session_condition(poc), None);
+            Some(Box::new(r))
+        };
+
+        // Drop query future at every `.await` poll (1..=6) and verify Router is never lost.
+        for max_polls in 1..=6 {
+            let mut poc = DummyPoc::default();
+            let mut slot = make_slot(4, &poc);
+            let finished = {
+                let mut guard = RouterGuard::take(&mut slot).expect("router present");
+                drive_until_limit(guard.query(&mut poc, "SELECT 1"), max_polls)
+            };
+            assert!(
+                slot.is_some(),
+                "Router must be returned to slot after dropping query at poll {max_polls}"
+            );
+            if max_polls < 5 {
+                assert!(finished.is_none());
+            } else {
+                assert!(finished.unwrap().is_ok());
+            }
+        }
+
+        // Drop prepare future at every `.await` poll (1..=6) and verify Router is never lost.
+        for max_polls in 1..=6 {
+            let mut poc = DummyPoc::default();
+            let mut slot = make_slot(4, &poc);
+            {
+                let mut guard = RouterGuard::take(&mut slot).expect("router present");
+                let _ = drive_until_limit(guard.prepare(&mut poc, 1, "SELECT 1"), max_polls);
+            }
+            assert!(
+                slot.is_some(),
+                "Router must be returned to slot after dropping prepare at poll {max_polls}"
+            );
+        }
+    }
+
+    #[test]
+    fn execute_poc_kill_auth_self_kill_and_warnings() {
+        let mut mp = MySQLPrivilege::new();
+        mp.add_user(UserRecord::new(
+            "%",
+            "alice",
+            tidb_base::mysql::PrivilegeType(0),
+        ));
+        mp.add_user(UserRecord::new("%", "super_u", tidb_base::mysql::SuperPriv));
+        mp.add_user(UserRecord::new(
+            "%",
+            "conn_admin",
+            tidb_base::mysql::PrivilegeType(0),
+        ));
+        mp.add_dynamic_priv(DynamicPrivRecord::new(
+            "conn_admin",
+            "%",
+            "CONNECTION_ADMIN",
+            false,
+        ));
+        let handle = Arc::new(tidb_privilege::Handle::new(mp));
+
+        let mgr = ServerSessionManager::new_standalone();
+        let bob = mgr.register_new_conn();
+        bob.process_info.store(Some(Arc::new(ProcessInfo {
+            id: bob.conn_id,
+            user: "bob".to_owned(),
+            command: tidb_base::mysql::ComSleep,
+            ..Default::default()
+        })));
+        let alice = mgr.register_new_conn();
+        alice.process_info.store(Some(Arc::new(ProcessInfo {
+            id: alice.conn_id,
+            user: "alice".to_owned(),
+            command: tidb_base::mysql::ComSleep,
+            ..Default::default()
+        })));
+
+        let parse_kill = |sql: &str| -> KillIr {
+            let lowered = tidb_sql::parse_and_lower(sql).unwrap();
+            match lowered.stmt {
+                Statement::Kill(k) => k,
+                other => panic!("expected KillIr, got {other:?}"),
+            }
+        };
+
+        let alice_pm = UserPrivileges::new("alice".to_owned(), "%".to_owned(), Arc::clone(&handle));
+        let super_pm =
+            UserPrivileges::new("super_u".to_owned(), "%".to_owned(), Arc::clone(&handle));
+        let admin_pm =
+            UserPrivileges::new("conn_admin".to_owned(), "%".to_owned(), Arc::clone(&handle));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let sm_dyn: &dyn SessionManager = &*mgr;
+
+        // 1. Cross-user KILL without SUPER / CONNECTION_ADMIN -> 1227.
+        let mut warns = Vec::new();
+        let err = rt
+            .block_on(execute_poc_kill(
+                &parse_kill(&format!("KILL QUERY {}", bob.conn_id)),
+                alice.conn_id,
+                "alice",
+                "127.0.0.1",
+                &[],
+                Some(&alice_pm),
+                Some(sm_dyn),
+                &alice.killer,
+                &mut warns,
+            ))
+            .unwrap_err();
+        assert_eq!(err.code, 1227);
+        assert!(err.message.contains("SUPER or CONNECTION_ADMIN"), "{err}");
+        assert_eq!(bob.killer.get_kill_signal(), 0);
+
+        // 2. SUPER and CONNECTION_ADMIN succeed and interrupt target without setting conn_shutdown.
+        for pm in [&super_pm, &admin_pm] {
+            bob.killer.reset();
+            let mut w = Vec::new();
+            rt.block_on(execute_poc_kill(
+                &parse_kill(&format!("KILL QUERY {}", bob.conn_id)),
+                alice.conn_id,
+                "alice",
+                "127.0.0.1",
+                &[],
+                Some(pm),
+                Some(sm_dyn),
+                &alice.killer,
+                &mut w,
+            ))
+            .unwrap();
+            assert_eq!(
+                bob.killer.get_kill_signal(),
+                tidb_memory::sqlkiller::QueryInterrupted
+            );
+            assert!(!bob.conn_shutdown.is_cancelled());
+        }
+
+        // 3. Unprivileged self-kill via explicit ID or CONNECTION_ID() returns 1317.
+        for sql in [
+            format!("KILL QUERY {}", alice.conn_id),
+            "KILL CONNECTION_ID()".to_owned(),
+        ] {
+            alice.killer.reset();
+            let mut w = Vec::new();
+            let err = rt
+                .block_on(execute_poc_kill(
+                    &parse_kill(&sql),
+                    alice.conn_id,
+                    "alice",
+                    "127.0.0.1",
+                    &[],
+                    Some(&alice_pm),
+                    Some(sm_dyn),
+                    &alice.killer,
+                    &mut w,
+                ))
+                .unwrap_err();
+            assert_eq!(err.code, 1317, "{sql}");
+        }
+        alice.killer.reset();
+
+        // 4. Truncated 32-bit odd connection ID -> OK + Warning 1105.
+        let mut w = Vec::new();
+        rt.block_on(execute_poc_kill(
+            &parse_kill("KILL 99999999"),
+            alice.conn_id,
+            "alice",
+            "127.0.0.1",
+            &[],
+            Some(&alice_pm),
+            Some(sm_dyn),
+            &alice.killer,
+            &mut w,
+        ))
+        .unwrap();
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].err
+                .to_string()
+                .contains("32bits truncated ConnectionID"),
+            "{:?}",
+            w[0].err
+        );
+
+        // 5. Nonexistent valid global ID -> silent OK, zero warnings.
+        let mut w = Vec::new();
+        rt.block_on(execute_poc_kill(
+            &parse_kill("KILL 2099998"),
+            alice.conn_id,
+            "alice",
+            "127.0.0.1",
+            &[],
+            Some(&alice_pm),
+            Some(sm_dyn),
+            &alice.killer,
+            &mut w,
+        ))
+        .unwrap();
+        assert!(w.is_empty());
+
+        // 6. Invalid function in KILL expr -> Invalid operation error.
+        let mut w = Vec::new();
+        let err = rt
+            .block_on(execute_poc_kill(
+                &parse_kill("KILL VERSION()"),
+                alice.conn_id,
+                "alice",
+                "127.0.0.1",
+                &[],
+                Some(&alice_pm),
+                Some(sm_dyn),
+                &alice.killer,
+                &mut w,
+            ))
+            .unwrap_err();
+        assert_eq!(err.code, 1105);
+        assert!(err.message.contains("Invalid operation"));
+
+        // 7. When privilege_manager is absent (None), PoC matches new stack and allows cross-user KILL.
+        bob.killer.reset();
+        let mut w = Vec::new();
+        rt.block_on(execute_poc_kill(
+            &parse_kill(&format!("KILL QUERY {}", bob.conn_id)),
+            alice.conn_id,
+            "alice",
+            "127.0.0.1",
+            &[],
+            None,
+            Some(sm_dyn),
+            &alice.killer,
+            &mut w,
+        ))
+        .unwrap();
+        assert_eq!(
+            bob.killer.get_kill_signal(),
+            tidb_memory::sqlkiller::QueryInterrupted
+        );
+        bob.killer.reset();
+
+        // 8. KILL CONNECTION_ID(<args>) matches Go simple.go:2667 (kills caller's own conn).
+        alice.killer.reset();
+        let mut w = Vec::new();
+        let err = rt
+            .block_on(execute_poc_kill(
+                &parse_kill("KILL CONNECTION_ID(1)"),
+                alice.conn_id,
+                "alice",
+                "127.0.0.1",
+                &[],
+                Some(&alice_pm),
+                Some(sm_dyn),
+                &alice.killer,
+                &mut w,
+            ))
+            .unwrap_err();
+        assert_eq!(err.code, 1317);
+        assert!(alice.conn_shutdown.is_cancelled());
+        alice.killer.reset();
+    }
+
+    #[test]
+    fn process_info_max_execution_time_gated_by_in_select_stmt() {
+        let mgr = ServerSessionManager::new_standalone();
+        let ctrl = mgr.register_new_conn();
+
+        let set_cmd = |sql: &str, cmd: u8| {
+            store_process_info_entry(
+                &ctrl,
+                "root",
+                "127.0.0.1",
+                "40000",
+                "",
+                sql,
+                cmd,
+                tidb_mysql_protocol::constants::status::AUTOCOMMIT,
+                tidb_base::errors::redact_log_enabled_load(),
+                "",
+                0,
+                0,
+                OOMAlarmVariablesInfo::default(),
+            );
+        };
+
+        // Non-SELECT commands leave ProcessInfo.max_execution_time = 0.
+        set_cmd(
+            "SET SESSION max_execution_time = 250",
+            tidb_base::mysql::ComQuery,
+        );
+        let pi = mgr.get_process_info(ctrl.conn_id).unwrap();
+        assert_eq!(pi.command, tidb_base::mysql::ComQuery);
+        assert_eq!(pi.max_execution_time, 0);
+
+        // SELECT resets max_execution_time to 0 at dispatch start, then InSelectStmt arms 250ms.
+        set_cmd("SELECT 1", tidb_base::mysql::ComQuery);
+        assert_eq!(
+            mgr.get_process_info(ctrl.conn_id)
+                .unwrap()
+                .max_execution_time,
+            0
+        );
+        mark_process_info_in_select_entry(&ctrl, 250);
+        let pi_sel = mgr.get_process_info(ctrl.conn_id).unwrap();
+        assert_eq!(pi_sel.info, "SELECT 1");
+        assert_eq!(pi_sel.max_execution_time, 250);
+
+        // Resetting back to ComSleep clears max_execution_time back to 0.
+        set_cmd("", tidb_base::mysql::ComSleep);
+        let pi_sleep = mgr.get_process_info(ctrl.conn_id).unwrap();
+        assert_eq!(pi_sleep.command, tidb_base::mysql::ComSleep);
+        assert_eq!(pi_sleep.max_execution_time, 0);
     }
 }

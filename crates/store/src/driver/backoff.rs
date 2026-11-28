@@ -5,12 +5,14 @@
 //! 0008, client-rust#12): one budget of total sleep per read, one curve per kind of error.
 
 use std::collections::HashMap;
+use std::future::Future;
 
 use tidb_base::Error;
 use tidb_kv::Context;
+use tidb_runtime::KillCancel;
 use tikv_client::metrics::BackoffType;
 
-use super::error::{TiKVError, to_tidb_err};
+use super::error::{TiKVError, store_signal_to_error, to_tidb_err};
 use crate::copr::tikv::Variables;
 
 /// Backoffer wraps tikv.Backoffer and converts the error which returns by the functions of
@@ -21,10 +23,12 @@ pub struct Backoffer {
     ctx: Context,
     /// `tikv.Backoffer`'s vars; `None` is Go's nil.
     vars: Option<Variables>,
+    /// Session-level cancellation handle checked during backoff sleeps (N3 §3.3).
+    kill_cancel: Option<KillCancel>,
 }
 
 /// client-go `retry.NewBackofferWithVars`: the budget is `maxSleep` ms, times
-/// `vars.BackoffWeight` when vars are given and the weight is positive.
+/// `vars.BackoffWeight` when vars is given and the weight is positive.
 // go-l3: ADR-0008 client-go config/retry NewBackofferWithVars
 fn tikv_new_backoffer_with_vars(
     max_sleep: isize,
@@ -47,10 +51,14 @@ pub fn new_backoffer_with_vars(
     vars: Option<&Variables>,
 ) -> Backoffer {
     let b = tikv_new_backoffer_with_vars(max_sleep, vars);
+    let kill_cancel = vars
+        .and_then(|v| v.kill_cancel.clone())
+        .or_else(|| ctx.kill_cancel().cloned());
     Backoffer {
         b,
         ctx: ctx.clone(),
         vars: vars.cloned(),
+        kill_cancel,
     }
 }
 
@@ -61,6 +69,7 @@ pub fn new_backoffer_with_tikv_bo(bo: tikv_client::Backoff, ctx: &Context) -> Ba
         b: bo,
         ctx: ctx.clone(),
         vars: None,
+        kill_cancel: ctx.kill_cancel().cloned(),
     }
 }
 
@@ -73,6 +82,25 @@ pub fn new_backoffer(ctx: &Context, max_sleep: isize) -> Backoffer {
         b,
         ctx: ctx.clone(),
         vars: None,
+        kill_cancel: ctx.kill_cancel().cloned(),
+    }
+}
+
+/// Awaits `fut`, returning immediately on [`KillCancel`] trigger by dropping `fut`.
+// glue: N3 §3.3 cooperative cancellation of backoff sleeps
+async fn run_with_cancel<F>(kill_cancel: Option<&KillCancel>, fut: F) -> Result<(), Error>
+where
+    F: Future<Output = Result<(), tikv_client::Error>>,
+{
+    match kill_cancel {
+        Some(kc) => {
+            tokio::select! {
+                biased;
+                _ = kc.cancelled() => Err(store_signal_to_error(kc.signal())),
+                res = fut => res.map_err(|e| to_tidb_err(TiKVError::from(e))),
+            }
+        }
+        None => fut.await.map_err(|e| to_tidb_err(TiKVError::from(e))),
     }
 }
 
@@ -91,8 +119,9 @@ impl Backoffer {
         cfg: BackoffType,
         err: tikv_client::Error,
     ) -> Result<(), Error> {
-        let e = self.b.backoff(cfg, err).await;
-        e.map_err(|e| to_tidb_err(TiKVError::from(e)))
+        let kc = self.kill_cancel.clone();
+        let fut = self.b.backoff(cfg, err);
+        run_with_cancel(kc.as_ref(), fut).await
     }
 
     /// BackoffWithMaxSleepTxnLockFast sleeps a while for the operation TxnLockFast and records
@@ -103,11 +132,11 @@ impl Backoffer {
         max_sleep_ms: isize,
         err: tikv_client::Error,
     ) -> Result<(), Error> {
-        let e = self
+        let kc = self.kill_cancel.clone();
+        let fut = self
             .b
-            .backoff_with_max_sleep_txn_lock_fast(max_sleep_ms.max(0) as u64, err)
-            .await;
-        e.map_err(|e| to_tidb_err(TiKVError::from(e)))
+            .backoff_with_max_sleep_txn_lock_fast(max_sleep_ms.max(0) as u64, err);
+        run_with_cancel(kc.as_ref(), fut).await
     }
 
     /// GetBackoffTimes returns a map contains backoff time count by type.
@@ -171,11 +200,45 @@ mod tests {
         assert!((18_000..=22_000).contains(&budget_ms(b.b)));
         let zero = Variables {
             backoff_weight: 0,
-            killed: None,
+            ..Variables::default()
         };
         let b = new_backoffer_with_vars(&ctx, 20_000, Some(&zero));
         assert!((18_000..=22_000).contains(&budget_ms(b.b)));
         assert_eq!(new_backoffer(&ctx, 1).get_total_sleep(), 0);
+    }
+
+    #[tokio::test]
+    async fn kill_cancel_aborts_backoff_sleep() {
+        use std::sync::Arc;
+        use tidb_memory::sqlkiller::SqlKiller;
+        let killer = SqlKiller::new();
+        let kc = KillCancel::new(killer.signal_handle());
+        let k2 = Arc::clone(&killer);
+        let kc2 = kc.clone();
+        killer.set_on_kill(Some(Box::new(move || kc2.notify())));
+        let ctx = Context::background().with_kill_cancel(kc);
+        let mut b = new_backoffer(&ctx, 60_000);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            k2.send_kill_signal(tidb_memory::sqlkiller::QueryInterrupted);
+        });
+        let start = std::time::Instant::now();
+        let mut err = None;
+        for _ in 0..16 {
+            if let Err(e) = b
+                .backoff_with_max_sleep_txn_lock_fast(
+                    5_000,
+                    tikv_client::Error::StringError("locked".into()),
+                )
+                .await
+            {
+                err = Some(e);
+                break;
+            }
+        }
+        let err = err.expect("backoff loop must be interrupted by KillCancel");
+        assert_eq!(err.code(), tidb_base::errno::ErrQueryInterrupted as isize);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[tokio::test]
@@ -198,5 +261,45 @@ mod tests {
             .await
             .unwrap_err();
         assert!(super::super::error::ErrRegionUnavailable.equal(&err));
+    }
+
+    #[tokio::test]
+    async fn run_with_cancel_maps_all_five_signals_via_store_error() {
+        use std::sync::Arc;
+        use tidb_memory::sqlkiller::{
+            MaxExecTimeExceeded, QueryInterrupted, QueryMemoryExceeded, RunawayQueryExceeded,
+            ServerMemoryExceeded, SqlKiller,
+        };
+        let expected = [
+            (
+                QueryInterrupted,
+                "[tikv:1317]Query execution was interrupted",
+            ),
+            (
+                MaxExecTimeExceeded,
+                "[executor:3024]Query execution was interrupted, maximum statement execution time exceeded",
+            ),
+            (
+                QueryMemoryExceeded,
+                "[executor:8175]Your query has been cancelled due to exceeding the allowed memory limit for a single SQL query. Please try narrowing your query scope or increase the tidb_mem_quota_query limit and try again.[conn=-1]",
+            ),
+            (
+                ServerMemoryExceeded,
+                "[executor:8176]Your query has been cancelled due to exceeding the allowed memory limit for the tidb-server instance and this query is currently using the most memory. Please try narrowing your query scope or increase the tidb_server_memory_limit and try again.[conn=-1]",
+            ),
+            (
+                RunawayQueryExceeded,
+                "[executor:8253]Query execution was interrupted, identified as runaway query [exceed tidb side]",
+            ),
+        ];
+        for (sig, exp) in expected {
+            let killer = Arc::new(SqlKiller::new());
+            let kc = KillCancel::new(killer.signal_handle());
+            killer.send_kill_signal(sig);
+            let err = run_with_cancel(Some(&kc), std::future::pending())
+                .await
+                .unwrap_err();
+            assert_eq!(err.to_string(), exp, "signal {sig}");
+        }
     }
 }

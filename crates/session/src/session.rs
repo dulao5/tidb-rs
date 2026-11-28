@@ -16,8 +16,10 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Instant, SystemTime};
 
+use arc_swap::ArcSwapOption;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use tidb_base::Error;
@@ -34,6 +36,8 @@ use tidb_parser::ast;
 use tidb_planner::core::plan_cache_utils::{
     PlanCacheStmt, PlanCacheStmtRef, get_prepared_stmt, session_plan_cache_key,
 };
+use tidb_runtime::cancel::KillCancel;
+use tidb_sessionctx::session_mgr::{OOMAlarmVariablesInfo, ProcessInfo, SessionManager};
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 use tidb_sessionctx::variable::session_methods::prepare_dedup_cache_key;
 use tidb_sessionctx::variable::session_state::TxnInfoSchema;
@@ -99,6 +103,12 @@ pub struct SessCtx {
     pub(crate) store_wired: bool,
     /// `SessionVars.SQLKiller`: the shared part of N2 (`SessionShared`).
     pub(crate) killer: Arc<SqlKiller>,
+    /// Resettable session-level cancellation notifier paired with [`Self::killer`].
+    pub(crate) kill_cancel: KillCancel,
+    /// `SessionManager`: set by the server/connection layer for `KILL` and process list visibility.
+    pub(crate) session_manager: Option<Arc<dyn SessionManager>>,
+    /// Lock-free `ProcessInfo` slot shared with `ServerSessionManager`.
+    pub(crate) process_info: Arc<ArcSwapOption<ProcessInfo>>,
     store: Arc<dyn Storage>,
     oracle: Arc<dyn Oracle>,
     /// `domain.GetDomain(s).InfoSchema()`: the domain is D06.5 (VS1-17 feeds it); until then
@@ -313,6 +323,7 @@ impl SessCtx {
     // go: session.SetConnectionID L1
     pub fn set_connection_id(&mut self, conn_id: u64) {
         self.vars.connection_id = conn_id;
+        self.killer.conn_id.store(conn_id, Ordering::SeqCst);
     }
 
     // go: session.SetClientCapability L1
@@ -612,6 +623,7 @@ impl SessCtx {
         tidb_store::copr::tikv::Variables {
             backoff_weight: self.vars.state.kv_vars.back_off_weight as i64,
             killed: Some(self.killer.signal_handle()),
+            kill_cancel: Some(self.kill_cancel.clone()),
         }
     }
 }
@@ -805,9 +817,8 @@ impl SessionCore {
     }
 
     /// SetProcessInfo sets the process info of the session (SHOW PROCESSLIST, KILL, the
-    /// expensive query checker). `util.ProcessInfo` is not ported (D00.3): the arguments are
-    /// kept for it.
-    // glue: stub of session.SetProcessInfo, blocked-by:D00.3 (util.ProcessInfo; SHOW PROCESSLIST runs on the PoC)
+    /// expensive query checker).
+    // go: session.SetProcessInfo L2 (omits PlanExplainRows/RunawayChecker/CursorTracker fields not yet on ProcessInfo)
     pub fn set_process_info(
         &mut self,
         sql: &str,
@@ -821,6 +832,82 @@ impl SessionCore {
             command,
             max_execution_time,
         });
+
+        let vars = &self.sctx.vars;
+        let sc = vars.stmt_ctx_arc();
+        let mut cur_txn_start_ts = 0;
+        let cur_txn_create_time = None;
+        if command != tidb_base::mysql::ComSleep || vars.in_txn() {
+            cur_txn_start_ts = vars.state.txn_ctx.start_ts;
+        }
+        if vars.snapshot_ts != 0 {
+            cur_txn_start_ts = vars.snapshot_ts;
+        }
+        let sql_cpu_usage = if command == tidb_base::mysql::ComSleep {
+            None
+        } else {
+            Some(Arc::clone(&vars.sql_cpu_usages))
+        };
+        let old_pi = self.sctx.process_info.load();
+        let time = match old_pi.as_deref() {
+            Some(old) if old.info == sql && old.command == command => old.time,
+            _ => t,
+        };
+        let (user, host) = match &vars.user {
+            Some(u) => (u.username.clone(), u.hostname.clone()),
+            None => match old_pi.as_deref() {
+                Some(old) => (old.user.clone(), old.host.clone()),
+                None => (String::new(), String::new()),
+            },
+        };
+        let port = if !vars.port.is_empty() {
+            vars.port.clone()
+        } else {
+            old_pi
+                .as_deref()
+                .map(|old| old.port.clone())
+                .unwrap_or_default()
+        };
+        let oom_alarm_variables_info = OOMAlarmVariablesInfo {
+            session_analyze_version: vars.analyze_version as isize,
+            session_enabled_rate_limit_action: vars.enabled_rate_limit_action,
+            session_mem_quota_query: vars.mem_quota_query,
+        };
+        let pi = ProcessInfo {
+            id: vars.connection_id,
+            user,
+            host,
+            port,
+            db: vars.current_db.clone(),
+            command,
+            time,
+            state: vars.status(),
+            info: sql.to_owned(),
+            digest: String::new(),
+            max_execution_time,
+            redact_sql: vars.enable_redact_log.clone(),
+            session_alias: vars.session_alias.clone(),
+            resource_group_name: sc.resource_group_name.clone(),
+            cur_txn_start_ts,
+            cur_txn_create_time,
+            expensive_log_time: None,
+            expensive_txn_log_time: old_pi
+                .as_deref()
+                .filter(|old| old.cur_txn_start_ts != 0 && old.cur_txn_start_ts == cur_txn_start_ts)
+                .and_then(|old| old.expensive_txn_log_time),
+            // Keep vars.stmt_ctx unshared (strong_count == 1) so Compiler/PlanBuilder/ExecStmt
+            // can continue calling vars.stmt_ctx_mut().
+            stmt_ctx: None,
+            mem_tracker: sc.mem_tracker.clone(),
+            disk_tracker: sc.disk_tracker.clone(),
+            sql_cpu_usage,
+            runtime_stats_coll: sc.runtime_stats_coll.clone(),
+            table_ids: Vec::new(),
+            index_names: Vec::new(),
+            stats_info: String::new(),
+            oom_alarm_variables_info,
+        };
+        self.sctx.process_info.store(Some(Arc::new(pi)));
     }
 }
 
@@ -854,6 +941,7 @@ impl SessionCore {
                 location: sc.time_zone(),
                 runtime_stats_coll: sc.runtime_stats_coll.clone(),
                 sql_killer: Some(Arc::clone(&self.sctx.killer)),
+                kill_cancel: Some(self.sctx.kill_cancel.clone()),
                 cpu_usage: Arc::clone(&vars.sql_cpu_usages),
                 err_ctx: sc.err_ctx(),
                 dist_sql_concurrency: vars.dist_sql_scan_concurrency() as isize,
@@ -965,15 +1053,15 @@ impl SessionCore {
     }
 
     /// `GetSessionManager()`.
-    // glue: stub of session.GetSessionManager, blocked-by:D03.1 (the server's session manager)
-    pub fn get_session_manager(&self) -> Result<(), Error> {
-        Err(blocked("D03.1", "the session manager"))
+    // go: session.GetSessionManager L1
+    pub fn get_session_manager(&self) -> Option<Arc<dyn SessionManager>> {
+        self.sctx.session_manager.clone()
     }
 
     /// `SetSessionManager(sm)`.
-    // glue: stub of session.SetSessionManager, blocked-by:D03.1 (the server's session manager)
-    pub fn set_session_manager(&mut self) -> Result<(), Error> {
-        Err(blocked("D03.1", "the session manager"))
+    // go: session.SetSessionManager L1
+    pub fn set_session_manager(&mut self, sm: Option<Arc<dyn SessionManager>>) {
+        self.sctx.session_manager = sm;
     }
 
     /// `SetCollation(coID)`: the handshake's collation.
@@ -983,15 +1071,35 @@ impl SessionCore {
         Err(blocked("D02.2", "charset.GetCharsetInfoByID"))
     }
 
-    /// `ShowProcess()`.
-    // glue: stub of session.ShowProcess, blocked-by:D00.3 (util.ProcessInfo; SHOW PROCESSLIST runs on the PoC)
+    /// Legacy recorded `SetProcessInfo` args for unit tests.
+    // glue: ProcessArgs test accessor (Session::show_process is the live ProcessInfo accessor)
     pub fn show_process(&self) -> Option<&ProcessArgs> {
         self.sctx.process.as_ref()
     }
 
+    /// Returns the live lock-free `ProcessInfo` snapshot.
+    // glue: N0 ProcessInfo accessor
+    pub fn show_process_info(&self) -> Option<Arc<ProcessInfo>> {
+        self.sctx.process_info.load_full()
+    }
+
     /// `UpdateProcessInfo()`.
-    // glue: stub of session.UpdateProcessInfo, blocked-by:D00.3 (util.ProcessInfo)
-    pub fn update_process_info(&mut self) {}
+    // go: session.UpdateProcessInfo L2 (omits TableIDs/IndexNames until D05.2 collects them on StmtCtx)
+    pub fn update_process_info(&mut self) {
+        let Some(old) = self.sctx.process_info.load_full() else {
+            return;
+        };
+        if old.cur_txn_start_ts != 0 {
+            return;
+        }
+        let mut updated = (*old).clone();
+        let vars = &self.sctx.vars;
+        updated.cur_txn_start_ts = vars.state.txn_ctx.start_ts;
+        if vars.snapshot_ts != 0 {
+            updated.cur_txn_start_ts = vars.snapshot_ts;
+        }
+        self.sctx.process_info.store(Some(Arc::new(updated)));
+    }
 }
 
 /// `getSnapshotInfoSchema(s, snapshotTS)`: the InfoSchema at `tidb_snapshot`.
@@ -1013,6 +1121,14 @@ impl SessionContext for SessionCore {
     // glue: SessionVars.SQLKiller (N2 SessionShared)
     fn sql_killer(&self) -> Arc<SqlKiller> {
         Arc::clone(&self.sctx.killer)
+    }
+    // glue: N3 §3.3 KillCancel paired with SqlKiller
+    fn kill_cancel(&self) -> KillCancel {
+        self.sctx.kill_cancel.clone()
+    }
+    // glue: SessionManager accessor for KILL execution (N0 inversion)
+    fn session_manager(&self) -> Option<Arc<dyn SessionManager>> {
+        self.sctx.session_manager.clone()
     }
     // glue: interface method sessiontxn.TxnManager.GetStmtReadTS
     fn get_stmt_read_ts(&mut self) -> BoxFuture<'_, Result<u64, Error>> {
@@ -1111,6 +1227,7 @@ impl SessionContext for SessionCore {
             domain_info_schema: Some(self.sctx.get_domain_info_schema() as _),
             instance_plan_cache: self.sctx.instance_plan_cache.clone(),
             privilege_manager: self.sctx.privilege_manager.clone(),
+            session_manager: self.sctx.session_manager.clone(),
         }
     }
     // glue: interface method sessiontxn.TxnManager.GetSnapshotWithStmtReadTS
@@ -1291,9 +1408,16 @@ impl Session {
     ) -> Session {
         let mut vars = SessionVars::new(global);
         let killer = SqlKiller::new();
-        killer
-            .conn_id
-            .store(vars.connection_id, std::sync::atomic::Ordering::SeqCst);
+        killer.conn_id.store(vars.connection_id, Ordering::SeqCst);
+        let kill_cancel = KillCancel::new(killer.signal_handle());
+        {
+            let notify_kill = kill_cancel.clone();
+            killer.set_on_kill(Some(Box::new(move || notify_kill.notify())));
+        }
+        {
+            let notify_reset = kill_cancel.clone();
+            killer.set_on_reset(Some(Box::new(move || notify_reset.on_reset())));
+        }
         vars.set_status_flag(tidb_base::mysql::ServerStatusAutocommit, true);
         Session {
             core: SessionCore {
@@ -1302,6 +1426,9 @@ impl Session {
                     txn: LazyTxn::default(),
                     store_wired,
                     killer,
+                    kill_cancel,
+                    session_manager: None,
+                    process_info: Arc::new(ArcSwapOption::empty()),
                     store,
                     oracle,
                     domain_is: Arc::new(tidb_infoschema::infoschema_v2::new_info_schema_v2(
@@ -1399,6 +1526,62 @@ impl Session {
     // glue: accessor (SessionVars.SQLKiller, N2 SessionShared)
     pub fn sql_killer(&self) -> Arc<SqlKiller> {
         Arc::clone(&self.core.sctx.killer)
+    }
+
+    /// Resettable session-level cancellation notifier paired with [`Self::sql_killer`].
+    // glue: N3 §3.3 KillCancel paired with SqlKiller
+    pub fn kill_cancel(&self) -> KillCancel {
+        self.core.sctx.kill_cancel.clone()
+    }
+
+    /// Attaches the server's [`SessionManager`] for `KILL` execution and process list tracking.
+    // glue: server SessionManager binding (N0)
+    pub fn set_session_manager(&mut self, sm: Option<Arc<dyn SessionManager>>) {
+        self.core.set_session_manager(sm);
+    }
+
+    /// Returns the bound [`SessionManager`].
+    // glue: accessor
+    pub fn session_manager(&self) -> Option<&Arc<dyn SessionManager>> {
+        self.core.sctx.session_manager.as_ref()
+    }
+
+    /// Binds a shared lock-free `ProcessInfo` slot so `ServerSessionManager` reads live updates.
+    // glue: shared ProcessInfo slot with ConnControl
+    pub fn set_process_info_slot(&mut self, slot: Arc<ArcSwapOption<ProcessInfo>>) {
+        self.core.sctx.process_info = slot;
+    }
+
+    /// Binds a connection's shared `SqlKiller`, `KillCancel`, `SessionManager`, and lock-free
+    /// `ProcessInfo` slot so the protocol loop, PoC session, and new-stack session share one
+    /// source of truth for `KILL` and `SHOW PROCESSLIST`.
+    // glue: shared ConnControl binding across connection loop, poc-session, and tidb-session
+    pub fn bind_conn_control(
+        &mut self,
+        killer: Arc<SqlKiller>,
+        kill_cancel: KillCancel,
+        session_manager: Option<Arc<dyn SessionManager>>,
+        process_info: Arc<ArcSwapOption<ProcessInfo>>,
+    ) {
+        killer
+            .conn_id
+            .store(self.core.sctx.vars.connection_id, Ordering::SeqCst);
+        self.core.sctx.killer = killer;
+        self.core.sctx.kill_cancel = kill_cancel;
+        self.core.sctx.session_manager = session_manager;
+        self.core.sctx.process_info = process_info;
+    }
+
+    /// Returns the session's lock-free `ProcessInfo` slot.
+    // glue: accessor
+    pub fn process_info_slot(&self) -> Arc<ArcSwapOption<ProcessInfo>> {
+        Arc::clone(&self.core.sctx.process_info)
+    }
+
+    /// Returns the live `ProcessInfo` snapshot.
+    // go: session.ShowProcess L1
+    pub fn show_process(&self) -> Option<Arc<ProcessInfo>> {
+        self.core.show_process_info()
     }
 
     /// The domain's InfoSchema (VS1-17 feeds it from the PoC domain's sync loop).
@@ -1504,7 +1687,13 @@ impl Session {
         self.core.sctx.rollback_txn_state_in(true);
         self.core.txn_manager.on_txn_end(&self.core.sctx);
         self.core.sctx.vars.withdraw_all_prepared_stmt();
-        // stmtStats.SetFinished: D14.2. ClearDiskFullOpt: write option. Trackers: A1.
+        self.core
+            .sctx
+            .vars
+            .stmt_ctx()
+            .detach_without_resetting_killer();
+        self.core.sctx.process_info.store(None);
+        // stmtStats.SetFinished: D14.2. ClearDiskFullOpt: write option.
     }
 
     /// ExecuteStmt executes a statement (Go `session.ExecuteStmt`, `session.go:2019`).
@@ -1536,19 +1725,28 @@ impl Session {
         let cmd_byte = self.core.sctx.vars.command_value as u8;
         // Top SQL, plan replayer capture, optimizer debug trace: D14.2 / D13.x / D09.13.
 
-        validate_statement_in_txn(&self.core.sctx.vars, &stmt_node)?;
-        validate_statement_read_only_in_staleness(&self.core.sctx.vars, &stmt_node)?;
+        // defer OnStmtEnd / tracker detach on early return or future drop before RecordSet handoff.
+        let mut guard = OnStmtEnd {
+            se: self,
+            detach_tracker: true,
+        };
+        validate_statement_in_txn(&guard.se.core.sctx.vars, &stmt_node)?;
+        validate_statement_read_only_in_staleness(&guard.se.core.sctx.vars, &stmt_node)?;
 
         // Uncorrelated subqueries will execute once when building plan, so we reset process
         // info before building plan.
-        self.core.sctx.current_plan = None; // reset current plan
-        self.core
+        guard.se.core.sctx.current_plan = None; // reset current plan
+        guard
+            .se
+            .core
             .set_process_info(text, SystemTime::now(), cmd_byte, 0);
-        self.core.sctx.txn.on_stmt_start(&digest);
-        // defer sessiontxn.GetTxnManager(s).OnStmtEnd(); defer s.txn.onStmtEnd(): a drop
-        // guard (M-DEFER), so they also run when the statement's future is cancelled.
-        let guard = OnStmtEnd(self);
-        guard.0.execute_stmt_started(stmt_node).await
+        guard.se.core.sctx.txn.on_stmt_start(&digest);
+        let res = guard.se.execute_stmt_started(stmt_node).await;
+        if let Ok(Some(_)) = &res {
+            // Ownership of closing/detaching the tracker transfers to the open RecordSet.
+            guard.detach_tracker = false;
+        }
+        res
     }
 
     /// The statement `stmt` returns rows: it stays in the session under a new sequence
@@ -1734,6 +1932,11 @@ impl Session {
         let last_err = crate::exec_result::join_errors(&run.last_errs);
         run.stmt
             .close_record_set(&mut self.core, run.txn_start_ts, last_err);
+        self.core
+            .sctx
+            .vars
+            .stmt_ctx()
+            .detach_without_resetting_killer();
     }
 
     /// Whether a statement's record set is still open (or was dropped without `close`).
@@ -1827,6 +2030,7 @@ impl Session {
         let res = prepare_exec.next(core);
         // Rollback even if err is nil.
         core.rollback_on_error();
+        core.sctx.vars.stmt_ctx().detach_without_resetting_killer();
         res?;
 
         // Store the result in the dedup cache for future Prepares of the same SQL
@@ -1957,14 +2161,25 @@ pub enum ResolvedStmt<'a> {
 }
 
 /// The deferred `OnStmtEnd`s of `ExecuteStmt` (Go: `defer s.txn.onStmtEnd()`, `defer
-/// sessiontxn.GetTxnManager(s).OnStmtEnd()`, run in that order).
-struct OnStmtEnd<'a>(&'a mut Session);
+/// sessiontxn.GetTxnManager(s).OnStmtEnd()`, plus tracker detach on early return / drop).
+struct OnStmtEnd<'a> {
+    se: &'a mut Session,
+    detach_tracker: bool,
+}
 
 impl Drop for OnStmtEnd<'_> {
     // glue: M-DEFER
     fn drop(&mut self) {
-        self.0.core.sctx.txn.on_stmt_end();
-        self.0.core.txn_manager.on_stmt_end();
+        self.se.core.sctx.txn.on_stmt_end();
+        self.se.core.txn_manager.on_stmt_end();
+        if self.detach_tracker {
+            self.se
+                .core
+                .sctx
+                .vars
+                .stmt_ctx()
+                .detach_without_resetting_killer();
+        }
     }
 }
 

@@ -23,10 +23,12 @@
 
 pub mod column;
 pub mod conn;
+pub mod conn_id;
 pub mod convert;
 pub mod dump;
 pub mod params;
 pub mod result_encoder;
 pub mod resultset;
 pub mod server;
+pub mod session_mgr;
 pub mod util;

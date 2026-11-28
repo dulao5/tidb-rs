@@ -737,6 +737,7 @@ impl HashAggExec {
     // go: HashAggExec.initFinalWorkers L2 (A1 TrackedAlloc; mpsc channels [M-CH])
     fn init_final_workers(
         &mut self,
+        ctx: &ExecCtx,
         final_concurrency: usize,
         partial_output_rxs: Vec<mpsc::Receiver<AggPartialResultMapper<ColAlloc>>>,
     ) -> Result<(), Error> {
@@ -791,7 +792,7 @@ impl HashAggExec {
                 final_result_holder_tx: holder_tx,
                 spill_helper: Arc::clone(&spill_helper),
                 eval_ctx: Arc::clone(&self.eval_ctx),
-                sql_killer: self.base.base.killer.clone(),
+                exec_ctx: ctx.clone(),
             };
             self.final_workers.push(worker);
             self.checkpoint_mem()?;
@@ -900,7 +901,7 @@ impl HashAggExec {
             partial_input_rxs,
             &partial_output_txs,
         )?;
-        self.init_final_workers(final_concurrency, partial_output_rxs)?;
+        self.init_final_workers(ctx, final_concurrency, partial_output_rxs)?;
         self.parallel_exec_valid = true;
         self.executed = false;
         Ok(())

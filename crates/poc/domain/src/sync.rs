@@ -35,6 +35,9 @@ use crate::keys;
 use crate::registry::Limits;
 use crate::registry::MdlJob;
 use crate::registry::Registry;
+use crate::server_id::{
+    KillAllConnectionsFn, ServerIdChangeFn, ServerIdLease, ServerIdTiming, find_server_rpc_url,
+};
 use crate::serverinfo::ServerInfo;
 
 /// Timeout of one etcd request (Go: `KeyOpDefaultTimeout`).
@@ -46,7 +49,7 @@ const PUT_MONO_RETRY_INTERVAL: Duration = Duration::from_millis(30);
 const JOB_CACHE_LIMIT: usize = 1000;
 
 /// Settings of [`SchemaSync`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SyncConfig {
     /// PD client URLs (PD embeds the cluster's etcd).
     pub pd_endpoints: Vec<String>,
@@ -66,6 +69,33 @@ pub struct SyncConfig {
     /// Build and reload the ported domain (D06.5 part 1) for the new stack: only when the
     /// new stack is on (`--new-stack` not `off`). Off by default.
     pub ported_domain: bool,
+    /// Acquire and maintain `/tidb/server_id/<id>` lease for cluster global KILL.
+    pub acquire_server_id: bool,
+    /// Prefer 32-bit global connection IDs (`[1, 2047]`) before upgrading to 64-bit.
+    pub enable_32bits_conn_id: bool,
+    /// Timing parameters for `/tidb/server_id/<id>` lease keepalive and 6h PD disconnect watchdog.
+    pub server_id_timing: ServerIdTiming,
+    /// Notified whenever the acquired `server_id` or its validity changes.
+    pub on_server_id_change: Option<ServerIdChangeFn>,
+    /// Invoked on > 6h PD disconnect to kill all active connections.
+    pub kill_all_connections: Option<KillAllConnectionsFn>,
+}
+
+impl std::fmt::Debug for SyncConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncConfig")
+            .field("pd_endpoints", &self.pd_endpoints)
+            .field("info", &self.info)
+            .field("lease_ttl", &self.lease_ttl)
+            .field("tick", &self.tick)
+            .field("mdl_recheck", &self.mdl_recheck)
+            .field("limits", &self.limits)
+            .field("stall_file", &self.stall_file)
+            .field("ported_domain", &self.ported_domain)
+            .field("acquire_server_id", &self.acquire_server_id)
+            .field("enable_32bits_conn_id", &self.enable_32bits_conn_id)
+            .finish()
+    }
 }
 
 impl SyncConfig {
@@ -80,6 +110,11 @@ impl SyncConfig {
             dag,
             stall_file: None,
             ported_domain: false,
+            acquire_server_id: false,
+            enable_32bits_conn_id: true,
+            server_id_timing: ServerIdTiming::default(),
+            on_server_id_change: None,
+            kill_all_connections: None,
         }
     }
 }
@@ -103,6 +138,10 @@ struct Inner {
     /// JoinHandle of `sync_loop` so `shutdown()` awaits `"loadSchemaInLoop exited."` before
     /// logging `"domain closed"`.
     sync_loop_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    /// Cluster-unique `/tidb/server_id/<id>` lease handle when global kill is enabled.
+    server_id_lease: Option<Arc<ServerIdLease>>,
+    server_id: std::sync::atomic::AtomicU64,
+    server_id_keeper_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     wake: Notify,
     stalled: AtomicBool,
     stop: tokio::sync::watch::Sender<bool>,
@@ -118,7 +157,7 @@ impl SchemaSync {
     /// Connect to PD's etcd and start the sync tasks. The node registers itself once its
     /// first reload succeeds; statements use synced mode only after that (see
     /// [`Registry::admit`]).
-    pub async fn start(kv: KvClient, cfg: SyncConfig) -> Result<SchemaSync> {
+    pub async fn start(kv: KvClient, mut cfg: SyncConfig) -> Result<SchemaSync> {
         cfg.limits.check().map_err(Error::Other)?;
         let etcd = EtcdClient::connect(
             &cfg.pd_endpoints,
@@ -129,6 +168,32 @@ impl SchemaSync {
             ),
         )
         .await?;
+        let server_id_lease = if cfg.acquire_server_id {
+            let lease = Arc::new(ServerIdLease::new(
+                etcd.clone(),
+                cfg.enable_32bits_conn_id,
+                cfg.server_id_timing,
+                cfg.on_server_id_change.clone(),
+                cfg.kill_all_connections.clone(),
+            ));
+            match lease.acquire_server_id().await {
+                Ok(id) => {
+                    cfg.info.server_id = id;
+                }
+                Err(e) => {
+                    // Match Go domain.go:1474-1476: log ERROR, mark PD lost, and let the keeper
+                    // retry acquiring /tidb/server_id in the background instead of failing startup.
+                    let err_str = e.to_string();
+                    tidb_base::log_error!("acquire serverID failed", "error" => err_str.as_str());
+                    lease.mark_lost_connection_to_pd();
+                    cfg.info.server_id = 0;
+                }
+            }
+            Some(lease)
+        } else {
+            None
+        };
+        let initial_server_id = cfg.info.server_id;
         let (stop, _) = tokio::sync::watch::channel(false);
         let inner = Arc::new(Inner {
             registry: Registry::new(cfg.limits),
@@ -140,10 +205,27 @@ impl SchemaSync {
             etcd,
             registration: tokio::sync::Mutex::new(None),
             sync_loop_handle: tokio::sync::Mutex::new(None),
+            server_id_lease: server_id_lease.clone(),
+            server_id: std::sync::atomic::AtomicU64::new(initial_server_id),
+            server_id_keeper_handle: tokio::sync::Mutex::new(None),
             wake: Notify::new(),
             stalled: AtomicBool::new(false),
-            stop,
+            stop: stop.clone(),
         });
+        if let Some(lease) = server_id_lease {
+            let inner_for_restore = Arc::clone(&inner);
+            let lease_for_restore = Arc::clone(&lease);
+            let on_restored: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                let inner = Arc::clone(&inner_for_restore);
+                let new_id = lease_for_restore.server_id();
+                inner.server_id.store(new_id, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    inner.store_server_info().await;
+                });
+            });
+            let keeper_handle = tokio::spawn(lease.run_keeper(stop.subscribe(), on_restored));
+            *inner.server_id_keeper_handle.lock().await = Some(keeper_handle);
+        }
         tokio::spawn(inner.clone().watch_global_version());
         let loop_handle = tokio::spawn(inner.clone().sync_loop());
         *inner.sync_loop_handle.lock().await = Some(loop_handle);
@@ -171,6 +253,30 @@ impl SchemaSync {
         &self.inner.cfg.info.ddl_id
     }
 
+    /// Returns this node's currently active cluster `server_id` (`0` if unleased).
+    pub fn server_id(&self) -> u64 {
+        self.inner.server_id.load(Ordering::SeqCst)
+    }
+
+    /// Returns `true` when cluster global-kill is enabled and PD lease connectivity is lost
+    /// or initial `/tidb/server_id` acquisition failed.
+    pub fn is_lost_connection_to_pd(&self) -> bool {
+        self.inner
+            .server_id_lease
+            .as_ref()
+            .is_some_and(|l| l.is_lost_connection_to_pd())
+    }
+
+    /// Returns the underlying [`ServerIdLease`] if cluster `server_id` tracking is enabled.
+    pub fn server_id_lease(&self) -> Option<&Arc<ServerIdLease>> {
+        self.inner.server_id_lease.as_ref()
+    }
+
+    /// Resolves `target_server_id`'s status/RPC URL (`http://ip:status_port`) from etcd.
+    pub async fn lookup_server_rpc_url(&self, target_server_id: u64) -> Result<Option<String>> {
+        find_server_rpc_url(&self.inner.etcd(), target_server_id).await
+    }
+
     /// Test hook: stop (or resume) the sync loop as if it were stuck.
     pub fn set_stalled(&self, stalled: bool) {
         self.inner.stalled.store(stalled, Ordering::SeqCst);
@@ -195,6 +301,17 @@ impl SchemaSync {
         let started = Instant::now();
         self.inner.stop.send_replace(true);
         self.inner.wake.notify_one();
+        if let Some(mut handle) = self.inner.server_id_keeper_handle.lock().await.take()
+            && tokio::time::timeout(Duration::from_secs(5), &mut handle)
+                .await
+                .is_err()
+        {
+            handle.abort();
+            let _ = handle.await;
+        }
+        if let Some(lease) = &self.inner.server_id_lease {
+            lease.release_server_id().await;
+        }
         if let Some(handle) = self.inner.sync_loop_handle.lock().await.take() {
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
@@ -460,6 +577,8 @@ impl Inner {
         let cx = ExecContext {
             dag: self.cfg.dag.clone(),
             schema_version: schema.version(),
+            killer: None,
+            kill_cancel: None,
         };
         let rows = poc_executor::execute(&plan, &mut snapshot, &cx).await?;
         let loaded = schema.version();
@@ -560,6 +679,31 @@ impl Inner {
         }
     }
 
+    fn current_info(&self) -> ServerInfo {
+        let sid = self.server_id.load(Ordering::SeqCst);
+        let mut info = self.cfg.info.clone();
+        info.server_id = sid;
+        info
+    }
+
+    async fn store_server_info(&self) {
+        let lease = self.registration.lock().await.as_ref().map(|r| r.lease);
+        let Some(lease) = lease else {
+            return;
+        };
+        let info = self.current_info();
+        if let Err(e) = timeout(self.etcd().put(
+            info.key(),
+            info.to_json(),
+            Some(PutOptions::new().with_lease(lease)),
+        ))
+        .await
+        {
+            let err_str = e.to_string();
+            tidb_base::log_error!("StoreServerInfo failed", "error" => err_str.as_str());
+        }
+    }
+
     /// `all_schema_versions/<ddl_id>` = loaded version, bound to the lease.
     async fn put_self_version(&self, version: i64) -> Result<()> {
         let lease = self.registration.lock().await.as_ref().map(|r| r.lease);
@@ -595,14 +739,15 @@ impl Inner {
         .await?;
         let lease = grant.id();
         let deadline = sent + Duration::from_secs(grant.ttl().max(0) as u64);
-        let info = self.cfg.info.to_json();
+        let info_rec = self.current_info();
+        let info_key = info_rec.key();
+        let info = info_rec.to_json();
         let version = self.registry.loaded_version().unwrap_or(0);
         let puts = async {
-            timeout(self.etcd().put(
-                self.cfg.info.key(),
-                info,
-                Some(PutOptions::new().with_lease(lease)),
-            ))
+            timeout(
+                self.etcd()
+                    .put(info_key, info, Some(PutOptions::new().with_lease(lease))),
+            )
             .await?;
             timeout(self.etcd().put(
                 keys::self_schema_version(&self.cfg.info.ddl_id),

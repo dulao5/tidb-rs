@@ -1,10 +1,12 @@
 //! The values of Go's `context.Context` that `pkg/kv` reads (mapping rule M-GOCTX).
 //!
-//! Go threads a `context.Context` through every KV call; `pkg/kv` reads one value from it,
-//! the request source (`util.RequestSourceKey`, set by `util.WithInternalSourceType`).
-//! Cancellation is not a context value in the port: dropping the future cancels the
-//! request (N3 3.1 item 6). [`Context`] carries the values; it is cheap to clone, as Go's
-//! derived contexts are cheap to create.
+//! Go threads a `context.Context` through every KV call; `pkg/kv` reads the request
+//! source (`util.RequestSourceKey`, set by `util.WithInternalSourceType`) and carries an
+//! optional [`KillCancel`] handle so async RPC and backoff futures are dropped immediately
+//! when killed (N3 3.1 item 6, §3.3). [`Context`] is cheap to clone, as Go's derived
+//! contexts are cheap to create.
+
+use tidb_runtime::KillCancel;
 
 /// RequestSource contains the source label of the request, used for tracking resource
 /// consuming.
@@ -23,6 +25,8 @@ pub struct RequestSource {
 pub struct Context {
     /// `ctx.Value(util.RequestSourceKey)`.
     request_source: Option<RequestSource>,
+    /// Session-level cancellation wakeup bound to `SqlKiller.signal`.
+    kill_cancel: Option<KillCancel>,
 }
 
 impl Context {
@@ -37,6 +41,16 @@ impl Context {
     pub fn with_request_source(&self, source: RequestSource) -> Context {
         Context {
             request_source: Some(source),
+            kill_cancel: self.kill_cancel.clone(),
+        }
+    }
+
+    /// Attaches a session-level [`KillCancel`] handle (Go `context.WithCancel`, M-GOCTX).
+    // glue: N3 §3.3 session cancellation propagation into tidb-kv
+    pub fn with_kill_cancel(&self, cancel: KillCancel) -> Context {
+        Context {
+            request_source: self.request_source.clone(),
+            kill_cancel: Some(cancel),
         }
     }
 
@@ -44,6 +58,12 @@ impl Context {
     // glue: Go ctx.Value(RequestSourceKey) (M-GOCTX)
     pub fn request_source(&self) -> Option<&RequestSource> {
         self.request_source.as_ref()
+    }
+
+    /// Session-level [`KillCancel`] handle if attached.
+    // glue: N3 §3.3 session cancellation propagation
+    pub fn kill_cancel(&self) -> Option<&KillCancel> {
+        self.kill_cancel.as_ref()
     }
 }
 
