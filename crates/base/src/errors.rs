@@ -744,6 +744,46 @@ impl Error {
     }
 }
 
+/// Which path the `\t<file>:<line>` line of a stack frame shows (spec D00.3 §2.1, the unified
+/// log format). Go's Linux `tidb-server` build passes no `-trimpath`, so `runtime.FuncForPC`
+/// reports the absolute path of the source file on the build machine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FramePathStyle {
+    /// The path the debug info recorded at build time (absolute), as Go prints it.
+    BuildPath,
+    /// First-party files relative to the repository root (`crates/base/src/errors.rs`);
+    /// dependency and standard-library paths stay as recorded.
+    #[allow(dead_code)]
+    RepoRelative,
+}
+
+/// The path form stack frames use. Changing it to [`FramePathStyle::RepoRelative`] is the only
+/// edit needed to print paths from the repository root instead of build paths.
+const FRAME_PATH_STYLE: FramePathStyle = FramePathStyle::BuildPath;
+
+/// The repository root at build time: this crate's manifest directory without `crates/base`.
+fn repo_root() -> &'static str {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    manifest
+        .strip_suffix("/crates/base")
+        .or_else(|| manifest.strip_suffix("\\crates\\base"))
+        .unwrap_or(manifest)
+}
+
+/// The file path of a frame as [`FRAME_PATH_STYLE`] prints it.
+fn frame_path(path: &str, style: FramePathStyle) -> &str {
+    match style {
+        FramePathStyle::BuildPath => path,
+        FramePathStyle::RepoRelative => path
+            .strip_prefix(repo_root())
+            .and_then(|rest| rest.strip_prefix(['/', '\\']))
+            .unwrap_or(path),
+    }
+}
+
+/// Frames at the top of a captured backtrace that belong to the capture machinery (std's
+/// unwinder, `fill_line_and_file`, the log back ends) and have no Go counterpart: Go's
+/// `callers()` skips `runtime.Callers` and its own helpers in the same way.
 fn is_internal_backtrace_frame(func: &str) -> bool {
     let f = func.trim_start_matches('<');
     f.starts_with("std::backtrace_rs::")
@@ -755,6 +795,112 @@ fn is_internal_backtrace_frame(func: &str) -> bool {
         || f.starts_with("tidb_base::structured_log::FallbackStdoutLogger")
         || f.starts_with("tidb_log::panic_hook::handle_panic")
         || f.starts_with("tidb_log::logger::UnifiedLoggerCore")
+}
+
+/// A symbol name without generic arguments (`::<&str>`) and angle brackets, so the v0 form
+/// `<tidb_base::errors::Error>::plain::<&str>` and the legacy form
+/// `tidb_base::errors::Error::plain` compare equal.
+fn bare_symbol(func: &str) -> String {
+    let mut out = String::with_capacity(func.len());
+    let mut rest = func;
+    while let Some(pos) = rest.find("::<") {
+        out.push_str(&rest[..pos]);
+        // Skip the balanced `<...>` group; the `>` of `->` (fn pointer types) closes nothing.
+        let mut depth = 0usize;
+        let mut prev = '\0';
+        let mut end = rest.len();
+        for (i, c) in rest[pos + 2..].char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' if prev != '-' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = pos + 2 + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            prev = c;
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out.retain(|c| c != '<' && c != '>');
+    out
+}
+
+/// Constructors whose Go counterpart records the stack from its caller, not from itself:
+/// `errors.New` / `errors.Errorf` / `errors.Annotate` call `callers()` directly (skip 4 =
+/// `runtime.Callers`, `callersSkip`, `callers`, the constructor), while `GenWithStack*` and
+/// `errors.Trace` go through `AddStack`, which leaves the constructor as the top frame.
+fn is_caller_start_constructor(bare: &str) -> bool {
+    matches!(
+        bare,
+        "tidb_base::errors::Error::plain"
+            | "tidb_base::errors::new"
+            | "tidb_base::errors::errorf"
+            | "tidb_base::errors::Error::annotate"
+            | "tidb_base::errors::annotate"
+    )
+}
+
+/// Index of the first frame Go would print: after the capture machinery
+/// ([`is_internal_backtrace_frame`]) and, for the constructors of
+/// [`is_caller_start_constructor`], after the constructor itself. `errors.Trace` is one Go
+/// frame; the Rust free function `trace` calls the method `Error::trace`, so the method frame
+/// is dropped when the free function follows it.
+fn go_stack_start(funcs: &[&str]) -> usize {
+    let mut i = 0;
+    while i < funcs.len() && is_internal_backtrace_frame(funcs[i]) {
+        i += 1;
+    }
+    while let Some(func) = funcs.get(i) {
+        let bare = bare_symbol(func);
+        let trace_method_under_free_trace = bare == "tidb_base::errors::Error::trace"
+            && funcs
+                .get(i + 1)
+                .is_some_and(|next| bare_symbol(next) == "tidb_base::errors::trace");
+        if !is_caller_start_constructor(&bare) && !trace_method_under_free_trace {
+            break;
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Removes the hashes the full (`{:#}`) backtrace form keeps in symbol names: the legacy
+/// mangling's `::h<16 hex>` suffix and the v0 mangling's crate disambiguators `crate[<hex>]`.
+/// Go's `Func.Name()` is the bare qualified name.
+fn strip_symbol_hashes(name: &str) -> String {
+    let name = match name.rsplit_once("::h") {
+        Some((head, hash)) if hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            head
+        }
+        _ => name,
+    };
+    let bytes = name.as_bytes();
+    let mut out = String::with_capacity(name.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'['
+            && i > 0
+            && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_')
+            && let Some(len) = bytes[i + 1..].iter().position(|&b| b == b']')
+            && (1..=16).contains(&len)
+            && bytes[i + 1..i + 1 + len]
+                .iter()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+        {
+            i += len + 2;
+            continue;
+        }
+        // Copy one whole UTF-8 character.
+        let ch_len = name[i..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&name[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
 }
 
 /// Strip trailing `:col` from Rust's `file:line:col` location so frames render `file:line`
@@ -772,45 +918,78 @@ fn strip_location_col(loc: &str) -> &str {
     loc
 }
 
-/// Format a captured Rust [`Backtrace`] into Go-style `\n<func>\n\t<file>:<line>` pairs.
-// glue: Go pingcap/errors stack frame layout over std::backtrace::Backtrace
-pub fn format_backtrace_frames(bt: &Backtrace, out: &mut Vec<u8>) {
-    let raw = bt.to_string();
+/// One frame of std's full backtrace form: the symbol name and its `file:line[:col]`, if the
+/// debug info has one.
+struct RawFrame<'a> {
+    func: String,
+    loc: Option<&'a str>,
+}
+
+/// Parses std's full backtrace form (`{:#}`): `  N:  0x<ip> - <name>` lines, each optionally
+/// followed by `  at <file>:<line>[:<col>]`. Inlined functions are frames of their own.
+fn parse_full_backtrace(raw: &str) -> Vec<RawFrame<'_>> {
+    let mut frames = Vec::new();
     let mut lines = raw.lines().peekable();
-    let mut skipping_top = true;
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        let Some((idx_part, rest)) = trimmed.split_once(':') else {
+            continue;
+        };
+        if idx_part.is_empty() || !idx_part.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        // Standard Rust backtrace format: "   0: func_name" followed by "             at path:line:col"
-        if let Some((idx_part, func_part)) = trimmed.split_once(':')
-            && !idx_part.is_empty()
-            && idx_part.bytes().all(|b| b.is_ascii_digit())
-        {
-            let func = func_part.trim();
-            let loc = lines
-                .peek()
-                .and_then(|next| next.trim().strip_prefix("at "))
-                .map(|s| s.trim());
-            if loc.is_some() {
-                let _ = lines.next();
-            }
-            if skipping_top && is_internal_backtrace_frame(func) {
-                continue;
-            }
-            skipping_top = false;
-            out.push(b'\n');
-            out.extend_from_slice(func.as_bytes());
-            if let Some(loc) = loc {
-                out.extend_from_slice(b"\n\t");
-                out.extend_from_slice(strip_location_col(loc).as_bytes());
-            }
-        } else if !skipping_top {
-            out.push(b'\n');
-            out.extend_from_slice(trimmed.as_bytes());
+        let rest = rest.trim();
+        let name = match rest.strip_prefix("0x") {
+            Some(after_ip) => after_ip.split_once(" - ").map_or("", |(_, n)| n),
+            None => rest,
+        };
+        let loc = lines
+            .peek()
+            .and_then(|next| next.trim().strip_prefix("at "))
+            .map(str::trim);
+        if loc.is_some() {
+            let _ = lines.next();
+        }
+        frames.push(RawFrame {
+            func: strip_symbol_hashes(name.trim()),
+            loc,
+        });
+    }
+    frames
+}
+
+/// Writes frames in Go's `pingcap/errors` `%+v` layout: `\n<func>\n\t<file>:<line>` per frame,
+/// starting at [`go_stack_start`].
+fn write_go_frames(frames: &[RawFrame<'_>], style: FramePathStyle, out: &mut Vec<u8>) {
+    let funcs: Vec<&str> = frames.iter().map(|f| f.func.as_str()).collect();
+    for frame in &frames[go_stack_start(&funcs)..] {
+        out.push(b'\n');
+        // Go `Frame.format`: `runtime.FuncForPC` found nothing -> "unknown", no file line.
+        if frame.func == "<unknown>" || frame.func.is_empty() {
+            out.extend_from_slice(b"unknown");
+            continue;
+        }
+        out.extend_from_slice(frame.func.as_bytes());
+        if let Some(loc) = frame.loc {
+            out.extend_from_slice(b"\n\t");
+            out.extend_from_slice(frame_path(strip_location_col(loc), style).as_bytes());
         }
     }
+}
+
+/// Format a captured Rust [`Backtrace`] into Go-style `\n<func>\n\t<file>:<line>` pairs: the
+/// qualified function name (`<tidb_base::errors::Error>::gen_with_stack_by_args`, as Go's
+/// `Func.Name()` is qualified) and the path the debug info recorded at build time (Go prints
+/// absolute build paths; see [`FRAME_PATH_STYLE`]). std's short form is not used: it strips
+/// the process's working directory at run time, so the path depended on where the process
+/// was started.
+// glue: Go pingcap/errors stack frame layout (`stack.Format` / `Frame.format`, `%+v`) over std::backtrace::Backtrace
+pub fn format_backtrace_frames(bt: &Backtrace, out: &mut Vec<u8>) {
+    if bt.status() != std::backtrace::BacktraceStatus::Captured {
+        return;
+    }
+    let raw = format!("{bt:#}");
+    write_go_frames(&parse_full_backtrace(&raw), FRAME_PATH_STYLE, out);
 }
 
 /// Format a [`Backtrace`] as a standalone string of `<func>\n\t<file>:<line>` frames (for
@@ -942,5 +1121,146 @@ impl Error {
         self.code = code as ErrCode;
         self.message = Cow::Owned(msg.into_bytes());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod frame_format_tests {
+    use super::*;
+
+    /// std's full form (`{:#}`) as a release build with `debug = "limited"` prints it: the
+    /// unwinder's own frames, inlined frames sharing an address, v0 crate disambiguators,
+    /// a legacy hash suffix and a frame without symbol or location.
+    const FULL_FORM: &str = "   0:     0x55d0c0de0001 - std[bcb96dfbba0ab899]::backtrace_rs::backtrace::libunwind::trace
+                               at /rustc/abc/library/std/src/../../backtrace/src/backtrace/libunwind.rs:117:9
+   1:     0x55d0c0de0001 - <std[bcb96dfbba0ab899]::backtrace::Backtrace>::create
+                               at /rustc/abc/library/std/src/backtrace.rs:331:13
+   2:     0x55d0c0de0002 - <std[bcb96dfbba0ab899]::backtrace::Backtrace>::force_capture
+                               at /rustc/abc/library/std/src/backtrace.rs:312:9
+   3:     0x55d0c0de0003 - <tidb_base[1a2b3c4d5e6f7a8b]::errors::Error>::fill_line_and_file
+                               at /build/tidb-rs/crates/base/src/errors.rs:617:18
+   4:     0x55d0c0de0003 - <tidb_base[1a2b3c4d5e6f7a8b]::errors::Error>::gen_with_stack_by_args
+                               at /build/tidb-rs/crates/base/src/errors.rs:644:13
+   5:     0x55d0c0de0004 - my_crate::caller::h0123456789abcdef
+                               at /build/tidb-rs/crates/executor/src/caller.rs:12:0
+   6:     0x55d0c0de0005 - <alloc::vec::Vec<[f32]> as core::ops::Drop>::drop
+   7:     0x55d0c0de0006 - <unknown>
+";
+
+    fn render(raw: &str, style: FramePathStyle) -> String {
+        let mut out = Vec::new();
+        write_go_frames(&parse_full_backtrace(raw), style, &mut out);
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn full_form_renders_go_frame_layout_with_build_paths() {
+        assert_eq!(
+            render(FULL_FORM, FramePathStyle::BuildPath),
+            "\n<tidb_base::errors::Error>::gen_with_stack_by_args\
+             \n\t/build/tidb-rs/crates/base/src/errors.rs:644\
+             \nmy_crate::caller\
+             \n\t/build/tidb-rs/crates/executor/src/caller.rs:12\
+             \n<alloc::vec::Vec<[f32]> as core::ops::Drop>::drop\
+             \nunknown"
+        );
+    }
+
+    #[test]
+    fn repo_relative_style_strips_only_the_repository_root() {
+        let root = repo_root();
+        let own = format!("{root}/crates/base/src/errors.rs");
+        assert_eq!(
+            frame_path(&own, FramePathStyle::RepoRelative),
+            "crates/base/src/errors.rs"
+        );
+        assert_eq!(frame_path(&own, FramePathStyle::BuildPath), own);
+        let dep = "/home/u/.cargo/registry/src/index/tokio-1.0.0/src/lib.rs";
+        assert_eq!(frame_path(dep, FramePathStyle::RepoRelative), dep);
+        // A sibling directory that merely shares the prefix is not inside the repository.
+        let sibling = format!("{root}-other/src/lib.rs");
+        assert_eq!(frame_path(&sibling, FramePathStyle::RepoRelative), sibling);
+    }
+
+    #[test]
+    fn stack_starts_where_go_callers_starts() {
+        let fill = "<tidb_base::errors::Error>::fill_line_and_file";
+        // GenWithStack* keep the constructor (Go: AddStack leaves it on top).
+        let gen_frames = [
+            fill,
+            "<tidb_base::errors::Error>::gen_with_stack_by_args",
+            "f",
+        ];
+        assert_eq!(go_stack_start(&gen_frames), 1);
+        // errors.New / Errorf start at their caller.
+        let new_frames = [
+            fill,
+            "<tidb_base::errors::Error>::plain",
+            "tidb_base::errors::new",
+            "f",
+        ];
+        assert_eq!(go_stack_start(&new_frames), 3);
+        let errorf = [
+            fill,
+            "tidb_base::errors::Error::plain",
+            "tidb_base::errors::errorf",
+            "f",
+        ];
+        assert_eq!(go_stack_start(&errorf), 3);
+        // errors.Annotate starts at its caller, method or free function.
+        let annotate = [
+            fill,
+            "<tidb_base::errors::Error>::annotate",
+            "tidb_base::errors::annotate",
+            "f",
+        ];
+        assert_eq!(go_stack_start(&annotate), 3);
+        // errors.Trace is one frame: the free function stays, the method under it goes.
+        let trace_free = [
+            fill,
+            "<tidb_base::errors::Error>::trace",
+            "tidb_base::errors::trace",
+            "f",
+        ];
+        assert_eq!(go_stack_start(&trace_free), 2);
+        let trace_method = [fill, "<tidb_base::errors::Error>::trace", "f"];
+        assert_eq!(go_stack_start(&trace_method), 1);
+        // Generic instantiations and tail calls that removed a frame do not matter.
+        let generic = [
+            fill,
+            "<tidb_base::errors::Error>::plain::<&str>",
+            "tidb_base::errors::new::<&str>",
+            "f",
+        ];
+        assert_eq!(go_stack_start(&generic), 3);
+        let annotate_tail = [fill, "<tidb_base::errors::Error>::annotate::<&str>", "f"];
+        assert_eq!(go_stack_start(&annotate_tail), 2);
+        assert_eq!(
+            bare_symbol("<a::B>::f::<fn() -> u8, Vec<u8>>::g"),
+            "a::B::f::g"
+        );
+        // Internal frames are dropped only at the top.
+        let later = ["f", fill];
+        assert_eq!(go_stack_start(&later), 0);
+    }
+
+    #[test]
+    fn symbol_hashes_are_removed_but_array_types_stay() {
+        assert_eq!(
+            strip_symbol_hashes("<tidb_base[0f1e]::errors::Error>::trace"),
+            "<tidb_base::errors::Error>::trace"
+        );
+        assert_eq!(strip_symbol_hashes("a::b::h0123456789abcdef"), "a::b");
+        assert_eq!(strip_symbol_hashes("a::h01"), "a::h01");
+        assert_eq!(strip_symbol_hashes("<[u8; 4]>::len"), "<[u8; 4]>::len");
+        assert_eq!(strip_symbol_hashes("f::<&[f32]>"), "f::<&[f32]>");
+        assert_eq!(strip_symbol_hashes("x::{closure#0}"), "x::{closure#0}");
+    }
+
+    #[test]
+    fn uncaptured_backtrace_writes_nothing() {
+        let mut out = Vec::new();
+        format_backtrace_frames(&Backtrace::disabled(), &mut out);
+        assert!(out.is_empty());
     }
 }

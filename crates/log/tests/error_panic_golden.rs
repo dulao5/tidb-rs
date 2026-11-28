@@ -375,7 +375,7 @@ fn matrix2_unhandled_panic_subprocess_single_line() {
 
 /// Regression test for #462 live release check: `Error::error_verbose` / `format_backtrace_frames`
 /// MUST include Go-style `\n\t<file>:<line>` locations (including in `--release`, guaranteed by
-/// `[profile.release] debug = "line-tables-only"` in Cargo.toml, spec §2.1).
+/// `[profile.release] debug = "limited"` in Cargo.toml, spec §2.1).
 #[test]
 fn error_stack_frames_include_file_and_line() {
     let err = errors::new("BIGINT value is out of range");
@@ -397,30 +397,30 @@ fn error_stack_frames_include_file_and_line() {
     );
 }
 
-/// Ensures workspace `[profile.release]` retains `debug = "line-tables-only"` so production
-/// `--release` binaries emit `\n\t<file>:<line>` stack frames (`error_stack_frames_include_file_and_line`
-/// also passes directly under `cargo test --release -p tidb-log --test error_panic_golden`).
+/// Ensures workspace `[profile.release]` keeps `debug = "limited"` so production `--release`
+/// binaries emit `<qualified func>\n\t<file>:<line>` stack frames: `line-tables-only` would keep
+/// the locations but record only short function names (see `stack_frame_golden`).
 #[test]
-fn workspace_release_profile_preserves_line_tables() {
+fn workspace_release_profile_keeps_function_names_and_line_tables() {
     let root_manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("Cargo.toml");
     let manifest = std::fs::read_to_string(&root_manifest).expect("read workspace Cargo.toml");
     let mut in_release = false;
-    let mut found_line_tables = false;
+    let mut found_limited = false;
     for raw in manifest.lines() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.starts_with('[') && line.ends_with(']') {
             in_release = line == "[profile.release]";
             continue;
         }
-        if in_release && line == r#"debug = "line-tables-only""# {
-            found_line_tables = true;
+        if in_release && line == r#"debug = "limited""# {
+            found_limited = true;
         }
     }
     assert!(
-        found_line_tables,
-        "[profile.release] in workspace Cargo.toml must set debug = \"line-tables-only\""
+        found_limited,
+        "[profile.release] in workspace Cargo.toml must set debug = \"limited\""
     );
 }
 
