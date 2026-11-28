@@ -395,6 +395,7 @@ struct StmtMetrics {
     /// A statement got past parsing; cleared once recorded.
     active: bool,
     stmt_type: Option<StmtType>,
+    show_warnings: bool,
     parse: Duration,
     /// Planning time (a `Cell`: `plan` takes `&self`).
     compile: Cell<Duration>,
@@ -536,47 +537,12 @@ fn txn_fence(stmt: &Statement) -> Option<SqlError> {
 }
 
 /// `SET autocommit = value`, after Go's validation turned the value into `ON` / `OFF`
-/// ([`validated_session_value`]): on is accepted, off is the explicit-transaction fence
-/// (1235).
+/// (`check_set`): on is accepted, off is the explicit-transaction fence (1235).
 fn autocommit_fence(normalized: &str) -> Result<(), SqlError> {
     if normalized == tidb_sessionctx::variable::Off {
         return Err(not_in_txn("autocommit=0"));
     }
     Ok(())
-}
-
-/// `SET name = value` of a session variable as Go's `SessionVars.SetSystemVar` checks it before
-/// storing it: `SysVar.Validate` with the session scope (the ported sysvar layer, D05.1), on
-/// the text Go's `SetExecutor.getVarValue` makes of the value ([`router::sync::value_text`]).
-/// Returns the normalized value (`ON` / `OFF` for a boolean, the formatted `sql_mode`, ...),
-/// or the validation error as Go's `writeError` sends it: for example `SET autocommit = 'abc'`
-/// is `1231 (42000) Variable 'autocommit' can't be set to the value of 'abc'`, and
-/// `SET sql_mode = 'NOSUCHMODE'` is `1105 (HY000)` with the text of the parser's
-/// `ErrWrongValueForVar` (`mysql.NewErr` is not a TiDB error). `None` when the prototype
-/// cannot make the text (an expression other than a negated literal).
-///
-/// The SET executor (`SetExecutor.setSysVariable`) is D12.12 and not ported: the prototype
-/// runs SET, so the validation runs here, against `vars`: the prototype's session variables
-/// (`Session::default_session`), over the cluster's global values (the loader's sysvar
-/// cache, D06.5 spec §8), or the compiled defaults while the cache is not built yet.
-/// Validations that read another variable (`tidb_skip_isolation_level_check` for
-/// `transaction_isolation`, `tidb_enable_noop_functions` for `transaction_read_only`) read
-/// the session's value or the cluster's global value, as Go's session does. Warnings a
-/// validation appends (a truncated number) stay in `vars`'s statement context, where
-/// [`run_set`] takes them for the statement's warnings, as Go's `StmtCtx` keeps them.
-// glue: the validation step of SetExecutor.setSysVariable → SessionVars.SetSystemVar (D12.12) on the prototype's SET
-fn validated_session_value(
-    vars: &mut tidb_sessionctx::variable::session::SessionVars,
-    sys_var: &tidb_sessionctx::variable::SysVar,
-    value: &SetValue,
-) -> Result<Option<String>, SqlError> {
-    let Some(text) = router::sync::value_text(vars, sys_var.name, value) else {
-        return Ok(None);
-    };
-    let (normalized, validated) =
-        sys_var.validate(vars, &text, tidb_sessionctx::variable::ScopeSession);
-    validated.map_err(|e| router::sql_error(&e))?;
-    Ok(Some(normalized))
 }
 
 /// Go's `SetExecutor.setCharset(cs, co, isSetName)` (`set.go:257`) for `SET NAMES` and
@@ -641,6 +607,35 @@ fn set_charset(
 fn prototype_charset(cs: &str) -> bool {
     matches!(cs, "utf8mb4" | "utf8" | "binary" | "latin1" | "ascii")
 }
+
+/// Session variables the prototype accepts in a session `SET` and keeps in its session
+/// variables (so `@@name` reads them back) without anything else to do: they are provably
+/// result-neutral for anything this node executes on the PoC path, and the router syncs them
+/// into the new session ([`router::sync::SYNCED_SYSVARS`]), which applies them with Go's
+/// semantics.
+const IGNORED_SYSVARS: &[&str] = &[
+    "wait_timeout",
+    "interactive_timeout",
+    "net_write_timeout",
+    "net_read_timeout",
+    "transaction_isolation",
+    "tx_isolation",
+    "transaction_read_only",
+    "tx_read_only",
+    "time_zone",
+    "max_execution_time",
+    // Connect-time SETs of drivers and pools (#505). Only DML/DDL or unported functions read these.
+    "sql_safe_updates",
+    "foreign_key_checks",
+    "unique_checks",
+    "innodb_lock_wait_timeout",
+    "group_concat_max_len",
+    // Safe/validated switches explicitly allowed on PoC and synced into the new session (#541).
+    "div_precision_increment",
+    "tidb_enable_noop_functions",
+    "tidb_skip_isolation_level_check",
+    "tidb_enable_prepared_plan_cache",
+];
 
 /// `sql_select_limit`'s default (`math.MaxUint64`): no limit, the only value the prototype
 /// accepts (Go's `buildSelect` adds a Limit for any other value; the prototype has none).
@@ -766,6 +761,7 @@ impl Session {
         ts: Option<TsFuture>,
     ) -> Result<Response, SqlError> {
         let mut r = self.run_stmt(lowered, params, ts).await;
+        self.stmt.show_warnings = matches!(lowered.stmt, Statement::ShowWarnings { .. });
         let n = u16::try_from(self.warnings.len()).unwrap_or(u16::MAX);
         match &mut r {
             Ok(Response::ResultSet(rs)) => rs.warnings = n,
@@ -1077,7 +1073,11 @@ fn record_session_values(
     from_default: bool,
 ) {
     for (name, value) in written {
-        values.retain(|(n, _)| *n != name);
+        if let Some(sv) = tidb_sessionctx::variable::get_sys_var(&name) {
+            values.retain(|(n, _)| n != sv.name && !sv.aliases.contains(&n.as_str()));
+        } else {
+            values.retain(|(n, _)| *n != name);
+        }
         values.push((name, (!from_default).then_some(value)));
     }
 }
@@ -1189,7 +1189,7 @@ fn write_vars(
 
 /// The checks of one `SET` assignment on the prototype, in Go's order, before anything is
 /// written: the change to make, or the assignment's error. `vars` is the prototype's session
-/// the values are validated against ([`validated_session_value`]).
+/// the values are validated against (`sys_var.validate`).
 fn check_set(
     vars: &mut tidb_sessionctx::variable::session::SessionVars,
     a: &SetAssignment,
@@ -1250,9 +1250,32 @@ fn check_set(
             } else {
                 tidb_sessionctx::variable::ScopeSession
             };
-            sys_var
-                .validate_scope(scope)
-                .map_err(|e| router::sql_error(&e))?;
+            // Go `SetExecutor.setSysVariable` evaluates `getVarValue` (`set.go:151,188`) before
+            // `SetGlobalSysVar` / `SetSystemVar` validates scope, type, and value hooks.
+            let text = if is_global || (*value == SetValue::Default && sys_var.has_none_scope()) {
+                match value {
+                    SetValue::Default => Some(sys_var.value.clone()),
+                    _ => router::sync::value_text(vars, sys_var.name, value),
+                }
+            } else if *value == SetValue::Default {
+                match router::sync::value_text(vars, sys_var.name, value) {
+                    Some(v) => Some(v),
+                    None => {
+                        sys_var
+                            .validate_scope(scope)
+                            .map_err(|e| router::sql_error(&e))?;
+                        None
+                    }
+                }
+            } else {
+                router::sync::value_text(vars, sys_var.name, value)
+            };
+            let Some(text) = text else {
+                // Non-literal expressions on `SET` cannot yet be evaluated by the prototype.
+                return Err(SqlError::not_supported("this SET value"));
+            };
+            let (normalized, validated) = sys_var.validate(vars, &text, scope);
+            validated.map_err(|e| router::sql_error(&e))?;
             if is_global {
                 if legacy_instance_warning {
                     vars.stmt_ctx().append_warning(
@@ -1274,36 +1297,37 @@ fn check_set(
                         .fast_gen_by_args(tidb_base::go_args![sys_var.name.to_owned()]),
                 );
             }
-            // Go validates the value before anything uses it (`SetSystemVar`).
-            let Some(normalized) = validated_session_value(vars, &sys_var, value)? else {
-                // Non-literal expressions on `SET` cannot yet be evaluated by the prototype.
-                return Err(SqlError::not_supported("this SET value"));
-            };
             let mut change = SetChange::default();
-            match name.as_str() {
+            match sys_var.name {
                 "autocommit" => autocommit_fence(&normalized)?,
                 // NULL is the empty value (`getVarValue`): columns keep their charset.
                 "character_set_results" => {
                     change.results = Some((!normalized.is_empty()).then(|| normalized.clone()));
                 }
+                "character_set_client"
+                | "character_set_connection"
+                | "collation_connection"
+                | "tidb_enable_window_function" => {}
                 // The validated value is upper case (`FormatSQLModeStr`).
                 "sql_mode" if normalized.contains("PAD_CHAR_TO_FULL_LENGTH") => {
                     return Err(SqlError::not_supported(
                         "this sql_mode (PAD_CHAR_TO_FULL_LENGTH changes CHAR results)",
                     ));
                 }
+                "sql_mode" => {}
                 "sql_select_limit" if normalized != NO_SELECT_LIMIT => {
                     return Err(SqlError::not_supported(
                         "sql_select_limit other than 18446744073709551615 (the prototype \
                          applies no select limit)",
                     ));
                 }
-                n if router::sync::FENCED_SYSVARS.contains(&n) => {
+                "sql_select_limit" => {}
+                n if IGNORED_SYSVARS.contains(&n) => {}
+                n => {
                     return Err(SqlError::not_supported(format!(
                         "setting system variable '{n}'"
                     )));
                 }
-                _ => {}
             }
             change.writes = vec![VarWrite::Validated(sys_var.name.to_owned(), normalized)];
             change.from_default = *value == SetValue::Default;
@@ -1373,9 +1397,21 @@ impl SessionHandler for Session {
             None => {
                 router::trace::record(self.connection_id, "poc", "new_stack_off");
                 let r = self.query_inner(sql).await;
-                let is_select = self.stmt.stmt_type == Some(StmtType::Select);
-                self.prev_stmt =
-                    router::LastStmtInfo::from_poc_stmt(&self.prev_stmt, &r, is_select);
+                self.prev_stmt = match &r {
+                    Err(e)
+                        if self.stmt.stmt_type.is_none()
+                            && matches!(e.code, 1064 | 1115 | 1273) =>
+                    {
+                        router::LastStmtInfo::from_parse_error(&self.prev_stmt, true)
+                    }
+                    _ if self.stmt.show_warnings => {
+                        router::LastStmtInfo::from_poc_show_warnings(&self.prev_stmt, &r)
+                    }
+                    _ => {
+                        let is_select = self.stmt.stmt_type == Some(StmtType::Select);
+                        router::LastStmtInfo::from_poc_stmt(&self.prev_stmt, &r, is_select)
+                    }
+                };
                 r
             }
             Some(mut router) => {
@@ -1390,6 +1426,7 @@ impl SessionHandler for Session {
 
     async fn prepare(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
         self.stmt.stmt_type = None;
+        self.stmt.show_warnings = false;
         match self.router.take() {
             None => self.prepare_inner(stmt_id, sql).await,
             Some(mut router) => {
@@ -1405,9 +1442,12 @@ impl SessionHandler for Session {
             None => {
                 router::trace::record(self.connection_id, "poc", "new_stack_off");
                 let r = self.execute_inner(stmt_id, params).await;
-                let is_select = self.stmt.stmt_type == Some(StmtType::Select);
-                self.prev_stmt =
-                    router::LastStmtInfo::from_poc_stmt(&self.prev_stmt, &r, is_select);
+                self.prev_stmt = if self.stmt.show_warnings {
+                    router::LastStmtInfo::from_poc_show_warnings(&self.prev_stmt, &r)
+                } else {
+                    let is_select = self.stmt.stmt_type == Some(StmtType::Select);
+                    router::LastStmtInfo::from_poc_stmt(&self.prev_stmt, &r, is_select)
+                };
                 r
             }
             Some(mut router) => {
@@ -1528,23 +1568,40 @@ impl SessionHandler for Session {
 }
 
 impl Session {
+    fn parse_options(&mut self) -> tidb_parser::ParseOptions {
+        tidb_parser::ParseOptions {
+            window_functions: self
+                .default_vars()
+                .map_or(true, |v| v.enable_window_function),
+        }
+    }
+
     async fn query_inner(&mut self, sql: &str) -> Result<Response, SqlError> {
         self.timer.begin();
         self.mdl = None;
         self.stmt.stmt_type = None;
+        self.stmt.show_warnings = false;
+        self.stmt.show_warnings = false;
         let start = Instant::now();
-        let lowered = match tidb_sql::parse_and_lower(sql) {
+        let opts = self.parse_options();
+        let lowered = match tidb_sql::parse_and_lower_with_opts(sql, &opts) {
             Ok(l) => l,
             Err(e) => {
-                if e.code == tidb_base::errno::ErrParse {
-                    // Go fails before `ResetContextOfStmt`: the warnings stay.
-                    return Err(router::log_and_wrap_parse_error(
+                if matches!(e.code, 1064 | 1115 | 1273) {
+                    // Go fails before `ResetContextOfStmt`: the warnings stay and the parse error
+                    // is appended to the previous statement context.
+                    let wrapped = router::log_and_wrap_parse_error(
                         self.connection_id,
                         "",
                         tidb_base::errors::redact_log_enabled_load(),
                         sql,
                         e,
-                    ));
+                    );
+                    self.warnings.push(SQLWarn {
+                        level: tidb_base::contextutil::WarnLevelError.into(),
+                        err: router::parse_error_warn(&wrapped),
+                    });
+                    return Err(wrapped);
                 }
                 // A statement the prototype does not lower: Go would have started it.
                 self.warnings.clear();
@@ -1554,6 +1611,7 @@ impl Session {
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
         self.stmt.start(stmt_type(&lowered.stmt), parse);
+        self.stmt.show_warnings = matches!(lowered.stmt, Statement::ShowWarnings { .. });
         self.timer.mark(Phase::Parse);
         self.reset_warnings(&lowered.stmt);
         if lowered.param_count > 0 {
@@ -1586,7 +1644,8 @@ impl Session {
     async fn prepare_inner(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
         // A parse error comes before Go's `ResetContextOfStmt` (`PrepareExec.Next`): the
         // warnings stay.
-        let stmt = tidb_sql::ir::parse_one(sql)?;
+        let opts = self.parse_options();
+        let stmt = tidb_sql::ir::parse_one_with_opts(sql, &opts)?;
         let lowered = match tidb_sql::ir::lower_statement(&stmt, sql) {
             Ok(l) => l,
             Err(e) => {
@@ -1710,10 +1769,8 @@ impl Session {
                     apply_result_charset(c, self.results_charset.as_deref());
                 }
             }
-            Statement::ShowVariables { where_, .. } => {
-                if let Some(w) = where_ {
-                    show::validate_where_columns(w)?;
-                }
+            Statement::ShowVariables { like, where_, .. } => {
+                show::validate_show_filters(like.as_ref(), where_.as_ref())?;
                 columns = show::show_variables_columns().to_vec();
                 for c in &mut columns {
                     apply_result_charset(c, self.results_charset.as_deref());
@@ -1741,6 +1798,7 @@ impl Session {
         params: Vec<Param>,
     ) -> Result<Response, SqlError> {
         self.stmt.stmt_type = None;
+        self.stmt.show_warnings = false;
         let (lowered, reason) = self
             .stmts
             .get(&stmt_id)
@@ -1820,6 +1878,8 @@ impl router::PocEngine for Session {
         self.timer.begin();
         self.mdl = None;
         self.stmt.stmt_type = None;
+        self.stmt.show_warnings = false;
+        self.stmt.show_warnings = false;
     }
 
     fn start_statement(&mut self, kind: StmtType, parse: Duration) {
@@ -1867,6 +1927,10 @@ impl router::PocEngine for Session {
 
     fn set_prev_stmt(&mut self, last: &router::LastStmtInfo) {
         self.prev_stmt = last.clone();
+    }
+
+    fn append_error_warning(&mut self, warn: SQLWarn) {
+        self.warnings.push(warn);
     }
 }
 
@@ -2622,11 +2686,12 @@ mod fence_tests {
         }
     }
 
-    /// #541: previously rejected variables (`div_precision_increment`, `group_concat_max_len`,
+    /// #541: allowed session variables (`div_precision_increment`, `group_concat_max_len`,
     /// `max_execution_time`, `tidb_enable_noop_functions`, `tidb_skip_isolation_level_check`,
-    /// `tidb_enable_prepared_plan_cache`, `transaction_isolation`, `tx_isolation`, ...) work
-    /// in session `SET` and `SET ... = DEFAULT`, enforce Go scope errors (`1238`, `1229`,
-    /// `1228`), and sync aliases / validation switches.
+    /// `tidb_enable_prepared_plan_cache`, `tidb_enable_window_function`, `transaction_isolation`,
+    /// `tx_isolation`, ...) work in session `SET` and `SET ... = DEFAULT`; scope/unknown/type
+    /// errors match Go before any 1235 fence; result-affecting unported variables stay rejected
+    /// with 1235 so they are never silently ignored on the PoC path.
     #[test]
     fn issue_541_variables_and_scope_errors() {
         let mut session = validation_session(&[
@@ -2638,6 +2703,7 @@ mod fence_tests {
             ("tidb_enable_noop_functions", "OFF"),
             ("tidb_skip_isolation_level_check", "OFF"),
             ("tidb_enable_prepared_plan_cache", "ON"),
+            ("tidb_enable_window_function", "ON"),
         ]);
         // Session SET + dependent validation switches + alias sync.
         let Statement::Set(a) = tidb_sql::parse_and_lower(
@@ -2645,7 +2711,7 @@ mod fence_tests {
              max_execution_time = 2500, tidb_enable_noop_functions = ON, \
              transaction_read_only = 1, tidb_skip_isolation_level_check = ON, \
              tx_isolation = 'SERIALIZABLE', tidb_enable_prepared_plan_cache = OFF, \
-             sql_mode = 'ANSI', time_zone = '+08:00'",
+             tidb_enable_window_function = OFF, sql_mode = 'ANSI', time_zone = '+08:00'",
         )
         .unwrap()
         .stmt
@@ -2653,6 +2719,7 @@ mod fence_tests {
             unreachable!()
         };
         run_set(session.vars_mut(), &a, |_| {}).1.unwrap();
+        assert!(!session.vars().enable_window_function);
         for (name, want) in [
             ("div_precision_increment", "9"),
             ("group_concat_max_len", "4096"),
@@ -2664,6 +2731,7 @@ mod fence_tests {
             ("transaction_isolation", "SERIALIZABLE"),
             ("tx_isolation", "SERIALIZABLE"),
             ("tidb_enable_prepared_plan_cache", "OFF"),
+            ("tidb_enable_window_function", "OFF"),
             ("time_zone", "+08:00"),
         ] {
             assert_eq!(session.vars_mut().get_system_var(name).0, want, "{name}");
@@ -2672,7 +2740,7 @@ mod fence_tests {
         let Statement::Set(def) = tidb_sql::parse_and_lower(
             "SET div_precision_increment = DEFAULT, group_concat_max_len = DEFAULT, \
              max_execution_time = DEFAULT, tidb_enable_prepared_plan_cache = DEFAULT, \
-             sql_mode = DEFAULT, time_zone = DEFAULT",
+             tidb_enable_window_function = DEFAULT, sql_mode = DEFAULT, time_zone = DEFAULT",
         )
         .unwrap()
         .stmt
@@ -2680,29 +2748,230 @@ mod fence_tests {
             unreachable!()
         };
         run_set(session.vars_mut(), &def, |_| {}).1.unwrap();
+        assert!(session.vars().enable_window_function);
         for (name, want) in [
             ("div_precision_increment", "7"),
             ("group_concat_max_len", "8192"),
             ("max_execution_time", "5000"),
             ("tidb_enable_prepared_plan_cache", "ON"),
+            ("tidb_enable_window_function", "ON"),
             ("sql_mode", "STRICT_TRANS_TABLES"),
             ("time_zone", "+02:00"),
         ] {
             assert_eq!(session.vars_mut().get_system_var(name).0, want, "{name}");
         }
 
-        // Scope errors match Go (`validate_scope`).
-        for (sql, want_code) in [
-            ("SET port = 4001", 1238),
-            ("SET GLOBAL port = 4001", 1238),
-            ("SET GLOBAL version_comment = 'x'", 1238),
-            ("SET tidb_gc_life_time = '20m'", 1229),
-            ("SET GLOBAL timestamp = 1", 1228),
-            ("SET GLOBAL max_execution_time = 1", 1235),
-            ("SET tidb_general_log = 1", 1235),
-            ("SET nosuch = 1", 1193),
+        // Alias default removal: `SET tx_isolation = DEFAULT; SET transaction_isolation = ...`
+        // keeps only the later override in `session_values`.
+        let mut values: Vec<SessionValue> = Vec::new();
+        let mut alias_sess = validation_session(&[]);
+        let Statement::Set(alias_set) = tidb_sql::parse_and_lower(
+            "SET tx_isolation = DEFAULT, transaction_isolation = 'READ-COMMITTED'",
+        )
+        .unwrap()
+        .stmt
+        else {
+            unreachable!()
+        };
+        run_set(alias_sess.vars_mut(), &alias_set, |c| {
+            record_session_values(&mut values, c.values, c.from_default);
+        })
+        .1
+        .unwrap();
+        assert_eq!(
+            values,
+            vec![(
+                "transaction_isolation".to_owned(),
+                Some("READ-COMMITTED".to_owned())
+            )]
+        );
+
+        // Scope, value-evaluation-order, and unknown variable errors match Go (code, SQLSTATE, message).
+        for (sql, want) in [
+            (
+                "SET port = 4001",
+                (1238, "HY000", "Variable 'port' is a read only variable"),
+            ),
+            (
+                "SET GLOBAL port = 4001",
+                (1238, "HY000", "Variable 'port' is a read only variable"),
+            ),
+            (
+                "SET port = 'bad'",
+                (1238, "HY000", "Variable 'port' is a read only variable"),
+            ),
+            (
+                "SET port = 1 + 1",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'this SET value'",
+                ),
+            ),
+            (
+                "SET GLOBAL version_comment = 'x'",
+                (
+                    1238,
+                    "HY000",
+                    "Variable 'version_comment' is a read only variable",
+                ),
+            ),
+            (
+                "SET tidb_gc_life_time = '20m'",
+                (
+                    1229,
+                    "HY000",
+                    "Variable 'tidb_gc_life_time' is a GLOBAL variable and should be set with SET GLOBAL",
+                ),
+            ),
+            (
+                "SET tidb_gc_life_time = DEFAULT",
+                (
+                    1229,
+                    "HY000",
+                    "Variable 'tidb_gc_life_time' is a GLOBAL variable and should be set with SET GLOBAL",
+                ),
+            ),
+            (
+                "SET GLOBAL timestamp = 1",
+                (
+                    1228,
+                    "HY000",
+                    "Variable 'timestamp' is a SESSION variable and can't be used with SET GLOBAL",
+                ),
+            ),
+            (
+                "SET GLOBAL max_execution_time = 'bad'",
+                (
+                    1232,
+                    "42000",
+                    "Incorrect argument type to variable 'max_execution_time'",
+                ),
+            ),
+            (
+                "SET tidb_general_log = 'bad'",
+                (
+                    1231,
+                    "42000",
+                    "Variable 'tidb_general_log' can't be set to the value of 'bad'",
+                ),
+            ),
+            (
+                "SET GLOBAL max_execution_time = 1",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'SET GLOBAL'",
+                ),
+            ),
+            (
+                "SET tidb_general_log = 1",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'SET GLOBAL'",
+                ),
+            ),
+            (
+                "SET nosuch = 1",
+                (1193, "HY000", "Unknown system variable 'nosuch'"),
+            ),
         ] {
-            assert_eq!(err(sql).0, want_code, "{sql}");
+            assert_eq!(
+                err(sql),
+                (want.0, want.1.to_owned(), want.2.to_owned()),
+                "{sql}"
+            );
+        }
+
+        // Unlisted / result-affecting variables are NEVER silently accepted on the PoC path.
+        for (sql, want) in [
+            (
+                "SET tidb_isolation_read_engines = 'tikv'",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_isolation_read_engines''",
+                ),
+            ),
+            (
+                "SET tidb_enable_ordered_result_mode = ON",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_enable_ordered_result_mode''",
+                ),
+            ),
+            (
+                "SET tidb_enable_external_ts_read = ON",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_enable_external_ts_read''",
+                ),
+            ),
+            (
+                "SET tidb_low_resolution_tso = ON",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_low_resolution_tso''",
+                ),
+            ),
+            (
+                "SET tidb_mem_quota_query = 1048576",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_mem_quota_query''",
+                ),
+            ),
+            (
+                "SET tidb_mem_oom_action = 'CANCEL'",
+                (
+                    1229,
+                    "HY000",
+                    "Variable 'tidb_mem_oom_action' is a GLOBAL variable and should be set with SET GLOBAL",
+                ),
+            ),
+            (
+                "SET GLOBAL tidb_mem_oom_action = 'CANCEL'",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'SET GLOBAL'",
+                ),
+            ),
+            (
+                "SET tidb_enforce_mpp = OFF",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_enforce_mpp''",
+                ),
+            ),
+            (
+                "SET tidb_kv_read_timeout = 10",
+                (
+                    1193,
+                    "HY000",
+                    "Unknown system variable 'tidb_kv_read_timeout'",
+                ),
+            ),
+            (
+                "SET tx_isolation_one_shot = 'READ-COMMITTED'",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tx_isolation_one_shot''",
+                ),
+            ),
+        ] {
+            assert_eq!(
+                err(sql),
+                (want.0, want.1.to_owned(), want.2.to_owned()),
+                "{sql}"
+            );
         }
 
         // Fenced session variables stay rejected with 1235.

@@ -78,7 +78,10 @@ impl PrepareExec {
         // params = vars.GetParseParams() (needReset) or the connection's charset and
         // collation: the Rust parser has no charset parameters.
         let _ = self.need_reset;
-        let out = match parse(&self.sql_text, &ParseOptions::default()) {
+        let opts = ParseOptions {
+            window_functions: sctx.get_session_vars().enable_window_function,
+        };
+        let out = match parse(&self.sql_text, &opts) {
             Ok(out) => out,
             // return util.SyntaxError(err)
             // glue: blocked-by:D02.1 (the parser's error text differs from Go's)

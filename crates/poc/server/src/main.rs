@@ -365,13 +365,7 @@ fn main() {
         tls,
         ..ServerConfig::default()
     };
-    tidb_sessionctx::variable::set_sys_var("port", &effective_port.to_string());
-    if !tidb_cfg.socket.is_empty() {
-        tidb_sessionctx::variable::set_sys_var("socket", &tidb_cfg.socket);
-    }
-    if !tidb_cfg.path.is_empty() {
-        tidb_sessionctx::variable::set_sys_var("datadir", &tidb_cfg.path);
-    }
+    apply_startup_global_vars(&tidb_cfg, effective_port);
     if config.tls.is_some() {
         tidb_sessionctx::variable::set_sys_var("have_ssl", "YES");
         tidb_sessionctx::variable::set_sys_var("have_openssl", "YES");
@@ -635,6 +629,68 @@ fn main() {
     }
 }
 
+/// Resolves the host name to publish in the `hostname` global system variable.
+fn system_hostname() -> String {
+    if let Ok(name) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    std::env::var("HOSTNAME")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "localhost".to_owned())
+}
+
+/// Applies Go's `cmd/tidb-server/main.go:setGlobalVars` (770-784) startup config onto global
+/// system variables so `SHOW [GLOBAL] VARIABLES` and `SELECT @@...` reflect the server's config.
+// go-part: setGlobalVars (cmd/tidb-server/main.go:770-784)
+fn apply_startup_global_vars(cfg: &tidb_base::config::Config, effective_port: u16) {
+    use std::sync::atomic::Ordering::SeqCst;
+    use tidb_base::mysql::{Priority2Str, str2_priority};
+    use tidb_sessionctx::variable::set_sys_var;
+    use tidb_sessionctx::variable::tidb_vars::ForcePriority;
+    use tidb_sessionctx::variable::varsutil::bool_to_on_off;
+
+    let priority = str2_priority(&cfg.performance.force_priority);
+    ForcePriority.store(priority.0 as i32, SeqCst);
+    let priority_str = Priority2Str
+        .get(&priority)
+        .copied()
+        .unwrap_or("NO_PRIORITY");
+    set_sys_var("tidb_force_priority", priority_str);
+    set_sys_var(
+        "tidb_opt_distinct_agg_push_down",
+        bool_to_on_off(cfg.performance.distinct_agg_push_down),
+    );
+    set_sys_var(
+        "tidb_opt_projection_push_down",
+        bool_to_on_off(cfg.performance.projection_push_down),
+    );
+    set_sys_var("port", &effective_port.to_string());
+    if !cfg.socket.is_empty() {
+        set_sys_var("socket", &cfg.socket);
+    }
+    if !cfg.path.is_empty() {
+        set_sys_var("datadir", &cfg.path);
+    }
+    set_sys_var("tidb_slow_query_file", &cfg.log.slow_query_file);
+    if let Some(engines) = &cfg.isolation_read.engines {
+        set_sys_var("tidb_isolation_read_engines", &engines.join(","));
+    }
+    set_sys_var(
+        "tidb_enforce_mpp",
+        bool_to_on_off(cfg.performance.enforce_mpp),
+    );
+    set_sys_var(
+        "tidb_constraint_check_in_place_pessimistic",
+        bool_to_on_off(cfg.pessimistic_txn.constraint_check_in_place_pessimistic),
+    );
+    set_sys_var("hostname", &system_hostname());
+}
+
 /// Worker threads of the multi-threaded runtime (tokio: `TOKIO_WORKER_THREADS`, else the
 /// available parallelism), reported as `tidb_server_maxprocs` (Go: `GOMAXPROCS`).
 fn worker_threads() -> usize {
@@ -702,4 +758,86 @@ fn tls_config(args: &Args) -> std::io::Result<Option<TlsConfig>> {
         "client verification enabled" => false,
     );
     Ok(Some(config))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    use tidb_sessionctx::variable::get_sys_var;
+    use tidb_sessionctx::variable::tidb_vars::ForcePriority;
+
+    use super::{apply_startup_global_vars, system_hostname};
+
+    #[test]
+    fn startup_global_vars_match_config() {
+        let base = tidb_base::config::Config::default();
+        let cfg = tidb_base::config::Config {
+            socket: "/tmp/test-tidb-{Port}.sock".replace("{Port}", "4401"),
+            path: "/tmp/tidb-data".to_owned(),
+            log: tidb_base::config::Log {
+                slow_query_file: "/var/log/tidb-slow.log".to_owned(),
+                ..base.log
+            },
+            isolation_read: tidb_base::config::IsolationRead {
+                engines: Some(vec!["tikv".to_owned(), "tidb".to_owned()]),
+            },
+            performance: tidb_base::config::Performance {
+                force_priority: "HIGH_PRIORITY".to_owned(),
+                distinct_agg_push_down: true,
+                projection_push_down: false,
+                enforce_mpp: true,
+                ..base.performance
+            },
+            pessimistic_txn: tidb_base::config::PessimisticTxn {
+                constraint_check_in_place_pessimistic: false,
+                ..base.pessimistic_txn
+            },
+            ..base
+        };
+
+        apply_startup_global_vars(&cfg, 4401);
+
+        assert_eq!(get_sys_var("port").unwrap().value, "4401");
+        assert_eq!(
+            get_sys_var("socket").unwrap().value,
+            "/tmp/test-tidb-4401.sock"
+        );
+        assert_eq!(get_sys_var("datadir").unwrap().value, "/tmp/tidb-data");
+        assert_eq!(
+            get_sys_var("tidb_slow_query_file").unwrap().value,
+            "/var/log/tidb-slow.log"
+        );
+        assert_eq!(
+            get_sys_var("tidb_isolation_read_engines").unwrap().value,
+            "tikv,tidb"
+        );
+        assert_eq!(
+            get_sys_var("tidb_force_priority").unwrap().value,
+            "HIGH_PRIORITY"
+        );
+        assert_eq!(
+            ForcePriority.load(SeqCst),
+            tidb_base::mysql::HighPriority.0 as i32
+        );
+        assert_eq!(
+            get_sys_var("tidb_opt_distinct_agg_push_down")
+                .unwrap()
+                .value,
+            "ON"
+        );
+        assert_eq!(
+            get_sys_var("tidb_opt_projection_push_down").unwrap().value,
+            "OFF"
+        );
+        assert_eq!(get_sys_var("tidb_enforce_mpp").unwrap().value, "ON");
+        assert_eq!(
+            get_sys_var("tidb_constraint_check_in_place_pessimistic")
+                .unwrap()
+                .value,
+            "OFF"
+        );
+        assert_eq!(get_sys_var("hostname").unwrap().value, system_hostname());
+        assert!(!system_hostname().is_empty());
+    }
 }

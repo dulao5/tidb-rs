@@ -275,6 +275,11 @@ pub trait PocEngine: Send {
     fn set_prev_stmt(&mut self, last: &LastStmtInfo) {
         let _ = last;
     }
+    /// Appends an error warning (such as a parse error) to the PoC's current statement warning
+    /// list without clearing prior warnings (`session.Parse`, `session.go:1591`).
+    fn append_error_warning(&mut self, warn: tidb_base::contextutil::SQLWarn) {
+        let _ = warn;
+    }
 }
 
 /// The scope of `ADMIN FLUSH <scope> PLAN_CACHE` (`AdminStmt#30` of the grammar; the Rust AST
@@ -462,8 +467,8 @@ pub(crate) fn sql_error(e: &Error) -> SqlError {
 }
 
 /// Emit Go `session.go:1590` `WARN` `"parse SQL failed"` (preserving raw `\n`, applying
-/// `redact::string`) and attach a `[parser:1064]` `source_err` on `SqlError` for
-/// `command dispatched failed`.
+/// `redact::string`) and attach a `[parser:1064]` (or semantic parse error code) `source_err` on
+/// `SqlError` for `command dispatched failed`.
 pub(crate) fn log_and_wrap_parse_error(
     conn_id: u64,
     session_alias: &str,
@@ -471,13 +476,10 @@ pub(crate) fn log_and_wrap_parse_error(
     sql: &str,
     err: SqlError,
 ) -> SqlError {
-    let src = err.source_err.clone().unwrap_or_else(|| {
-        // `err.message` is already formatted by the parser; use "%s" instead of ErrParse's
-        // "%s %s" template so we do not append an extra trailing space.
-        tidb_base::terror::ClassParser
-            .new_std(tidb_base::errno::ErrParse)
-            .fast_gen("%s", tidb_base::go_args![&err.message])
-    });
+    let src = err
+        .source_err
+        .clone()
+        .unwrap_or_else(|| parse_error_warn(&err));
     let sql_log = tidb_base::redact::string(redact_mode, sql);
     tidb_base::log_warn!(
         "parse SQL failed",
@@ -487,6 +489,28 @@ pub(crate) fn log_and_wrap_parse_error(
         "SQL" => &sql_log,
     );
     err.with_source_err(src)
+}
+
+/// Builds the `tidb_base::Error` recorded in `StmtCtx.AppendError` for a SQL parse failure.
+pub(crate) fn parse_error_warn(err: &SqlError) -> Error {
+    if let Some(src) = &err.source_err {
+        return src.clone();
+    }
+    let code = if err.code != 0 {
+        err.code
+    } else {
+        tidb_base::errno::ErrParse
+    };
+    let class = if code == tidb_base::errno::ErrUnknownCollation {
+        tidb_base::terror::ClassDDL
+    } else {
+        tidb_base::terror::ClassParser
+    };
+    // `err.message` is already formatted by the parser; use "%s" instead of ErrParse's
+    // "%s %s" template so we do not append an extra trailing space.
+    class
+        .new_std(code)
+        .fast_gen("%s", tidb_base::go_args![&err.message])
 }
 
 /// The 1235 error of a statement only the new stack can run when it cannot (§4.7, row 3).
@@ -811,7 +835,12 @@ impl Router {
     /// The PoC finished a statement with `result`: record its state and copy it into the new
     /// session.
     fn finish_poc(&mut self, result: &Result<Response, SqlError>, is_select: bool) {
-        self.last = LastStmtInfo::from_poc_stmt(&self.last, result, is_select);
+        self.record_poc_stmt(LastStmtInfo::from_poc_stmt(&self.last, result, is_select));
+    }
+
+    /// Records `info` from the PoC and mirrors it into the new session's `SessionVars`.
+    fn record_poc_stmt(&mut self, info: LastStmtInfo) {
+        self.last = info;
         self.last.apply_to(self.new.session_mut().vars_mut());
         self.poc_dirty = true;
         self.stmt_ended = true;
@@ -966,6 +995,13 @@ impl Router {
         r
     }
 
+    /// Parser options synced with the session's `tidb_enable_window_function`.
+    fn parse_options(&self) -> tidb_parser::ParseOptions {
+        tidb_parser::ParseOptions {
+            window_functions: self.new.session().vars().enable_window_function,
+        }
+    }
+
     /// [`Router::query`] before the transaction-end check.
     async fn query_inner(
         &mut self,
@@ -975,11 +1011,20 @@ impl Router {
         self.cursor = false;
         poc.begin_command();
         let start = Instant::now();
-        let stmt = match tidb_sql::ir::parse_one(sql) {
+        let parse_opts = self.parse_options();
+        let stmt = match tidb_sql::ir::parse_one_with_opts(sql, &parse_opts) {
             Ok(s) => s,
             Err(e) => {
-                let vars = self.new.session().vars();
-                let wrapped = if !vars.in_restricted_sql {
+                // Go `session.Parse` (`session.go:1583-1592`) appends syntax/semantic parse errors
+                // (`ErrParse` 1064, `ErrUnknownCharacterSet` 1115, `ErrUnknownCollation` 1273) to
+                // the previous statement context without calling `ResetContextOfStmt`. Other
+                // prototype parser rejections (empty query 1065, multi-stmt 1235) use `self.fail`.
+                if !matches!(e.code, 1064 | 1115 | 1273) {
+                    return self.fail(e);
+                }
+                let restricted = self.new.session().vars().in_restricted_sql;
+                let wrapped = if !restricted {
+                    let vars = self.new.session().vars();
                     log_and_wrap_parse_error(
                         self.conn_id,
                         &vars.session_alias,
@@ -990,7 +1035,27 @@ impl Router {
                 } else {
                     e
                 };
-                self.last = LastStmtInfo::from_poc_stmt(&self.last, &Err(wrapped.clone()), false);
+                if !restricted {
+                    let err_warn = parse_error_warn(&wrapped);
+                    match self.last.engine {
+                        Engine::New => {
+                            self.new
+                                .session_mut()
+                                .vars_mut()
+                                .stmt_ctx()
+                                .append_error(err_warn);
+                        }
+                        Engine::Poc => {
+                            poc.append_error_warning(tidb_base::contextutil::SQLWarn {
+                                level: tidb_base::contextutil::WarnLevelError.into(),
+                                err: err_warn,
+                            });
+                            self.poc_dirty = true;
+                        }
+                    }
+                }
+                self.last = LastStmtInfo::from_parse_error(&self.last, !restricted);
+                self.last.apply_to(self.new.session_mut().vars_mut());
                 return Err(wrapped);
             }
         };
@@ -1038,7 +1103,7 @@ impl Router {
                 // The new stack took the statement (its `Compile` writes to it, D05.3 spec
                 // §9.2): the PoC lowers a new parse of the same text. Only statements that
                 // fall back are parsed twice.
-                tidb_sql::ir::parse_one(sql)?
+                tidb_sql::ir::parse_one_with_opts(sql, &parse_opts)?
             }
             Route::Poc(reason) => {
                 self.note(Engine::Poc.label(), reason.label());
@@ -1057,11 +1122,18 @@ impl Router {
         }
         // §4.5: SHOW WARNINGS / SHOW ERRORS go to the engine that ran the previous
         // statement. Go's SHOW WARNINGS keeps the previous statement's warnings (its
-        // `ResetContextOfStmt` copies them), so the previous statement stays the new stack's.
+        // `ResetContextOfStmt` copies them), so the previous statement stays the new stack's
+        // while `ROW_COUNT()` resets to `0` and `FOUND_ROWS()` updates to the warning rows.
         if let Statement::ShowWarnings { errors } = &lowered.stmt
             && self.last.engine == Engine::New
         {
-            return Ok(Response::ResultSet(self.new_stack_warnings(*errors)));
+            let rs = self.new_stack_warnings(*errors);
+            self.last.affected_rows = 0;
+            self.last.found_rows = rs.rows.len() as u64;
+            let vars = self.new.session_mut().vars_mut();
+            self.last.apply_to(vars);
+            vars.stmt_ctx_mut().in_select_stmt = false;
+            return Ok(Response::ResultSet(rs));
         }
         poc.set_prev_stmt(&self.last);
         let result = poc.run(&lowered).await;
@@ -1088,8 +1160,12 @@ impl Router {
             Statement::Use(_) if result.is_ok() => sync::sync_db(vars, &poc.values()),
             _ => {}
         }
-        let is_select = matches!(lowered.stmt, Statement::Select(_));
-        self.finish_poc(&result, is_select);
+        if matches!(lowered.stmt, Statement::ShowWarnings { .. }) {
+            self.record_poc_stmt(LastStmtInfo::from_poc_show_warnings(&self.last, &result));
+        } else {
+            let is_select = matches!(lowered.stmt, Statement::Select(_));
+            self.finish_poc(&result, is_select);
+        }
         result
     }
 
@@ -1143,7 +1219,7 @@ impl Router {
         stmt_id: u32,
         sql: &str,
     ) -> Result<PreparedInfo, SqlError> {
-        let stmt = tidb_sql::ir::parse_one(sql)?;
+        let stmt = tidb_sql::ir::parse_one_with_opts(sql, &self.parse_options())?;
         // Not on the new stack when the InfoSchema versions differ: its column definitions
         // would come from another version, and a later fallback would fail check_columns.
         // Nor when the schema lease is not admissible (step 0). Nor when the session's

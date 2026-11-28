@@ -55,6 +55,10 @@ struct FakePoc {
     cacheability: HashMap<u32, crate::plan_cache::PrepareCacheability>,
     /// How often the router cleared the PoC's warnings.
     warnings_cleared: usize,
+    /// When true, `Statement::ShowWarnings` returns `warnings` instead of `Err(not_supported)`.
+    show_warnings_enabled: bool,
+    /// PoC statement warnings (used by `SHOW WARNINGS` and `append_error_warning`).
+    warnings: Vec<tidb_base::contextutil::SQLWarn>,
 }
 
 fn col(name: &str) -> ColumnDef {
@@ -108,6 +112,9 @@ impl PocEngine for FakePoc {
     }
     fn run<'a>(&'a mut self, lowered: &'a Lowered) -> BoxFut<'a, Result<Response, SqlError>> {
         Box::pin(async move {
+            if !matches!(lowered.stmt, Statement::ShowWarnings { .. }) {
+                self.warnings.clear();
+            }
             match &lowered.stmt {
                 Statement::Select(_) => {
                     self.log.push("run select".into());
@@ -141,6 +148,12 @@ impl PocEngine for FakePoc {
                     self.log.push("run use".into());
                     self.values.current_db = Some(db.clone());
                     Ok(Response::Ok(OkInfo::default()))
+                }
+                Statement::ShowWarnings { errors } if self.show_warnings_enabled => {
+                    self.log.push("run show warnings".into());
+                    let mut rs = crate::warnings_result_set(&self.warnings, *errors);
+                    rs.warnings = u16::try_from(self.warnings.len()).unwrap_or(u16::MAX);
+                    Ok(Response::ResultSet(rs))
                 }
                 _ => Err(SqlError::not_supported("this statement")),
             }
@@ -189,9 +202,13 @@ impl PocEngine for FakePoc {
     }
     fn clear_warnings(&mut self) {
         self.warnings_cleared += 1;
+        self.warnings.clear();
     }
     fn set_cacheability(&mut self, stmt_id: u32, c: crate::plan_cache::PrepareCacheability) {
         self.cacheability.insert(stmt_id, c);
+    }
+    fn append_error_warning(&mut self, warn: tidb_base::contextutil::SQLWarn) {
+        self.warnings.push(warn);
     }
 }
 
@@ -2534,16 +2551,47 @@ fn new_stack_serves_system_variables_and_connect_queries() {
     assert_eq!(cols[0].name, "@@version_comment");
     assert!(!rows.is_empty());
 
-    // Scope, unknown, and removed variable errors match Go without fallback.
-    for (sql, want_code) in [
-        ("SELECT @@global.warning_count", 1238),
-        ("SELECT @@session.tidb_gc_life_time", 1238),
-        ("SELECT @@local.tidb_gc_life_time", 1238),
-        ("SELECT @@no_such_var", 1193),
-        ("SELECT @@tidb_enable_streaming", 8136),
+    // Scope, unknown, and removed variable errors match Go without fallback (pinned by full tuple).
+    for (sql, want) in [
+        (
+            "SELECT @@global.warning_count",
+            (
+                1238,
+                "HY000",
+                "Variable 'warning_count' is a SESSION variable",
+            ),
+        ),
+        (
+            "SELECT @@session.tidb_gc_life_time",
+            (
+                1238,
+                "HY000",
+                "Variable 'tidb_gc_life_time' is a GLOBAL variable",
+            ),
+        ),
+        (
+            "SELECT @@local.tidb_gc_life_time",
+            (
+                1238,
+                "HY000",
+                "Variable 'tidb_gc_life_time' is a GLOBAL variable",
+            ),
+        ),
+        (
+            "SELECT @@no_such_var",
+            (1193, "HY000", "Unknown system variable 'no_such_var'"),
+        ),
+        (
+            "SELECT @@tidb_enable_streaming",
+            (
+                8136,
+                "HY000",
+                "option 'tidb_enable_streaming' is no longer supported. Reason: streaming is no longer supported",
+            ),
+        ),
     ] {
         let e = block_on(r.query(&mut p, sql)).unwrap_err();
-        assert_eq!(e.code, want_code, "{sql}: {e:?}");
+        assert_eq!((e.code, e.state, e.message.as_str()), want, "{sql}: {e:?}");
     }
 
     // Session SET updates NewSession so subsequent `SELECT @@...` sees session values and
@@ -2588,6 +2636,27 @@ fn new_stack_serves_system_variables_and_connect_queries() {
         ]
     );
 
+    // `tidb_enable_window_function` is wired into router and PREPARE ParseOptions.
+    block_on(r.query(&mut p, "SET tidb_enable_window_function = OFF")).unwrap();
+    let (cols, rows) = decode_encoded_rows(block_on(r.query(&mut p, "SELECT 1 AS rank")).unwrap());
+    assert_eq!(cols[0].name, "rank");
+    assert_eq!(rows[0], vec![Some("1".to_owned())]);
+    assert_eq!(r.last.engine, Engine::New);
+    assert_eq!(
+        block_on(r.query(&mut p, "SELECT ROW_NUMBER() OVER ()"))
+            .unwrap_err()
+            .code,
+        1064
+    );
+    block_on(r.prepare(&mut p, 10, "SELECT 1 AS rank")).unwrap();
+    block_on(r.query(&mut p, "SET tidb_enable_window_function = ON")).unwrap();
+    assert_eq!(
+        block_on(r.query(&mut p, "SELECT 1 AS rank"))
+            .unwrap_err()
+            .code,
+        1064
+    );
+
     // PREPARE + EXECUTE of `SELECT @@max_allowed_packet` runs on the new stack.
     block_on(r.prepare(&mut p, 1, "SELECT @@max_allowed_packet, @@sql_mode")).unwrap();
     let (_, rows) = decode_binary_rows(block_on(r.execute(&mut p, 1, vec![])).unwrap());
@@ -2602,23 +2671,148 @@ fn new_stack_serves_system_variables_and_connect_queries() {
 }
 
 /// Issuing `SET x = DEFAULT` (or `SET CHARACTER SET`) while `SysVarCache` is still unbuilt must
-/// not leave `x` permanently stuck in `self.diverged` once globals finish loading.
+/// not leave `x` or its alias stuck in `self.diverged` or `pending_defaults` once globals finish loading.
 #[test]
 fn set_default_before_globals_loaded_resolves_without_divergence() {
     let mut p = poc();
     let unbuilt = Arc::new(tidb_systable::sysvar_cache::SysVarCache::new());
     let (mut r, _script) = scripted_over(NewStackMode::Fallback, &p, Arc::clone(&unbuilt));
     assert_eq!(r.session_condition(&p), Some("global variables not loaded"));
-    block_on(r.query(&mut p, "SET sql_mode = DEFAULT, CHARACTER SET utf8mb4")).unwrap();
+    block_on(r.query(
+        &mut p,
+        "SET sql_mode = DEFAULT, CHARACTER SET utf8mb4, tx_isolation = DEFAULT, \
+         transaction_isolation = 'READ-COMMITTED'",
+    ))
+    .unwrap();
     assert!(r.diverged.is_empty(), "{:?}", r.diverged);
+    assert!(
+        !r.pending_defaults.contains_key("tx_isolation")
+            && !r.pending_defaults.contains_key("transaction_isolation"),
+        "{:?}",
+        r.pending_defaults
+    );
     unbuilt
         .rebuild(None, &mut || {
-            Ok([("sql_mode".to_owned(), "STRICT_TRANS_TABLES".to_owned())]
-                .into_iter()
-                .collect())
+            Ok([
+                ("sql_mode".to_owned(), "STRICT_TRANS_TABLES".to_owned()),
+                ("tx_isolation".to_owned(), "REPEATABLE-READ".to_owned()),
+                (
+                    "transaction_isolation".to_owned(),
+                    "REPEATABLE-READ".to_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect())
         })
         .unwrap();
     r.ensure_globals();
     assert_eq!(r.session_condition(&p), None);
     assert_eq!(get(&mut r, "sql_mode"), "STRICT_TRANS_TABLES");
+    assert_eq!(get(&mut r, "tx_isolation"), "READ-COMMITTED");
+    assert_eq!(get(&mut r, "transaction_isolation"), "READ-COMMITTED");
+}
+
+/// A parse error (`1064`, `1115`, `1273`) appends to the previous statement context without
+/// resetting `ROW_COUNT()`, active `Engine` (for `SHOW WARNINGS`), or accumulated warnings.
+#[test]
+fn parse_error_preserves_last_stmt_and_appends_error() {
+    tidb_session::session::init_mdl_variable();
+    let cache = compiled_defaults_cache();
+    let mut p = poc();
+    p.show_warnings_enabled = true;
+    let mut new = NewSession::with_globals(None, None, None, Arc::clone(&cache), None);
+    new.session_mut()
+        .set_domain_info_schema(sbtest_info_schema());
+    let mut r = Router::new(NewStackMode::Strict, Box::new(new), &p.values());
+
+    // 1. After SELECT 1 (Engine::New, ROW_COUNT() == -1), parse errors preserve -1, accumulate
+    // warnings/errors, and SHOW WARNINGS resets ROW_COUNT() to 0 while keeping counts.
+    let _ = block_on(r.query(&mut p, "SELECT 1")).unwrap();
+    assert_eq!(r.last.engine, Engine::New);
+    assert_eq!(r.last.affected_rows, -1);
+
+    let err = block_on(r.query(&mut p, "SELEKT 1")).unwrap_err();
+    assert_eq!(err.code, 1064);
+    assert_eq!(r.last.engine, Engine::New);
+    assert_eq!(r.last.affected_rows, -1);
+    assert_eq!((r.last.warning_count, r.last.error_count), (1, 1));
+
+    // Semantic parse error (1115) also preserves previous statement context and accumulates.
+    let err = block_on(r.query(&mut p, "SET NAMES nosuch")).unwrap_err();
+    assert_eq!(err.code, 1115);
+    assert_eq!(r.last.affected_rows, -1);
+    assert_eq!((r.last.warning_count, r.last.error_count), (2, 2));
+
+    let (_, rows) = decode_encoded_rows(
+        block_on(r.query(&mut p, "SELECT @@warning_count, @@error_count")).unwrap(),
+    );
+    assert_eq!(rows[0], vec![Some("2".to_owned()), Some("2".to_owned())]);
+    assert_eq!(r.new.session().vars().stmt_ctx().prev_affected_rows, -1);
+
+    // SHOW WARNINGS after parse error keeps counts and resets ROW_COUNT() to 0.
+    let _ = block_on(r.query(&mut p, "SELECT 1")).unwrap();
+    let _ = block_on(r.query(&mut p, "SELEKT 1b")).unwrap_err();
+    let Response::ResultSet(warns) = block_on(r.query(&mut p, "SHOW WARNINGS")).unwrap() else {
+        panic!("expected ResultSet for SHOW WARNINGS");
+    };
+    assert_eq!(warns.rows.len(), 1);
+    assert_eq!(warns.rows[0][0], Value::from("Error"));
+    assert_eq!(warns.rows[0][1], Value::Int(1064));
+    assert_eq!(r.last.engine, Engine::New);
+    assert_eq!(r.last.affected_rows, 0);
+    let (_, rows) = decode_encoded_rows(
+        block_on(r.query(&mut p, "SELECT @@warning_count, @@error_count")).unwrap(),
+    );
+    assert_eq!(rows[0], vec![Some("1".to_owned()), Some("1".to_owned())]);
+    assert_eq!(r.new.session().vars().stmt_ctx().prev_affected_rows, 0);
+
+    // 2. Existing warning + parse error appends instead of replacing.
+    let _ = block_on(r.query(&mut p, "SELECT 1/0")).unwrap();
+    let _ = block_on(r.query(&mut p, "SELEKT 2")).unwrap_err();
+    let Response::ResultSet(warns) = block_on(r.query(&mut p, "SHOW WARNINGS")).unwrap() else {
+        panic!("expected ResultSet for SHOW WARNINGS");
+    };
+    assert_eq!(warns.rows.len(), 2, "{:?}", warns.rows);
+    assert_eq!(warns.rows[0][0], Value::from("Warning"));
+    assert_eq!(warns.rows[0][1], Value::Int(1365));
+    assert_eq!(warns.rows[1][0], Value::from("Error"));
+    assert_eq!(warns.rows[1][1], Value::Int(1064));
+
+    // 3. After a PoC non-SELECT statement (affected_rows == 0), parse error stays on Engine::Poc,
+    // keeps affected_rows == 0, appends Error 1064 to PoC warnings, and propagates across to New.
+    block_on(r.query(&mut p, "SET NAMES utf8mb4")).unwrap();
+    assert_eq!(r.last.engine, Engine::Poc);
+    assert_eq!(r.last.affected_rows, 0);
+    let _ = block_on(r.query(&mut p, "SELEKT 3")).unwrap_err();
+    assert_eq!(r.last.engine, Engine::Poc);
+    assert_eq!(r.last.affected_rows, 0);
+    assert_eq!((r.last.warning_count, r.last.error_count), (1, 1));
+    let Response::ResultSet(warns) = block_on(r.query(&mut p, "SHOW WARNINGS")).unwrap() else {
+        panic!("expected ResultSet for SHOW WARNINGS on PoC");
+    };
+    assert_eq!(warns.rows.len(), 1);
+    assert_eq!(warns.rows[0][0], Value::from("Error"));
+    assert_eq!(warns.rows[0][1], Value::Int(1064));
+    assert_eq!((r.last.warning_count, r.last.error_count), (1, 1));
+
+    let (_, rows) = decode_encoded_rows(
+        block_on(r.query(&mut p, "SELECT @@warning_count, @@error_count")).unwrap(),
+    );
+    assert_eq!(rows[0], vec![Some("1".to_owned()), Some("1".to_owned())]);
+    assert_eq!(r.new.session().vars().stmt_ctx().prev_affected_rows, 0);
+
+    // 4. After a PoC SELECT statement (affected_rows == -1, e.g. unported function), parse error
+    // preserves -1 across to NewSession.
+    let _ = block_on(r.query(&mut p, "SELECT ROW_COUNT()")).unwrap();
+    assert_eq!(r.last.engine, Engine::Poc);
+    assert_eq!(r.last.affected_rows, -1);
+    let _ = block_on(r.query(&mut p, "SELEKT 4")).unwrap_err();
+    assert_eq!(r.last.engine, Engine::Poc);
+    assert_eq!(r.last.affected_rows, -1);
+    assert_eq!((r.last.warning_count, r.last.error_count), (1, 1));
+    let (_, rows) = decode_encoded_rows(
+        block_on(r.query(&mut p, "SELECT @@warning_count, @@error_count")).unwrap(),
+    );
+    assert_eq!(rows[0], vec![Some("1".to_owned()), Some("1".to_owned())]);
+    assert_eq!(r.new.session().vars().stmt_ctx().prev_affected_rows, -1);
 }

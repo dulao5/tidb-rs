@@ -114,6 +114,38 @@ impl LastStmtInfo {
         info
     }
 
+    /// After the PoC ran `SHOW WARNINGS` or `SHOW ERRORS`: Go's `ResetContextOfStmt` copies
+    /// the previous statement's warnings into the `SHOW WARNINGS` context, so `@@warning_count`
+    /// and `@@error_count` stay unchanged while `ROW_COUNT()` resets to `0` and `FOUND_ROWS()`
+    /// reflects the returned warning rows.
+    pub fn from_poc_show_warnings(
+        prev: &LastStmtInfo,
+        result: &Result<Response, SqlError>,
+    ) -> LastStmtInfo {
+        let mut info = Self::from_poc_stmt(prev, result, false);
+        if result.is_ok() {
+            info.warning_count = prev.warning_count;
+            info.error_count = prev.error_count;
+        }
+        info
+    }
+
+    /// After a parse error (`session.Parse`, `session.go:1583-1592`): Go does not call
+    /// `ResetContextOfStmt`, appending the error to the previous statement context instead.
+    /// Thus `ROW_COUNT()`, `FOUND_ROWS()`, `LAST_INSERT_ID()`, active engine (for
+    /// `SHOW WARNINGS`), and the other previous-statement fields stay unchanged while
+    /// `@@warning_count` and `@@error_count` increase by 1.
+    pub fn from_parse_error(prev: &LastStmtInfo, append_error: bool) -> LastStmtInfo {
+        if !append_error {
+            return prev.clone();
+        }
+        LastStmtInfo {
+            warning_count: prev.warning_count.saturating_add(1),
+            error_count: prev.error_count.saturating_add(1),
+            ..prev.clone()
+        }
+    }
+
     /// After the new session ran a statement: Go's `ResetContextOfStmt` computation on the
     /// finished statement context.
     pub fn from_new(vars: &SessionVars) -> LastStmtInfo {

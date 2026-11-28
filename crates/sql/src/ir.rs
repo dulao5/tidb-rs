@@ -36,6 +36,8 @@ pub enum ShowExpr {
     Column(ColumnName),
     Literal(Literal),
     Param(usize),
+    /// Explicitly parenthesized expression (kept distinct from a bare literal for `SHOW VARIABLES LIKE`).
+    Paren(Box<ShowExpr>),
     SysVar {
         name: String,
         global: bool,
@@ -318,11 +320,18 @@ fn unsupported(what: impl std::fmt::Display) -> SqlError {
     SqlError::not_supported(what)
 }
 
-/// Parse `sql` and lower its single statement. Several statements, empty input and parse errors
-/// are reported like TiDB (1064 for syntax errors).
+/// Parse `sql` and lower its single statement using default parse options. Several
+/// statements, empty input and parse errors are reported like TiDB (1064 for syntax errors).
 pub fn parse_and_lower(sql: &str) -> Result<Lowered, SqlError> {
-    let out = tidb_parser::parse(sql, &tidb_parser::ParseOptions::default())
-        .map_err(|e| parse_error(sql, &e))?;
+    parse_and_lower_with_opts(sql, &tidb_parser::ParseOptions::default())
+}
+
+/// Parse `sql` and lower its single statement with explicit [`tidb_parser::ParseOptions`].
+pub fn parse_and_lower_with_opts(
+    sql: &str,
+    opts: &tidb_parser::ParseOptions,
+) -> Result<Lowered, SqlError> {
+    let out = tidb_parser::parse(sql, opts).map_err(|e| parse_error(sql, &e))?;
     let mut stmts = out.stmts;
     match stmts.len() {
         0 => Err(SqlError::new(1065, "Query was empty")),
@@ -334,8 +343,15 @@ pub fn parse_and_lower(sql: &str) -> Result<Lowered, SqlError> {
 /// Parse `sql` into its single statement, with the errors of [`parse_and_lower`]. The VS1
 /// router (poc-session) looks at the AST before it lowers it with [`lower_statement`].
 pub fn parse_one(sql: &str) -> Result<ast::Stmt, SqlError> {
-    let out = tidb_parser::parse(sql, &tidb_parser::ParseOptions::default())
-        .map_err(|e| parse_error(sql, &e))?;
+    parse_one_with_opts(sql, &tidb_parser::ParseOptions::default())
+}
+
+/// Parse `sql` into its single statement using explicit [`tidb_parser::ParseOptions`].
+pub fn parse_one_with_opts(
+    sql: &str,
+    opts: &tidb_parser::ParseOptions,
+) -> Result<ast::Stmt, SqlError> {
+    let out = tidb_parser::parse(sql, opts).map_err(|e| parse_error(sql, &e))?;
     let mut stmts = out.stmts;
     match stmts.len() {
         0 => Err(SqlError::new(1065, "Query was empty")),
@@ -768,7 +784,7 @@ impl Lowerer<'_> {
                 self.params.push(p.offset);
                 ShowExpr::Param(p.offset)
             }
-            A::Paren(inner) => self.show_expr(inner)?,
+            A::Paren(inner) => ShowExpr::Paren(Box::new(self.show_expr(inner)?)),
             A::Variable(v) => {
                 if !v.is_system {
                     return Err(unsupported("user variables"));
@@ -934,7 +950,8 @@ fn renumber_params(stmt: Statement, offsets: &[usize]) -> Statement {
 fn map_show_params(e: &mut ShowExpr, rank: &impl Fn(usize) -> usize) {
     match e {
         ShowExpr::Param(p) => *p = rank(*p),
-        ShowExpr::Unary { expr, .. }
+        ShowExpr::Paren(expr)
+        | ShowExpr::Unary { expr, .. }
         | ShowExpr::IsNull { expr, .. }
         | ShowExpr::IsTruth { expr, .. } => map_show_params(expr, rank),
         ShowExpr::Binary { left, right, .. } => {
@@ -1314,6 +1331,30 @@ mod tests {
                 where_: None,
             }
         );
+        // Non-literal vs literal LIKE distinction (Go `ShowBaseExtractor.Extract` ignores `(...)`).
+        assert_eq!(
+            lower("SHOW VARIABLES LIKE ('AUTO%')").stmt,
+            Statement::ShowVariables {
+                global: false,
+                like: Some(ShowExpr::Paren(Box::new(ShowExpr::Literal(Literal::Str(
+                    "AUTO%".into()
+                ))))),
+                where_: None,
+            }
+        );
+
+        // `window_functions: false` allows window-function keywords like `rank` as aliases and rejects `OVER ()`.
+        let wf_off = tidb_parser::ParseOptions {
+            window_functions: false,
+        };
+        assert!(parse_and_lower_with_opts("SELECT 1 AS rank", &wf_off).is_ok());
+        assert_eq!(
+            parse_and_lower_with_opts("SELECT ROW_NUMBER() OVER ()", &wf_off)
+                .unwrap_err()
+                .code,
+            1064
+        );
+
         // Other SHOW statements stay 1235.
         for sql in ["SHOW TABLES", "SHOW DATABASES", "SHOW STATUS"] {
             assert_eq!(err(sql).code, 1235, "{sql}");

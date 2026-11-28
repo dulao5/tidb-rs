@@ -12,13 +12,14 @@ use tidb_mysql_protocol::{ColumnDef, ColumnType, ResultSet, SqlError, Value};
 use tidb_sessionctx::variable::session::SessionVars;
 use tidb_sessionctx::variable::tidb_vars::EnableNoopVariables;
 use tidb_sessionctx::variable::{ScopeSession, get_sys_vars};
-use tidb_sql::ir::{Literal, ShowBinaryOp, ShowExpr, ShowUnaryOp};
+use tidb_sql::ir::{ColumnName, Literal, ShowBinaryOp, ShowExpr, ShowUnaryOp};
+use tidb_types::collate::{BinPaddingCollator, Collator};
 use tidb_types::context::DefaultStmtNoWarningContext;
 use tidb_types::datum::{
     Datum, KindFloat64, KindInt64, KindMysqlDecimal, KindNull, KindString, KindUint64,
 };
 use tidb_types::mydecimal::{MyDecimal, decimal_neg};
-use tidb_types::stringutil::{compile_pattern, do_match};
+use tidb_types::stringutil::{compile_pattern, do_match, is_exact_match};
 
 use crate::constant::read_sysvar_string;
 
@@ -35,8 +36,31 @@ pub(crate) fn show_variables_columns() -> [ColumnDef; 2] {
     [make("Variable_name"), make("Value")]
 }
 
+/// Evaluates `SHOW VARIABLES` predicates (`like` when non-literal and `where_`).
+pub(crate) fn validate_show_filters(
+    like: Option<&ShowExpr>,
+    where_: Option<&ShowExpr>,
+) -> Result<(), SqlError> {
+    if let Some(l) = like
+        && !matches!(l, ShowExpr::Literal(_))
+    {
+        validate_where_columns(l)?;
+    }
+    if let Some(w) = where_ {
+        validate_where_columns(w)?;
+    }
+    Ok(())
+}
+
+/// Pre-fetch `LIKE` filter extracted by Go's `ShowBaseExtractor.Extract`.
+enum LiteralLike {
+    None,
+    Exact(String),
+    Pattern(Vec<char>, Vec<u8>),
+}
+
 /// Evaluate `SHOW [GLOBAL|SESSION] VARIABLES [LIKE pattern | WHERE expr]`.
-// glue: Go's ShowExec.fetchShowVariables + ShowExec.Next length expansion + Selection(WHERE)
+// glue: Go's ShowExec.fetchShowVariables + ShowExec.Next length expansion + Selection(WHERE/non-literal LIKE)
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show_variables(
     vars: &mut SessionVars,
@@ -48,31 +72,54 @@ pub(crate) fn show_variables(
     have_ssl: &str,
     warnings: &mut Vec<SQLWarn>,
 ) -> Result<ResultSet, SqlError> {
-    if let Some(w) = where_ {
-        validate_where_columns(w)?;
-    }
+    validate_show_filters(like, where_)?;
 
-    let pattern = match like {
-        Some(expr) => {
-            let d = eval_expr(expr, None, vars, params, server_version, have_ssl, warnings)?;
-            if d.is_null() {
-                None
+    // Go `ShowBaseExtractor.Extract` (`show_predicate_extractor.go:60-71`) only extracts a bare
+    // literal (`*driver.ValueExpr`):
+    // - exact-match empty string (`LIKE ''`, `LIKE NULL`, `LIKE 123`) -> no filter (all rows)
+    // - non-empty exact-match -> lowercase exact match before `column_length` expansion
+    // - wildcard literal -> lowercase LIKE match before `column_length` expansion
+    // Any other `LIKE` (`LIKE ?`, `LIKE @@v`, `LIKE ('AUTO%')`, ...) falls through to a
+    // `Selection` (`Variable_name LIKE <pattern>`) evaluated AFTER `column_length` expansion using
+    // `Variable_name`'s `utf8mb4_bin` (case-sensitive) collation.
+    let (literal_like, non_literal_like) = match like {
+        Some(ShowExpr::Literal(lit)) => {
+            let raw = match lit {
+                Literal::Str(s) => s.as_str(),
+                _ => "",
+            };
+            let (pat_chars, pat_types) = compile_pattern(raw.as_bytes(), b'\\');
+            if is_exact_match(&pat_types) {
+                let exact: String = pat_chars.into_iter().collect();
+                let lower = exact.to_lowercase();
+                if lower.is_empty() {
+                    (LiteralLike::None, None)
+                } else {
+                    (LiteralLike::Exact(lower), None)
+                }
             } else {
-                let s = datum_to_string(&d)?.to_lowercase();
-                Some(compile_pattern(s.as_bytes(), b'\\'))
+                let lower = raw.to_lowercase();
+                let (pat_chars, pat_types) = compile_pattern(lower.as_bytes(), b'\\');
+                (LiteralLike::Pattern(pat_chars, pat_types), None)
             }
         }
-        None => None,
+        Some(other) => (
+            LiteralLike::None,
+            Some(ShowExpr::Like {
+                not: false,
+                expr: Box::new(ShowExpr::Column(ColumnName {
+                    schema: String::new(),
+                    table: String::new(),
+                    name: "Variable_name".to_owned(),
+                })),
+                pattern: Box::new(other.clone()),
+                escape: b'\\',
+            }),
+        ),
+        None => (LiteralLike::None, None),
     };
 
     let [mut name_col, mut val_col] = show_variables_columns();
-    if like.is_some() && pattern.is_none() {
-        return Ok(ResultSet {
-            columns: vec![name_col, val_col],
-            rows: Vec::new(),
-            warnings: 0,
-        });
-    }
 
     let enable_noop = EnableNoopVariables.load(SeqCst);
     let mut svs: Vec<_> = get_sys_vars()
@@ -83,12 +130,13 @@ pub(crate) fn show_variables(
             if sv.is_noop && !enable_noop {
                 return false;
             }
-            if let Some((pat_chars, pat_types)) = &pattern
-                && !do_match(sv.name.as_bytes(), pat_chars, pat_types)
-            {
-                return false;
+            match &literal_like {
+                LiteralLike::None => true,
+                LiteralLike::Exact(exact) => sv.name == exact,
+                LiteralLike::Pattern(pat_chars, pat_types) => {
+                    do_match(sv.name.as_bytes(), pat_chars, pat_types)
+                }
             }
-            true
         })
         .collect();
     svs.sort_by_key(|sv| sv.name);
@@ -99,7 +147,7 @@ pub(crate) fn show_variables(
         pairs.push((sv.name.to_owned(), val));
     }
 
-    // Go's ShowExec.Next expands VARCHAR RetType flen over all fetched rows before Selection (WHERE).
+    // Go's ShowExec.Next expands VARCHAR RetType flen over all fetched rows before Selection (WHERE / non-literal LIKE).
     let max_name = pairs.iter().map(|(n, _)| n.len()).max().unwrap_or(0).max(5) as u32;
     let max_val = pairs.iter().map(|(_, v)| v.len()).max().unwrap_or(0).max(5) as u32;
     name_col.column_length = max_name.saturating_mul(4);
@@ -107,6 +155,20 @@ pub(crate) fn show_variables(
 
     let mut rows = Vec::new();
     for (name, val) in pairs {
+        if let Some(like_sel) = &non_literal_like {
+            let d = eval_expr(
+                like_sel,
+                Some((&name, &val)),
+                vars,
+                params,
+                server_version,
+                have_ssl,
+                warnings,
+            )?;
+            if !datum_is_true(&d)? {
+                continue;
+            }
+        }
         if let Some(w) = where_ {
             let d = eval_expr(
                 w,
@@ -146,7 +208,8 @@ pub(crate) fn validate_where_columns(e: &ShowExpr) -> Result<(), SqlError> {
             }
             Ok(())
         }
-        ShowExpr::Unary { expr, .. }
+        ShowExpr::Paren(expr)
+        | ShowExpr::Unary { expr, .. }
         | ShowExpr::IsNull { expr, .. }
         | ShowExpr::IsTruth { expr, .. } => validate_where_columns(expr),
         ShowExpr::Binary { left, right, .. } => {
@@ -203,6 +266,9 @@ fn eval_expr(
             ))
         }
         ShowExpr::Literal(lit) => Ok(literal_to_datum(lit)),
+        ShowExpr::Paren(expr) => {
+            eval_expr(expr, row, vars, params, server_version, have_ssl, warnings)
+        }
         ShowExpr::Param(idx) => {
             let lit = params.get(*idx).ok_or_else(|| {
                 SqlError::unknown(format!("missing parameter {idx} for SHOW VARIABLES"))
@@ -473,10 +539,13 @@ fn datum_to_string(d: &Datum) -> Result<String, SqlError> {
 
 fn compare_datums(l: &Datum, r: &Datum) -> i8 {
     if l.kind() == KindString && r.kind() == KindString {
-        return match l.get_string().cmp(r.get_string()) {
-            std::cmp::Ordering::Less => -1,
-            std::cmp::Ordering::Equal => 0,
-            std::cmp::Ordering::Greater => 1,
+        let ord = BinPaddingCollator.compare(l.get_string(), r.get_string());
+        return if ord < 0 {
+            -1
+        } else if ord > 0 {
+            1
+        } else {
+            0
         };
     }
     if (l.kind() == KindInt64 || l.kind() == KindUint64)
@@ -634,11 +703,80 @@ mod tests {
         assert_eq!(empty_like.columns[0].column_length, 20);
         assert_eq!(empty_like.columns[1].column_length, 20);
 
-        let null_like = run_show(&mut s, "SHOW VARIABLES LIKE NULL", &[], "YES").unwrap();
-        assert!(null_like.rows.is_empty());
-        assert_eq!(null_like.columns[0].column_length, 20);
+        // Bare empty/NULL/non-string literal LIKE becomes `field = ""` in Go's ShowBaseExtractor,
+        // so `fetchShowVariables` applies no filter and returns ALL variables.
+        for empty_lit_sql in [
+            "SHOW VARIABLES LIKE ''",
+            "SHOW VARIABLES LIKE NULL",
+            "SHOW VARIABLES LIKE 123",
+            "SHOW VARIABLES LIKE TRUE",
+        ] {
+            let res = run_show(&mut s, empty_lit_sql, &[], "YES").unwrap();
+            assert_eq!(res.rows.len(), all.rows.len(), "{empty_lit_sql}");
+            assert_eq!(
+                res.columns[0].column_length, full_name_len,
+                "{empty_lit_sql}"
+            );
+            assert_eq!(
+                res.columns[1].column_length, full_val_len,
+                "{empty_lit_sql}"
+            );
+        }
 
-        // WHERE is case-sensitive (utf8mb4_bin) and runs after ShowExec column_length expansion.
+        // Non-literal LIKE (prepared `?`, `@@var`, parenthesized `('AUTO%')`) skips
+        // `ShowBaseExtractor` and builds `Selection(Variable_name LIKE <expr>)` under `utf8mb4_bin`
+        // (case-sensitive) AFTER `column_length` expansion over ALL rows.
+        let param_upper = run_show(
+            &mut s,
+            "SHOW VARIABLES LIKE ?",
+            &[Literal::Str("AUTO%".into())],
+            "YES",
+        )
+        .unwrap();
+        assert!(param_upper.rows.is_empty());
+        assert_eq!(param_upper.columns[0].column_length, full_name_len);
+        assert_eq!(param_upper.columns[1].column_length, full_val_len);
+
+        let param_lower = run_show(
+            &mut s,
+            "SHOW VARIABLES LIKE ?",
+            &[Literal::Str("auto%".into())],
+            "YES",
+        )
+        .unwrap();
+        assert_eq!(kv_rows(&param_lower), rows_auto);
+        assert_eq!(param_lower.columns[0].column_length, full_name_len);
+        assert_eq!(param_lower.columns[1].column_length, full_val_len);
+
+        let param_empty = run_show(
+            &mut s,
+            "SHOW VARIABLES LIKE ?",
+            &[Literal::Str(String::new())],
+            "YES",
+        )
+        .unwrap();
+        assert!(param_empty.rows.is_empty());
+        assert_eq!(param_empty.columns[0].column_length, full_name_len);
+
+        let param_null =
+            run_show(&mut s, "SHOW VARIABLES LIKE ?", &[Literal::Null], "YES").unwrap();
+        assert!(param_null.rows.is_empty());
+        assert_eq!(param_null.columns[0].column_length, full_name_len);
+
+        let paren_upper = run_show(&mut s, "SHOW VARIABLES LIKE ('AUTO%')", &[], "YES").unwrap();
+        assert!(paren_upper.rows.is_empty());
+        assert_eq!(paren_upper.columns[0].column_length, full_name_len);
+
+        let paren_lower = run_show(&mut s, "SHOW VARIABLES LIKE ('auto%')", &[], "YES").unwrap();
+        assert_eq!(kv_rows(&paren_lower), rows_auto);
+        assert_eq!(paren_lower.columns[0].column_length, full_name_len);
+
+        let sysvar_like =
+            run_show(&mut s, "SHOW VARIABLES LIKE @@version_comment", &[], "YES").unwrap();
+        assert!(sysvar_like.rows.is_empty());
+        assert_eq!(sysvar_like.columns[0].column_length, full_name_len);
+
+        // WHERE is case-sensitive (utf8mb4_bin, PAD SPACE collation) and runs after ShowExec column_length expansion.
         let wrong_case = run_show(
             &mut s,
             "SHOW VARIABLES WHERE Variable_name = 'Sql_mode'",
@@ -649,6 +787,39 @@ mod tests {
         assert!(wrong_case.rows.is_empty());
         assert_eq!(wrong_case.columns[0].column_length, full_name_len);
         assert_eq!(wrong_case.columns[1].column_length, full_val_len);
+
+        let pad_space_eq = run_show(
+            &mut s,
+            "SHOW VARIABLES WHERE Variable_name = 'autocommit   '",
+            &[],
+            "YES",
+        )
+        .unwrap();
+        assert_eq!(
+            kv_rows(&pad_space_eq),
+            vec![("autocommit".to_owned(), "ON".to_owned())]
+        );
+
+        let pad_space_in = run_show(
+            &mut s,
+            "SHOW VARIABLES WHERE Variable_name IN ('autocommit  ')",
+            &[],
+            "YES",
+        )
+        .unwrap();
+        assert_eq!(
+            kv_rows(&pad_space_in),
+            vec![("autocommit".to_owned(), "ON".to_owned())]
+        );
+
+        let pad_space_like = run_show(
+            &mut s,
+            "SHOW VARIABLES WHERE Variable_name LIKE 'autocommit   '",
+            &[],
+            "YES",
+        )
+        .unwrap();
+        assert!(pad_space_like.rows.is_empty());
 
         let exact_case = run_show(
             &mut s,
@@ -685,9 +856,16 @@ mod tests {
             kv_rows(&like_param),
             vec![("max_execution_time".to_owned(), "0".to_owned())]
         );
+        assert_eq!(like_param.columns[0].column_length, full_name_len);
+        assert_eq!(like_param.columns[1].column_length, full_val_len);
 
-        // Column & sysvar errors in WHERE.
+        // Column & sysvar errors in WHERE / non-literal LIKE.
         let e = run_show(&mut s, "SHOW VARIABLES WHERE bad_col = 1", &[], "YES").unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (1054, "Unknown column 'bad_col' in 'where clause'")
+        );
+        let e = run_show(&mut s, "SHOW VARIABLES LIKE bad_col", &[], "YES").unwrap_err();
         assert_eq!(
             (e.code, e.message.as_str()),
             (1054, "Unknown column 'bad_col' in 'where clause'")

@@ -482,12 +482,13 @@ impl<'ast> PlanBuilder<'ast> {
 // go: evalAstExprWithPlanCtx L1
 pub fn eval_ast_expr_with_plan_ctx(
     sctx: &dyn BuildContext,
+    vars: Option<&mut SessionVars>,
     expr: &AstExpr,
 ) -> Result<tidb_types::datum::Datum, Error> {
     if let AstExpr::Value(val) = expr {
         return Ok(value_expr_datum(val));
     }
-    let (new_expr, _) = rewrite_ast_expr_with_plan_ctx(sctx, None, expr, None, &[], false)?;
+    let (new_expr, _) = rewrite_ast_expr_with_plan_ctx(sctx, vars, expr, None, &[], false)?;
     new_expr.eval(&*sctx.get_eval_ctx(), &EvalState::new(), Row::default())
 }
 
@@ -1410,11 +1411,11 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
     // go: expressionRewriter.rewriteSystemVariable L2 (no SEM check: SEM is not enabled on this node)
     fn rewrite_system_variable(&mut self, v: &ast::VariableExpr) -> Result<(), Error> {
         let name = v.name.to_lowercase();
-        let vars = self
-            .plan_ctx
-            .as_mut()
-            .and_then(|pc| pc.vars.as_deref_mut())
-            .expect("session vars required for system variable rewrite");
+        let Some(vars) = self.plan_ctx.as_mut().and_then(|pc| pc.vars.as_deref_mut()) else {
+            return Err(tidb_base::errors::new(
+                "session vars required for system variable rewrite",
+            ));
+        };
         let Some(sys_var) = tidb_sessionctx::variable::get_sys_var(&name) else {
             let mut err = tidb_sessionctx::variable::error::ErrUnknownSystemVar
                 .fast_gen_by_args(go_args![name.clone()]);
@@ -2357,5 +2358,68 @@ pub fn find_field_name_from_natural_using_join(
             find_field_name_from_natural_using_join(Some(arena), Some(plan.children()[0]), v)
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use tidb_base::Error;
+    use tidb_sessionctx::exprstatic as es;
+    use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
+
+    use super::eval_ast_expr_with_plan_ctx;
+
+    struct StaticAcc(HashMap<String, String>);
+    impl GlobalVarAccessor for StaticAcc {
+        fn get_global_sys_var(&self, name: &str) -> Result<String, Error> {
+            Ok(self.0.get(name).cloned().unwrap_or_default())
+        }
+        fn set_global_sys_var_only(&mut self, _: &str, _: &str, _: bool) -> Result<(), Error> {
+            Ok(())
+        }
+        fn get_tidb_table_value(&self, _: &str) -> Result<String, Error> {
+            Ok(String::new())
+        }
+        fn set_tidb_table_value(&mut self, _: &str, _: &str, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn eval_ast_expr_with_plan_ctx_handles_sysvar_without_panic() {
+        let ev = es::new_eval_context(vec![
+            es::with_type_flags(tidb_types::context::DefaultStmtFlags),
+            es::with_location(Some(tidb_base::gostd::time::utc())),
+            es::with_current_db("test".to_owned()),
+        ]);
+        let expr_ctx = es::new_expr_context(vec![es::with_eval_ctx(ev)]);
+
+        let stmt = tidb_parser::parse(
+            "SELECT @@max_execution_time",
+            &tidb_parser::ParseOptions::default(),
+        )
+        .unwrap()
+        .stmts
+        .remove(0);
+        let tidb_parser::ast::Stmt::Select(mut sel) = stmt else {
+            panic!("expected SELECT");
+        };
+        let var_expr = sel.fields.fields.remove(0).expr.unwrap();
+
+        // Missing SessionVars returns an explicit error instead of panicking.
+        let err = eval_ast_expr_with_plan_ctx(&*expr_ctx, None, &var_expr).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("session vars required for system variable rewrite"),
+            "{err}"
+        );
+
+        // When SessionVars is threaded through, system variables evaluate normally.
+        let mut vars = SessionVars::new(Box::new(StaticAcc(HashMap::new())));
+        vars.set_system_var("max_execution_time", "500").unwrap();
+        let datum = eval_ast_expr_with_plan_ctx(&*expr_ctx, Some(&mut vars), &var_expr).unwrap();
+        assert_eq!(datum.get_uint64(), 500);
     }
 }

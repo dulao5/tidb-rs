@@ -1808,7 +1808,10 @@ impl Session {
         // The planner's table lookups do not read TiKV (D06.3 spec §11.2): load the
         // statement's tables into the InfoSchema's table cache first. The prepare executor
         // parses the text again (Go parses it once, inside the executor).
-        let load = tidb_parser::parse(sql, &tidb_parser::ParseOptions::default())
+        let opts = tidb_parser::ParseOptions {
+            window_functions: core.sctx.vars.enable_window_function,
+        };
+        let load = tidb_parser::parse(sql, &opts)
             .ok()
             .and_then(|out| match out.stmts.as_slice() {
                 [stmt] => Some(load_stmt_tables(&core.sctx, stmt)),
