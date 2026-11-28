@@ -3528,8 +3528,25 @@ impl<'ast> PlanBuilder<'ast> {
         Ok((exprs, resolved_items, col_replacements))
     }
 
-    // go: PlanBuilder.rewriteGbyExprs L1 [M-CTX]
+    // go: PlanBuilder.rewriteGbyExprs L2 (R29: sets check_col_priv = ReportColumnErrOption during GROUP BY rewrites; Go v8.5.8 guarded resolveGbyExprs instead, where no expression rewriting runs)
     pub fn rewrite_gby_exprs(
+        &mut self,
+        ctx: &mut PlanCtx<'_>,
+        p: PlanId,
+        gby: &ast::GroupByClause,
+        items: &[ResolvedExpr<'ast>],
+        fields: &[SelectFieldW<'ast>],
+        gby_col_replacements: &HashMap<ByAddr<'ast, ast::ColumnName>, usize>,
+    ) -> Result<(PlanId, Vec<ExprRef>, bool), Error> {
+        let origin_col_priv = self.check_col_priv;
+        self.check_col_priv = CheckSelectColumnPrivOption::ReportColumnErrOption;
+        let res = self.rewrite_gby_exprs_inner(ctx, p, gby, items, fields, gby_col_replacements);
+        self.check_col_priv = origin_col_priv;
+        res
+    }
+
+    // go-part: PlanBuilder.rewriteGbyExprs
+    fn rewrite_gby_exprs_inner(
         &mut self,
         ctx: &mut PlanCtx<'_>,
         p: PlanId,
@@ -6495,6 +6512,8 @@ mod tests {
             "SELECT SUM(missing) FROM t",
             // Fails inside resolve_gby_exprs on out-of-range position 9.
             "SELECT a FROM t GROUP BY 9",
+            // Fails inside rewrite_gby_exprs on unknown column `missing`.
+            "SELECT COUNT(*) FROM t GROUP BY missing",
             // Fails inside check_window_func_args (NTILE requires positive argument).
             "SELECT NTILE(0) OVER () FROM t",
             // Fails inside build_window_functions (unknown column in ORDER BY).

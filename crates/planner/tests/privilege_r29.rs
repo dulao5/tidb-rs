@@ -15,6 +15,7 @@ use tidb_parser::model::CIStr;
 use tidb_parser::types::FieldType;
 use tidb_parser::{ParseOptions, parse};
 use tidb_planner::PlanCtx;
+use tidb_planner::core::optimizer::{check_privilege, visit_info4_priv_check};
 use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
 use tidb_planner::core::planbuilder::{VisitInfo, new_plan_builder};
 use tidb_planner::core::point_get_plan::{get_visit_info, try_point_get_plan};
@@ -22,6 +23,7 @@ use tidb_planner::core::preprocess::{
     InfoSchemaHandle, PreprocessorReturn, preprocess, with_preprocessor_return,
 };
 use tidb_planner::core::resolve::new_node_w;
+use tidb_privilege::{ColumnsPrivRecord, Handle, MySQLPrivilege, UserPrivileges, UserRecord};
 use tidb_sessionctx::exprstatic as es;
 use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 
@@ -346,6 +348,64 @@ fn r29_table_read_select_visit_info_matrix() {
     ] {
         let vi = build_visit_infos(&tables, sql, u_none.clone(), "");
         assert!(vi.is_empty(), "{sql}: expected empty VisitInfo, got {vi:?}");
+    }
+
+    // 6. R29 GROUP BY column privileges & alias shadowing (owner decision 2026-11-28):
+    //    Go v8.5.8 guarded `resolveGbyExprs` instead of `rewriteGbyExprs`, so GROUP BY column
+    //    references (including alias-shadowing queries like `SELECT COUNT(*) AS b FROM t GROUP BY b`)
+    //    skipped column-privilege checks. `tidb-rs` guards `rewrite_gby_exprs` on the new stack so
+    //    a partial-column `SELECT(a)` user is rejected with 1143 whenever GROUP BY resolves to an
+    //    ungranted table column `b`, while authorized columns and non-table aliases still pass.
+    let mut mp = MySQLPrivilege::new();
+    mp.add_user(UserRecord::new(
+        "%",
+        "u_cola",
+        tidb_base::mysql::PrivilegeType(0),
+    ));
+    mp.add_column_priv(ColumnsPrivRecord::new(
+        "u_cola", "%", "test", "t", "a", SelectPriv,
+    ));
+    let handle = Arc::new(Handle::new(mp));
+    let pm = UserPrivileges::new("u_cola", "%", handle);
+    let u_cola = Some(UserIdentity {
+        username: "u_cola".to_owned(),
+        hostname: "%".to_owned(),
+        ..Default::default()
+    });
+
+    for denied_sql in [
+        "SELECT COUNT(*) AS b FROM test.t GROUP BY b",
+        "SELECT COUNT(*) FROM test.t GROUP BY b",
+        "SELECT a + 1 AS b FROM test.t GROUP BY b",
+    ] {
+        let vi = build_visit_infos(&tables, denied_sql, u_cola.clone(), "test");
+        assert!(
+            vi.iter().any(|v| v.table == "t"
+                && v.column == "b"
+                && v.err.as_ref().is_some_and(|e| e.code() == 1143)),
+            "{denied_sql}: expected column 'b' 1143 VisitInfo, got {vi:?}"
+        );
+        let filtered = visit_info4_priv_check(tables.as_ref(), None, &vi);
+        let err = check_privilege(&[], &pm, &filtered)
+            .expect_err(&format!("{denied_sql}: u_cola must be rejected with 1143"));
+        assert_eq!(err.code(), 1143, "{denied_sql}: {err}");
+        let raw = err.error();
+        let msg = String::from_utf8_lossy(&raw);
+        assert!(
+            msg.contains("for column 'b' in table 't'"),
+            "{denied_sql}: unexpected error message: {msg}"
+        );
+    }
+
+    for allowed_sql in [
+        "SELECT COUNT(*) FROM test.t GROUP BY a",
+        "SELECT a AS c FROM test.t GROUP BY c",
+        "SELECT 1 AS c FROM test.t GROUP BY c",
+    ] {
+        let vi = build_visit_infos(&tables, allowed_sql, u_cola.clone(), "test");
+        let filtered = visit_info4_priv_check(tables.as_ref(), None, &vi);
+        check_privilege(&[], &pm, &filtered)
+            .unwrap_or_else(|e| panic!("{allowed_sql}: u_cola must be allowed, got {e}"));
     }
 }
 
