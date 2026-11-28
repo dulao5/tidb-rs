@@ -187,13 +187,13 @@ impl LogicalPlan for LogicalLimit {
         _this: PlanId,
         top_n: Option<PlanId>,
         opt: &LogicalOptimizeOp,
-    ) -> PlanId {
+    ) -> Result<PlanId, Error> {
         let converted = self.convert_to_top_n(ctx, opt);
-        let child = base::push_down_top_n(ctx, self.children()[0], Some(converted), opt);
+        let child = base::push_down_top_n(ctx, self.children()[0], Some(converted), opt)?;
         if let Some(top_n) = top_n {
-            return LogicalTopN::attach_child(ctx, top_n, child, opt);
+            return Ok(LogicalTopN::attach_child(ctx, top_n, child, opt));
         }
-        child
+        Ok(child)
     }
 }
 

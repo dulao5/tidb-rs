@@ -62,6 +62,8 @@ pub enum LogicalKind {
     Aggregation,
     /// `*logicalop.LogicalWindow`.
     Window,
+    /// `*logicalop.LogicalJoin`.
+    Join,
 }
 
 /// Physical operator kinds (`M-IFACE`). Variants are added with the operators.
@@ -267,7 +269,7 @@ pub trait LogicalPlan: Any + Send {
     }
 
     /// `PushDownTopN`: `top_n` is a `LogicalTopN` in the arena (Go's `nil` is `None`);
-    /// returns the new root.
+    /// returns the new root. An `Err` is a boundary stub (Go returns no error).
     // glue: dispatch (Go BaseLogicalPlan.PushDownTopN)
     fn push_down_top_n(
         &mut self,
@@ -275,7 +277,7 @@ pub trait LogicalPlan: Any + Send {
         this: PlanId,
         top_n: Option<PlanId>,
         opt: &LogicalOptimizeOp,
-    ) -> PlanId {
+    ) -> Result<PlanId, Error> {
         logicalop::base_logical_plan::push_down_top_n(self, ctx, this, top_n, opt)
     }
 
@@ -301,7 +303,8 @@ pub trait LogicalPlan: Any + Send {
         logicalop::base_logical_plan::predicate_simplification(self, ctx, this, opt)
     }
 
-    /// `ConstantPropagation` (only `LogicalJoin` does something; Go's `nil` is `None`).
+    /// `ConstantPropagation` (only `LogicalJoin` does something; Go's `nil` is `None`). An
+    /// `Err` is a boundary stub (Go returns no error).
     // glue: dispatch (Go BaseLogicalPlan.ConstantPropagation)
     fn constant_propagation(
         &mut self,
@@ -309,9 +312,9 @@ pub trait LogicalPlan: Any + Send {
         parent: Option<PlanId>,
         current_child_idx: usize,
         opt: &LogicalOptimizeOp,
-    ) -> Option<PlanId> {
+    ) -> Result<Option<PlanId>, Error> {
         let _ = (ctx, parent, current_child_idx, opt);
-        logicalop::base_logical_plan::constant_propagation()
+        Ok(logicalop::base_logical_plan::constant_propagation())
     }
 
     /// `PullUpConstantPredicates`.
@@ -409,14 +412,14 @@ pub trait LogicalPlan: Any + Send {
         logicalop::logical_plans_misc::can_push_to_cop_impl(self, ctx, store_tp, false)
     }
 
-    /// `ConvertOuterToInnerJoin`.
+    /// `ConvertOuterToInnerJoin`. An `Err` is a boundary stub (Go returns no error).
     // glue: dispatch (Go BaseLogicalPlan.ConvertOuterToInnerJoin)
     fn convert_outer_to_inner_join(
         &mut self,
         ctx: &mut PlanCtx<'_>,
         this: PlanId,
         predicates: Vec<ExprRef>,
-    ) -> PlanId {
+    ) -> Result<PlanId, Error> {
         logicalop::base_logical_plan::convert_outer_to_inner_join(self, ctx, this, predicates)
     }
 
@@ -452,7 +455,8 @@ crate::logical_dispatch!(
 crate::logical_dispatch!(
     /// `p.PushDownTopN(topN, opt)` on a node in the arena.
     // glue: N1 (interface dispatch)
-    pub fn push_down_top_n(top_n: Option<PlanId>, opt: &LogicalOptimizeOp) -> PlanId
+    pub fn push_down_top_n(top_n: Option<PlanId>, opt: &LogicalOptimizeOp)
+        -> Result<PlanId, Error>
 );
 crate::logical_dispatch!(
     /// `p.DeriveTopN(opt)` on a node in the arena.
@@ -485,7 +489,7 @@ crate::logical_dispatch!(
 crate::logical_dispatch!(
     /// `p.ConvertOuterToInnerJoin(predicates)` on a node in the arena.
     // glue: N1 (interface dispatch)
-    pub fn convert_outer_to_inner_join(predicates: Vec<ExprRef>) -> PlanId
+    pub fn convert_outer_to_inner_join(predicates: Vec<ExprRef>) -> Result<PlanId, Error>
 );
 
 /// `LogicalOptRule` (`base.LogicalOptRule`): a logical optimizing rule, which contains

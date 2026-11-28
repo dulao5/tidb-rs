@@ -26,6 +26,7 @@ pub mod logical_window;
 pub use base_logical_plan::{BaseLogicalPlan, new_base_logical_plan};
 pub use logical_aggregation::LogicalAggregation;
 pub use logical_datasource::DataSource;
+pub use logical_join::{JoinType, LogicalJoin};
 pub use logical_limit::LogicalLimit;
 pub use logical_projection::LogicalProjection;
 pub use logical_schema_producer::LogicalSchemaProducer;

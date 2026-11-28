@@ -3192,7 +3192,7 @@ SelectStmt -> Stmt:
         Stmt::Select(st)
     } }
   | tableKwd TableName OrderByOptional SelectStmtLimitOpt SelectLockOpt SelectStmtIntoOption { {
-        let ts = ResultSetNode::TableSource(Box::new(TableSource { source: ResultSetNode::TableName($2), as_name: CIStr::default() }));
+        let ts = ResultSetNode::TableSource(Box::new(TableSource { source: ResultSetNode::TableName($2), as_name: CIStr::default(), lateral: false }));
         let from = Box::new(TableRefsClause { table_refs: Box::new(Join { left: Some(ts), ..Default::default() }) });
         Stmt::Select(Box::new(SelectStmt {
             kind: SelectStmtKind::Table, fields: Box::new(FieldList { fields: vec![SelectField { wild_card: Some(Box::default()), ..Default::default() }] }), from: Some(from),
@@ -3404,11 +3404,11 @@ TableFactor -> ResultSetNode:
         tn.index_hints = $5;
         if let Some(ts) = $6 { tn.table_sample = Some(ts); }
         if let Some(a) = $4 { tn.as_of = Some(a); }
-        ResultSetNode::TableSource(Box::new(TableSource { source: ResultSetNode::TableName(tn), as_name: $3 }))
+        ResultSetNode::TableSource(Box::new(TableSource { source: ResultSetNode::TableName(tn), as_name: $3, lateral: false }))
     } }
   | SubSelect TableAsNameOpt { {
         match $1 {
-            Expr::Subquery(sq) => ResultSetNode::TableSource(Box::new(TableSource { source: sq.query, as_name: $2 })),
+            Expr::Subquery(sq) => ResultSetNode::TableSource(Box::new(TableSource { source: sq.query, as_name: $2, lateral: false })),
             other => unreachable!("SubSelect yields a SubqueryExpr, got {other:?}"),
         }
     } }

@@ -85,14 +85,15 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D09.14", 2),
     // System variables in expressions.
     ("D09.2", 2),
-    // Joins.
-    ("D09.3", 6),
     // GROUP BY ... WITH ROLLUP (D09.4 part C).
     ("D09.4", 2),
     // WITH and set operations.
     ("D09.5", 4),
     // Subqueries.
     ("D09.6", 2),
+    // Joins: built (the join builder, D09.3), they stop at the join's column pruning
+    // (LogicalJoin.PruneColumns, D09.7).
+    ("D09.7", 6),
     // LogicalWindow.ExhaustPhysicalPlans (physical window enumeration).
     ("D10.3", 48),
     // `OR` conditions over two or more paths, or multi-valued indexes: index merge paths.

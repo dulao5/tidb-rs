@@ -327,11 +327,48 @@ use tidb_base::gostd::math::min as go_min;
 /// It will return nil when there are multiple table alias, because the alias is only used to check if
 /// the base.LogicalPlan Match some optimizer hints, and hints are not expected to take effect in this case.
 ///
-/// The result type `*hint.HintedTable` and `SessionVars.PlannerSelectBlockAsName` are block
-/// D13.3 (hint handling, VS1-24).
-// glue: stub of ExtractTableAlias, blocked-by:D13.3 (hint.HintedTable, PlannerSelectBlockAsName)
-pub fn extract_table_alias() -> Result<(), Error> {
-    Err(blocked("D13.3", "ExtractTableAlias (hint.HintedTable)"))
+/// L2: `SessionVars.PlannerSelectBlockAsName` (the derived tables' query block names, filled by
+/// `buildResultSetNode` for the hints, D13.3) is not on the Rust session vars, so Go's
+/// `blockAsNames != nil && blockAsNames[qbOffset].TableName.L != ""` is false here and a
+/// derived table's alias keeps its own query block offset instead of its surrounding one. The
+/// offset is only compared with the table-level join hints, which are empty until the hint
+/// list is parsed (`blocked-by:D02.2`; known difference in the join builder spec, D09.3 §5).
+// go: ExtractTableAlias L2 (PlannerSelectBlockAsName is not on the Rust session vars, see above)
+pub fn extract_table_alias(
+    p: &dyn crate::base::LogicalPlan,
+    arena: &crate::arena::PlanArena,
+    parent_offset: isize,
+    current_db: &str,
+) -> Option<crate::hint::HintedTable> {
+    let names = p.output_names(arena);
+    if !names.is_empty() && !names[0].tbl_name.l.is_empty() {
+        let first_name = &names[0];
+        for name in names.iter() {
+            if name.tbl_name.l != first_name.tbl_name.l
+                || (!name.db_name.l.is_empty()
+                    && !first_name.db_name.l.is_empty()
+                    && name.db_name.l != first_name.db_name.l)
+            {
+                // DBName can be nil, see `#46160`
+                return None;
+            }
+        }
+        let qb_offset = p.query_block_offset();
+        // For sub-queries like `(select * from t) t1`, t1 should belong to its surrounding
+        // select block: needs PlannerSelectBlockAsName (see the doc comment).
+        let _ = parent_offset;
+        let mut db_name = first_name.db_name.clone();
+        if db_name.l.is_empty() {
+            db_name = CIStr::new(current_db);
+        }
+        return Some(crate::hint::HintedTable {
+            db_name,
+            tbl_name: first_name.tbl_name.clone(),
+            select_offset: qb_offset,
+            ..Default::default()
+        });
+    }
+    None
 }
 
 /// GetPushDownCtx creates a PushDownContext from PlanContext

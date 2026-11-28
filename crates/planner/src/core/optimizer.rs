@@ -65,6 +65,7 @@ use crate::core::task::get_avg_row_size;
 use crate::core::task_base::Task;
 use crate::logicalop::DataSource;
 use crate::logicalop::base_logical_plan::TaskMap;
+use crate::logicalop::{JoinType, LogicalJoin};
 use crate::physicalop::{PhysicalPlanRef, make_mut_plan, map_children};
 use crate::planctx::PlanCtx;
 use crate::property::{PhysicalProperty, StatsInfo};
@@ -145,17 +146,17 @@ const MAX_MIN_ELIMINATOR: UnportedRule = UnportedRule {
     name: "max_min_eliminate",
     block: "D09.9",
 };
-// glue: blocked-by:D09.3 (ConvertOuterToInnerJoin.Optimize: joins)
-// glue: blocked-by:D09.3 (ConvertOuterToInnerJoin.Name: joins)
+// glue: blocked-by:D09.8 (ConvertOuterToInnerJoin.Optimize: the outer-to-inner join rule of predicate push down)
+// glue: blocked-by:D09.8 (ConvertOuterToInnerJoin.Name: the outer-to-inner join rule of predicate push down)
 const CONVERT_OUTER_TO_INNER_JOIN: UnportedRule = UnportedRule {
     name: "convert_outer_to_inner_joins",
-    block: "D09.3",
+    block: "D09.8",
 };
-// glue: blocked-by:D09.3 (OuterJoinEliminator.Optimize: joins)
-// glue: blocked-by:D09.3 (OuterJoinEliminator.Name: joins)
+// glue: blocked-by:D09.10 (OuterJoinEliminator.Optimize: outer join elimination, with join reorder)
+// glue: blocked-by:D09.10 (OuterJoinEliminator.Name: outer join elimination, with join reorder)
 const OUTER_JOIN_ELIMINATOR: UnportedRule = UnportedRule {
     name: "outer_join_eliminate",
-    block: "D09.3",
+    block: "D09.10",
 };
 // glue: blocked-by:D09.9 (AggregationPushDownSolver.Optimize: aggregation rules)
 // glue: blocked-by:D09.9 (AggregationPushDownSolver.Name: aggregation rules)
@@ -305,9 +306,15 @@ pub fn opt_rule_list() -> [&'static dyn LogicalOptRule; 26] {
     ]
 }
 
-/// CheckPrivilege checks the privilege for a user in slice order (first failure wins, ensuring
-/// R30 table-denied `1142` precedes column-denied `1143`).
-// go: CheckPrivilege L2 (R32 defers synthetic _tidb_rowid full-table check after ordinary column checks so Go's reported 1143 column is preserved)
+/// CheckPrivilege checks the privilege for a user (first failure wins).
+///
+/// R30 (table read denied `1142` before column denied `1143`) holds for the whole statement:
+/// the table-read entries (`column = "*"`, ruling R29) of every table are checked before any
+/// other entry. Slice order alone is not enough in a join, where the left subtree registers
+/// its ON / USING column entries before the right data source registers its table-read
+/// entry; `SELECT 1 FROM t1 JOIN t2 USING (b) JOIN secret` would then answer 1143 when
+/// `secret` exists and 1142 when it does not.
+// go: CheckPrivilege L2 (R30: table-read entries of all tables first; R32: synthetic _tidb_rowid full-table checks after ordinary column checks so Go's reported 1143 column is preserved; other entries keep Go's slice order)
 pub fn check_privilege(
     active_roles: &[tidb_parser::auth::RoleIdentity],
     pm: &dyn tidb_privilege::PrivilegeManager,
@@ -358,13 +365,22 @@ pub fn check_privilege(
         Ok(())
     };
 
-    // Pass 1: check table-level (1142), dynamic, and ordinary column (1143) entries in Go order.
+    let is_table_read = |v: &VisitInfo| -> bool { v.column == "*" };
+
+    // Pass 1 (R30): the table-read entries of every table of the statement, in slice order,
+    // so that a table without read access answers 1142 before any column answers 1143.
     for v in vs {
-        if !is_deferred_rowid(v) {
+        if is_table_read(v) {
             check_one(v)?;
         }
     }
-    // Pass 2: check R32 `_tidb_rowid` entries only after all ordinary column checks succeed,
+    // Pass 2: the other entries (dynamic privileges, ordinary columns) in Go's slice order.
+    for v in vs {
+        if !is_table_read(v) && !is_deferred_rowid(v) {
+            check_one(v)?;
+        }
+    }
+    // Pass 3: check R32 `_tidb_rowid` entries only after all ordinary column checks succeed,
     // so queries like `SELECT a FROM t WHERE _tidb_rowid = 1` still report Go's denied column `a`.
     for v in vs {
         if is_deferred_rowid(v) {
@@ -1213,10 +1229,16 @@ fn transform_physical_plan(
     f(p)
 }
 
-/// `existsCartesianProduct`: `LogicalJoin` (D09.3) is not ported, so a plan has no join.
-// go: existsCartesianProduct L2 (the LogicalJoin arm comes with joins, D09.3)
+/// existsCartesianProduct reports whether the plan has a join without equal conditions.
+// go: existsCartesianProduct L1 [M-PLAN]
 fn exists_cartesian_product(ctx: &PlanCtx<'_>, p: PlanId) -> bool {
-    // if join, ok := p.(*logicalop.LogicalJoin): not a ported operator.
+    if let Some(join) = ctx.arena.downcast_ref::<LogicalJoin>(p)
+        && join.equal_conditions.is_empty()
+    {
+        return join.join_type == JoinType::InnerJoin
+            || join.join_type == JoinType::LeftOuterJoin
+            || join.join_type == JoinType::RightOuterJoin;
+    }
     for &child in ctx.arena.get(p).children() {
         if exists_cartesian_product(ctx, child) {
             return true;
@@ -1449,7 +1471,7 @@ pub fn dispatch_constant_propagation(
     parent: Option<PlanId>,
     current_child_idx: usize,
     opt: &LogicalOptimizeOp,
-) -> Option<PlanId> {
+) -> Result<Option<PlanId>, Error> {
     with_detached(ctx, p, |node, ctx| {
         node.constant_propagation(ctx, parent, current_child_idx, opt)
     })

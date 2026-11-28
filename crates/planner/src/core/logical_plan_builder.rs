@@ -9,7 +9,9 @@
 //!   auxiliary fields of HAVING / ORDER BY) and restores them at the end. The Rust AST is
 //!   borrowed, so the builder keeps its own field list ([`SelectFieldW`]) whose entries borrow
 //!   the AST's nodes or own the column-name nodes it creates (spec §3 item 2).
-//! - Joins (D09.3), subqueries (D09.6), aggregation, windows and GROUP BY (D09.4), CTEs and
+//! - Joins of two sources with ON / USING / NATURAL (the join builder, D09.3 part A; spec
+//!   `specs/D09.3-join-build/spec.md`) are built here; LATERAL and the apply builder (D09.3
+//!   part C), subqueries (D09.6), ROLLUP and correlated aggregates (D09.4), CTEs and
 //!   set operations (D09.5), views, virtual generated columns, locks, hints (D13.3),
 //!   partitioned tables (D09.12) and the other branches the slice does not need are boundary
 //!   stubs at the place Go takes them (spec §5).
@@ -39,7 +41,8 @@ use tidb_base::go_args;
 use tidb_base::gostd::is_one_of;
 use tidb_base::mysql::{
     DefaultCharset, DefaultCollationName, ExtendedPriv, MaxRealWidth, NotNullFlag, RangeGraph,
-    SQLMode, SelectPriv, TypeDouble, TypeNull, TypeVarchar, has_not_null_flag, has_pri_key_flag,
+    SQLMode, SelectPriv, TypeDouble, TypeNull, TypeTiny, TypeVarchar, has_not_null_flag,
+    has_pri_key_flag,
 };
 use tidb_chunk::Row;
 use tidb_expression::aggregation::{
@@ -49,7 +52,7 @@ use tidb_expression::builtin_cast::try_push_cast_into_control_function_for_hybri
 use tidb_expression::builtin_compare::{get_accurate_cmp_type, get_cmp_function};
 use tidb_expression::constant::{Constant, new_zero};
 use tidb_expression::expression::{EvalState, split_cnf_items};
-use tidb_expression::scalar_function::new_function_base;
+use tidb_expression::scalar_function::{new_function, new_function_base};
 use tidb_expression::simple_rewriter::{
     column_name_orig_col_name, column_name_string, find_field_name,
 };
@@ -59,7 +62,7 @@ use tidb_expression::util::{
 };
 use tidb_expression::{
     Column, Expr as PExpr, ExprRef, Schema, column2_exprs, eval_bool, gc_column_expr_is_tidb_shard,
-    new_schema,
+    merge_schema, new_schema,
 };
 use tidb_infoschema::metadef::is_mem_db;
 use tidb_infoschema::tables::find_primary_index;
@@ -80,14 +83,15 @@ use tidb_types::etc::{FieldType, is_type_numeric, is_type_temporal};
 use tidb_types::field_name::{EmptyName, FieldName, NameSlice};
 use tidb_types::field_type::{default_type_for_value, new_field_type, set_bin_chs_cln_flag};
 
-use crate::arena::{PlanArena, PlanId};
+use crate::arena::{PlanArena, PlanId, with_detached};
 use crate::base::{LogicalKind, LogicalPlan};
 use crate::core::expression_rewriter::{
     AggMapper, ByAddr, CheckSelectColumnPrivOption, ClauseCode, ColReplacements, RewritePlan,
-    WindowMapper, clause_msg, eval_ast_expr, eval_ast_expr_with_plan_ctx, node_addr,
+    VisitedColumn, WindowMapper, clause_msg, eval_ast_expr, eval_ast_expr_with_plan_ctx, node_addr,
     value_expr_go_value,
 };
 use crate::core::find_best_task::compare_bool;
+use crate::core::plan_cache_utils::table_is_view;
 use crate::core::planbuilder::{
     PlanBuilder, VisitInfo, filter_path_by_isolation_read, get_possible_access_paths, has_agg_flag,
     has_window_flag, is_for_update_read_select_lock, split_where,
@@ -97,19 +101,22 @@ use crate::core::preprocess::try_lock_mdl_and_update_schema_if_necessary;
 use crate::core::resolve::ContextRef;
 use crate::core::rule::logical_rules::{
     FlagBuildKeyInfo, FlagConstantPropagation, FlagDeriveTopNFromWindow, FlagEliminateAgg,
-    FlagEliminateProjection, FlagGcSubstitute, FlagMaxMinEliminate, FlagPredicatePushDown,
-    FlagPredicateSimplification, FlagPushDownAgg, FlagPushDownTopN, FlagSkewDistinctAgg,
+    FlagEliminateOuterJoin, FlagEliminateProjection, FlagGcSubstitute, FlagJoinReOrder,
+    FlagMaxMinEliminate, FlagPredicatePushDown, FlagPredicateSimplification, FlagPushDownAgg,
+    FlagPushDownTopN, FlagSkewDistinctAgg,
 };
 use crate::core::util::{AggregateFuncExtractor, WindowFuncExtractor, table_has_dirty_content};
-use crate::hint::parse_plan_hints;
+use crate::hint::{PlanHints, parse_plan_hints};
 use crate::logicalop::{
-    DataSource, FrameBound, LogicalAggregation, LogicalLimit, LogicalProjection, LogicalSelection,
-    LogicalSort, LogicalTableDual, LogicalTopN, LogicalWindow, WindowFrame,
+    DataSource, FrameBound, JoinType, LogicalAggregation, LogicalJoin, LogicalLimit,
+    LogicalProjection, LogicalSelection, LogicalSort, LogicalTableDual, LogicalTopN, LogicalWindow,
+    WindowFrame,
 };
 use crate::planctx::PlanCtx;
 use crate::property::SortItem;
 use crate::util::column::index_info2_full_cols;
 use crate::util::handle_cols::{new_common_handle_cols, new_int_handle_cols};
+use crate::util::null_misc::reset_not_null_flag;
 use crate::util::{ByItems, HandleCols};
 
 /// ErrExprInSelect is in select fields for the error of ErrFieldNotInGroupBy.
@@ -662,9 +669,27 @@ impl<'ast> PlanBuilder<'ast> {
         }
     }
 
-    /// buildJoin: only the one-sided join of a single table source (`joinNode.Right ==
-    /// nil`); a join of two sources is `blocked-by:D09.3`.
-    // go: PlanBuilder.buildJoin L2 (a join of two sources is blocked-by:D09.3)
+    /// buildJoin.
+    ///
+    /// L2 (each unreachable or not-yet-ported branch is named, none is skipped silently):
+    /// - LATERAL (`isLateral`, `buildLateralJoin`, the outer-schema stack): the parser never
+    ///   builds a LATERAL table source yet (`TableSource.lateral` is always false, D02.2);
+    ///   when it does, the branch stops at `blocked-by:D09.3` (the apply and LATERAL part)
+    ///   where Go pushes the outer schemas.
+    /// - The recursive CTE on the right side of a LEFT JOIN (`:818-820`): Rust has no
+    ///   `LogicalCTETable` yet (CTEs, D09.5), so the right plan is never one.
+    /// - The `LogicalApply` arms of the full-schema merge: there is no `LogicalApply` yet
+    ///   (the apply builder, D09.3 part C; correlated subqueries, D09.6).
+    /// - `newPlan != joinPlan` after the ON rewrite (1105 "ON condition doesn't support
+    ///   subqueries yet"): the Rust rewriter never returns a new plan; a subquery in ON stops
+    ///   in the rewriter at `blocked-by:D09.6`.
+    /// - `FULL OUTER JOIN`: v8.5.8's grammar has no FULL join type, the Rust parser builds
+    ///   one (`ast::JoinType::FullJoin`), so it stops at `blocked-by:D02.2` instead of falling
+    ///   into the inner join branch.
+    /// - The join is put into the arena before the ON rewrite, because the rewriter resolves
+    ///   names against it (its full schema included); the plan ids are allocated in Go's
+    ///   order (left, right, join, then the selection of an inner join's ON).
+    // go: PlanBuilder.buildJoin L2 (see above: LATERAL, CTE and apply branches are unreachable; FULL JOIN is blocked-by:D02.2)
     pub fn build_join(
         &mut self,
         ctx: &mut PlanCtx<'_>,
@@ -673,15 +698,576 @@ impl<'ast> PlanBuilder<'ast> {
         // We will construct a "Join" node for some statements like "INSERT",
         // "DELETE", "UPDATE", "REPLACE". For this scenario "joinNode.Right" is nil
         // and we only build the left "ResultSetNode".
-        if join_node.right.is_none() {
-            let Some(left) = &join_node.left else {
-                // glue: blocked-by:D02.2 (a join without a left side from the Rust parser)
-                return Err(blocked("D02.2", "a join without a left side"));
-            };
+        // (Go's `Left` is never nil; the Rust AST's is an `Option`, checked once here for both
+        // cases.)
+        let Some(left) = &join_node.left else {
+            // glue: blocked-by:D02.2 (a join without a left side from the Rust parser)
+            return Err(blocked("D02.2", "a join without a left side"));
+        };
+        let Some(right) = &join_node.right else {
             return self.build_result_set_node(ctx, ResultSetRef::Node(left), false);
+        };
+
+        // Detect whether the right subtree contains any LATERAL table source.
+        // This is used only to decide whether to push outerSchemas before building
+        // the right side, so that nested LATERAL sources can resolve outer columns.
+        let is_lateral = contains_lateral_table_source(right);
+
+        self.opt_flag |= FlagPredicatePushDown;
+        // Don't enable join reorder for LATERAL (similar to StraightJoin)
+        // LATERAL has order dependencies: right side can reference left side
+        if !is_lateral {
+            self.opt_flag |= FlagJoinReOrder;
         }
-        // glue: blocked-by:D09.3 (joins of two sources: the join builder and LogicalJoin)
-        Err(blocked("D09.3", "a join of two table sources (buildJoin)"))
+        self.opt_flag |= FlagPredicateSimplification;
+
+        let left_plan = self.build_result_set_node(ctx, ResultSetRef::Node(left), false)?;
+
+        // For LATERAL: Push left side schema onto outerSchemas stack
+        if is_lateral {
+            // glue: blocked-by:D09.3 (LATERAL derived tables: the outer schema stack and buildLateralJoin, the apply part)
+            return Err(blocked(
+                "D09.3",
+                "a LATERAL derived table (buildLateralJoin)",
+            ));
+        }
+
+        let right_plan = self.build_result_set_node(ctx, ResultSetRef::Node(right), false)?;
+
+        // The recursive part in CTE must not be on the right side of a LEFT JOIN: the right
+        // plan is never a LogicalCTETable here (CTEs, D09.5; see the doc comment).
+
+        let handle_map1 = self.handle_helper.pop_map();
+        let handle_map2 = self.handle_helper.pop_map();
+        self.handle_helper
+            .merge_and_push(handle_map1.as_ref(), handle_map2.as_ref());
+
+        let mut join_plan = LogicalJoin::init(ctx, self.get_select_offset());
+        join_plan.straight_join = join_node.straight_join || self.in_straight_join;
+        join_plan.set_children(vec![left_plan, right_plan]);
+        let left_len = schema_of(&ctx.arena, left_plan).len();
+        let right_len = schema_of(&ctx.arena, right_plan).len();
+        let mut join_schema = merge_schema(
+            Some(schema_of(&ctx.arena, left_plan)),
+            Some(schema_of(&ctx.arena, right_plan)),
+        )
+        .expect("both schemas are set");
+        let mut output_names: NameSlice = Vec::with_capacity(left_len + right_len);
+        output_names.extend(names_of(&ctx.arena, left_plan).iter().cloned());
+        output_names.extend(names_of(&ctx.arena, right_plan).iter().cloned());
+
+        // Set join type.
+        match join_node.tp {
+            ast::JoinType::LeftJoin => {
+                // left outer join need to be checked elimination
+                self.opt_flag |= FlagEliminateOuterJoin;
+                join_plan.join_type = JoinType::LeftOuterJoin;
+                let len = join_schema.len();
+                reset_not_null_flag(&mut join_schema, left_len, len);
+            }
+            ast::JoinType::RightJoin => {
+                // right outer join need to be checked elimination
+                self.opt_flag |= FlagEliminateOuterJoin;
+                join_plan.join_type = JoinType::RightOuterJoin;
+                reset_not_null_flag(&mut join_schema, 0, left_len);
+            }
+            ast::JoinType::FullJoin => {
+                // glue: blocked-by:D02.2 (the parser builds FULL OUTER JOIN, which v8.5.8's grammar rejects)
+                return Err(blocked(
+                    "D02.2",
+                    "FULL OUTER JOIN (v8.5.8's parser rejects it; the Rust parser builds it)",
+                ));
+            }
+            ast::JoinType::CrossJoin => {
+                join_plan.join_type = JoinType::InnerJoin;
+            }
+        }
+        join_plan.sp.set_schema(Some(join_schema));
+        join_plan.sp.set_output_names(output_names);
+
+        // Merge sub-plan's FullSchema into this join plan.
+        // Please read the comment of LogicalJoin.FullSchema for the details.
+        // (The LogicalApply arms: there is no LogicalApply yet, see the doc comment.)
+        let full_of = |p: PlanId| -> (&Schema, &NameSlice) {
+            if let Some(x) = ctx.arena.downcast_ref::<LogicalJoin>(p)
+                && let Some(full_schema) = &x.full_schema
+            {
+                return (full_schema, &x.full_names);
+            }
+            (schema_of(&ctx.arena, p), names_of(&ctx.arena, p))
+        };
+        let (mut l_full_schema, mut l_full_names) = full_of(left_plan);
+        let (mut r_full_schema, mut r_full_names) = full_of(right_plan);
+        if join_node.tp == ast::JoinType::RightJoin {
+            // Make sure lFullSchema means outer full schema and rFullSchema means inner full schema.
+            std::mem::swap(&mut l_full_schema, &mut r_full_schema);
+            std::mem::swap(&mut l_full_names, &mut r_full_names);
+        }
+        let mut full_schema =
+            merge_schema(Some(l_full_schema), Some(r_full_schema)).expect("both schemas are set");
+
+        // Clear NotNull flag for the inner side schema if it's an outer join.
+        if join_node.tp == ast::JoinType::LeftJoin || join_node.tp == ast::JoinType::RightJoin {
+            let len = full_schema.len();
+            reset_not_null_flag(&mut full_schema, l_full_schema.len(), len);
+        }
+
+        // Merge sub-plan's FullNames into this join plan, similar to the FullSchema logic above.
+        let mut full_names: NameSlice = Vec::with_capacity(l_full_names.len() + r_full_names.len());
+        for l_name in l_full_names {
+            full_names.push(Arc::new(FieldName::clone(l_name)));
+        }
+        for r_name in r_full_names {
+            full_names.push(Arc::new(FieldName::clone(r_name)));
+        }
+        join_plan.full_schema = Some(full_schema);
+        join_plan.full_names = full_names;
+
+        // Set preferred join algorithm if some join hints is specified by user.
+        join_plan.set_preferred_join_type_and_order(ctx, self.table_hints());
+
+        // "NATURAL JOIN" doesn't have "ON" or "USING" conditions.
+        //
+        // The "NATURAL [LEFT] JOIN" of two tables is defined to be semantically
+        // equivalent to an "INNER JOIN" or a "LEFT JOIN" with a "USING" clause
+        // that names all columns that exist in both tables.
+        //
+        // See https://dev.mysql.com/doc/refman/5.7/en/join.html for more detail.
+        if join_node.natural_join {
+            self.build_natural_join(ctx, &mut join_plan, left_plan, right_plan, join_node)?;
+        } else if !join_node.using.is_empty() {
+            self.build_using_clause(ctx, &mut join_plan, left_plan, right_plan, join_node)?;
+        } else if let Some(on) = &join_node.on {
+            let join_id = ctx.arena.alloc(Box::new(join_plan));
+            self.cur_clause = ClauseCode::OnClause;
+            let origin_col_priv = self.check_col_priv;
+            self.check_col_priv = CheckSelectColumnPrivOption::ReportColumnErrOption;
+            let res = self.rewrite(
+                &*ctx.expr_ctx,
+                &on.expr,
+                rewrite_plan(&ctx.arena, join_id),
+                None,
+                false,
+            );
+            self.check_col_priv = origin_col_priv;
+            let on_expr = res?.expect("an ON condition rewrites to an expression");
+            // newPlan != joinPlan: the rewriter returns no new plan (see the doc comment).
+            let on_condition = split_cnf_items(&on_expr);
+            // Keep these expressions as a LogicalSelection upon the inner join, in order to apply
+            // possible decorrelate optimizations. The ON clause is actually treated as a WHERE clause now.
+            let join_type = ctx
+                .arena
+                .downcast_ref::<LogicalJoin>(join_id)
+                .expect("the join just built")
+                .join_type;
+            if join_type == JoinType::InnerJoin {
+                let mut sel = LogicalSelection::init(on_condition, ctx, self.get_select_offset());
+                sel.set_children(vec![join_id]);
+                return Ok(ctx.arena.alloc(Box::new(sel)));
+            }
+            with_detached(ctx, join_id, |node, ctx| {
+                node.as_any_mut()
+                    .downcast_mut::<LogicalJoin>()
+                    .expect("the join just built")
+                    .attach_on_conds(ctx, &on_condition)
+            })?;
+            return Ok(join_id);
+        } else if join_plan.join_type == JoinType::InnerJoin {
+            // If a inner join without "ON" or "USING" clause, it's a cartesian
+            // product over the join tables.
+            join_plan.cartesian_join = true;
+        }
+
+        Ok(ctx.arena.alloc(Box::new(join_plan)))
+    }
+
+    /// TableHints returns the table hints of the query block being built. The builder keeps
+    /// no hint stack: `buildSelect` stops at a non-empty hint list (`blocked-by:D02.2` /
+    /// D13.3), so the hints Go pushes for the current SELECT are always empty, which is what
+    /// this returns (Go returns nil only outside any SELECT, where no join is built).
+    // go: PlanBuilder.TableHints L2 (no hint stack: the current SELECT's hints are always empty, see buildSelect)
+    fn table_hints(&self) -> Option<PlanHints> {
+        Some(PlanHints::default())
+    }
+
+    /// buildUsingClause eliminate the redundant columns and ordering columns based
+    /// on the "USING" clause.
+    ///
+    /// According to the standard SQL, columns are ordered in the following way:
+    ///  1. coalesced common columns of "leftPlan" and "rightPlan", in the order they
+    ///     appears in "leftPlan".
+    ///  2. the rest columns in "leftPlan", in the order they appears in "leftPlan".
+    ///  3. the rest columns in "rightPlan", in the order they appears in "rightPlan".
+    ///
+    /// L2: the filter keeps the USING order (M-MAPORDER, see `coalesce_common_columns`); the
+    /// `inUpdateStmt || inDeleteStmt` branch is the write path's (UPDATE / DELETE planning,
+    /// D09.15), which this read-only builder never runs, so it has neither flag.
+    // go: PlanBuilder.buildUsingClause L2 (ordered filter; the UPDATE / DELETE branch is the write path's)
+    fn build_using_clause(
+        &mut self,
+        ctx: &PlanCtx<'_>,
+        p: &mut LogicalJoin,
+        left_plan: PlanId,
+        right_plan: PlanId,
+        join: &ast::Join,
+    ) -> Result<(), Error> {
+        let mut filter: Vec<(String, bool)> = Vec::with_capacity(join.using.len());
+        for col in &join.using {
+            let l = col.name.l();
+            if !filter.iter().any(|(c, _)| *c == l) {
+                filter.push((l, true));
+            }
+        }
+        self.coalesce_common_columns(ctx, p, left_plan, right_plan, join.tp, Some(filter))?;
+        // We do not need to coalesce columns for update and delete: not built here (see above).
+        Ok(())
+    }
+
+    /// buildNaturalJoin builds natural join output schema. It finds out all the common columns
+    /// then using the same mechanism as buildUsingClause to eliminate redundant columns and build join conditions.
+    /// According to standard SQL, producing this display order:
+    ///
+    ///  All the common columns
+    ///  Every column in the first (left) table that is not a common column
+    ///  Every column in the second (right) table that is not a common column
+    // go: PlanBuilder.buildNaturalJoin L2 (the UPDATE / DELETE branch is the write path's, see buildUsingClause)
+    fn build_natural_join(
+        &mut self,
+        ctx: &PlanCtx<'_>,
+        p: &mut LogicalJoin,
+        left_plan: PlanId,
+        right_plan: PlanId,
+        join: &ast::Join,
+    ) -> Result<(), Error> {
+        self.coalesce_common_columns(ctx, p, left_plan, right_plan, join.tp, None)?;
+        // We do not need to coalesce columns for update and delete: not built here.
+        Ok(())
+    }
+
+    /// coalesceCommonColumns is used by buildUsingClause and buildNaturalJoin. The filter is used by buildUsingClause.
+    ///
+    /// L2:
+    /// - The filter is an ordered list of `(column, not yet found)` in USING order instead of
+    ///   a map (M-MAPORDER): with several unknown USING columns Go reports any one of them;
+    ///   this reports the first in USING order.
+    /// - Go moves the common columns in place with `copy` on the cloned column slices; for a
+    ///   RIGHT JOIN `lColumns` is the same array as `rsc.Columns`. Here the moves are
+    ///   `rotate_right` on the same two vectors and the swap exchanges references to them,
+    ///   so `lc` is always the original left table's column and `rc` the right one's.
+    /// - `b.nameMapCTE` is always empty (CTEs, D09.5); `TableIsView` returns a `blocked`
+    ///   lookup error instead of treating it as "not a view".
+    /// - Go restores `checkColPriv` in a `defer`; here a drop guard (M-DEFER).
+    // go: PlanBuilder.coalesceCommonColumns L2 (see above: ordered filter, no CTE names, drop guard)
+    fn coalesce_common_columns(
+        &mut self,
+        ctx: &PlanCtx<'_>,
+        p: &mut LogicalJoin,
+        left_plan: PlanId,
+        right_plan: PlanId,
+        join_tp: ast::JoinType,
+        filter: Option<Vec<(String, bool)>>,
+    ) -> Result<(), Error> {
+        let mut lsc = schema_of(&ctx.arena, left_plan).clone_schema();
+        let mut rsc = schema_of(&ctx.arena, right_plan).clone_schema();
+        if join_tp == ast::JoinType::LeftJoin {
+            let len = rsc.len();
+            reset_not_null_flag(&mut rsc, 0, len);
+        } else if join_tp == ast::JoinType::RightJoin {
+            let len = lsc.len();
+            reset_not_null_flag(&mut lsc, 0, len);
+        }
+        let mut lsc_columns = std::mem::take(&mut lsc.columns);
+        let mut rsc_columns = std::mem::take(&mut rsc.columns);
+        let mut l_names: NameSlice = names_of(&ctx.arena, left_plan).clone();
+        let mut r_names: NameSlice = names_of(&ctx.arena, right_plan).clone();
+        let right_join = join_tp == ast::JoinType::RightJoin;
+        if right_join {
+            std::mem::swap(&mut l_names, &mut r_names);
+        }
+
+        // Check using clause with ambiguous columns.
+        if let Some(filter) = &filter {
+            let check_ambiguous = |names: &NameSlice| -> Result<(), Error> {
+                let mut column_name_in_filter: HashSet<&str> = HashSet::new();
+                for name in names {
+                    let l = name.col_name.l.as_str();
+                    if !filter.iter().any(|(c, _)| c == l) {
+                        continue;
+                    }
+                    if !column_name_in_filter.insert(l) {
+                        return Err(ErrAmbiguous
+                            .gen_with_stack_by_args(go_args![l.to_owned(), "from clause"]));
+                    }
+                }
+                Ok(())
+            };
+            check_ambiguous(&l_names)?;
+            check_ambiguous(&r_names)?;
+        } else {
+            let (l_columns, r_columns) = if right_join {
+                (&rsc_columns, &lsc_columns)
+            } else {
+                (&lsc_columns, &rsc_columns)
+            };
+            // Even with no using filter, we still should check the checkAmbiguous name before we try to find the common column from both side.
+            // (t3 cross join t4) natural join t1
+            //  t1 natural join (t3 cross join t4)
+            // t3 and t4 may generate the same name column from cross join.
+            // for every common column of natural join, the name from right or left should be exactly one.
+            let mut common_names: Vec<&str> = Vec::with_capacity(l_names.len());
+            let mut l_name_map: HashMap<&str, usize> = HashMap::with_capacity(l_names.len());
+            let mut r_name_map: HashMap<&str, usize> = HashMap::with_capacity(r_names.len());
+            for (i, name) in l_names.iter().enumerate() {
+                // Natural join should ignore _tidb_rowid
+                if name.col_name.l == "_tidb_rowid" {
+                    continue;
+                }
+                if l_columns[i].is_hidden {
+                    continue;
+                }
+                // record left map
+                *l_name_map.entry(name.col_name.l.as_str()).or_insert(0) += 1;
+            }
+            for (i, name) in r_names.iter().enumerate() {
+                // Natural join should ignore _tidb_rowid
+                if name.col_name.l == "_tidb_rowid" {
+                    continue;
+                }
+                if r_columns[i].is_hidden {
+                    continue;
+                }
+                // record right map
+                *r_name_map.entry(name.col_name.l.as_str()).or_insert(0) += 1;
+                // check left map
+                if let Some(&cnt) = l_name_map.get(name.col_name.l.as_str()) {
+                    if cnt > 1 {
+                        return Err(ErrAmbiguous.gen_with_stack_by_args(go_args![
+                            name.col_name.l.clone(),
+                            "from clause"
+                        ]));
+                    }
+                    common_names.push(name.col_name.l.as_str());
+                }
+            }
+            // check right map
+            for common_name in common_names {
+                if r_name_map.get(common_name).copied().unwrap_or(0) > 1 {
+                    return Err(ErrAmbiguous
+                        .gen_with_stack_by_args(go_args![common_name.to_owned(), "from clause"]));
+                }
+            }
+        }
+
+        let origin_col_priv = self.check_col_priv;
+        self.check_col_priv = CheckSelectColumnPrivOption::ReportColumnErrOption;
+        let mut b = RestoreCheckColPriv {
+            b: self,
+            origin: origin_col_priv,
+        };
+        b.coalesce_common_columns_rest(
+            ctx,
+            p,
+            join_tp,
+            filter,
+            &mut lsc_columns,
+            &mut rsc_columns,
+            l_names,
+            r_names,
+        )
+    }
+
+    /// The part of `coalesceCommonColumns` after `checkColPriv` is switched (its `defer` is
+    /// the caller's [`RestoreCheckColPriv`] guard).
+    // go-part: PlanBuilder.coalesceCommonColumns
+    #[allow(clippy::too_many_arguments)]
+    fn coalesce_common_columns_rest(
+        &mut self,
+        ctx: &PlanCtx<'_>,
+        p: &mut LogicalJoin,
+        join_tp: ast::JoinType,
+        mut filter: Option<Vec<(String, bool)>>,
+        lsc_columns: &mut Vec<Arc<Column>>,
+        rsc_columns: &mut Vec<Arc<Column>>,
+        mut l_names: NameSlice,
+        mut r_names: NameSlice,
+    ) -> Result<(), Error> {
+        let right_join = join_tp == ast::JoinType::RightJoin;
+        let (l_columns, r_columns) = if right_join {
+            (&mut *rsc_columns, &mut *lsc_columns)
+        } else {
+            (&mut *lsc_columns, &mut *rsc_columns)
+        };
+        // Find out all the common columns and put them ahead.
+        let mut common_len = 0usize;
+        for i in 0..l_names.len() {
+            // Natural join should ignore _tidb_rowid
+            if l_names[i].col_name.l == "_tidb_rowid" {
+                continue;
+            }
+            // Hidden columns are internal-only and shuold not participate in NATURAL/USING column matching.
+            if l_columns[i].is_hidden {
+                continue;
+            }
+            for j in common_len..r_names.len() {
+                if r_columns[j].is_hidden {
+                    continue;
+                }
+                if l_names[i].col_name.l != r_names[j].col_name.l {
+                    continue;
+                }
+
+                if let Some(filter) = filter.as_mut().filter(|f| !f.is_empty()) {
+                    let entry = filter.iter_mut().find(|(c, _)| *c == l_names[i].col_name.l);
+                    match entry {
+                        Some((_, not_found)) if *not_found => {
+                            // Mark this column exist.
+                            *not_found = false;
+                        }
+                        _ => break,
+                    }
+                }
+
+                l_columns[common_len..=i].rotate_right(1);
+                l_names[common_len..=i].rotate_right(1);
+                r_columns[common_len..=j].rotate_right(1);
+                r_names[common_len..=j].rotate_right(1);
+
+                for field_name in [&l_names[common_len], &r_names[common_len]] {
+                    let mut col_name = (
+                        field_name.orig_col_name.clone(),
+                        field_name.orig_tbl_name.clone(),
+                        field_name.db_name.clone(),
+                    );
+                    if let Some(is) = &self.is
+                        && table_is_view(&*is.0, &field_name.db_name, &field_name.tbl_name)?
+                    {
+                        col_name.0 = field_name.col_name.clone();
+                        col_name.1 = field_name.tbl_name.clone();
+                    }
+                    let (name, table, schema) = col_name;
+                    if !name.l.is_empty() && !table.l.is_empty() && !schema.l.is_empty() {
+                        // The column privilege is checked in the definition of CTE: b.nameMapCTE
+                        // is always empty here (CTEs, D09.5).
+                        self.append_col_names_to_visit_info(&[VisitedColumn {
+                            schema: schema.l,
+                            table: table.l,
+                            name: name.l,
+                        }]);
+                    }
+                }
+
+                common_len += 1;
+                break;
+            }
+        }
+
+        if let Some(filter) = &filter
+            && !filter.is_empty()
+            && filter.len() != common_len
+        {
+            for (col, not_exist) in filter {
+                if *not_exist {
+                    return Err(ErrUnknownColumn
+                        .gen_with_stack_by_args(go_args![col.clone(), "from clause"]));
+                }
+            }
+        }
+
+        let mut schema_cols: Vec<Arc<Column>> =
+            Vec::with_capacity(l_columns.len() + r_columns.len() - common_len);
+        schema_cols.extend(l_columns.iter().cloned());
+        schema_cols.extend(r_columns[common_len..].iter().cloned());
+        let mut names: NameSlice = Vec::with_capacity(schema_cols.len());
+        names.extend(l_names.iter().cloned());
+        names.extend(r_names[common_len..].iter().cloned());
+
+        let mut conds: Vec<ExprRef> = Vec::with_capacity(common_len);
+        for i in 0..common_len {
+            let (lc, rc) = (&lsc_columns[i], &rsc_columns[i]);
+            let cond = new_function(
+                &*ctx.expr_ctx,
+                ast::funcs::EQ,
+                new_field_type(TypeTiny),
+                vec![
+                    Arc::new(PExpr::Column(Column::clone(lc))),
+                    Arc::new(PExpr::Column(Column::clone(rc))),
+                ],
+            )?;
+            conds.push(cond);
+            if let Some(full_schema) = &p.full_schema {
+                // since FullSchema is derived from left and right schema in upper layer, so rc/lc must be in FullSchema.
+                let idx = if right_join {
+                    full_schema.column_index(lc)
+                } else {
+                    full_schema.column_index(rc)
+                };
+                let name = &mut p.full_names[usize::try_from(idx).expect("in FullSchema")];
+                // FullNames are this join's own copies (buildJoin), never shared (M-FT).
+                Arc::make_mut(name).redundant = true;
+            }
+        }
+
+        p.sp.set_schema(Some(new_schema(schema_cols)));
+        p.sp.set_output_names(names);
+
+        conds.append(&mut p.other_conditions);
+        p.other_conditions = conds;
+
+        Ok(())
+    }
+
+    /// buildJoinFuncDepend builds the functional dependencies of the top join's ON
+    /// equalities for `ONLY_FULL_GROUP_BY`. Go's nil map is an empty map.
+    // go: PlanBuilder.buildJoinFuncDepend L1
+    fn build_join_func_depend(
+        &self,
+        arena: &PlanArena,
+        p: PlanId,
+        from: ResultSetRef<'_>,
+    ) -> Result<HashMap<FieldNamePtr, FieldNamePtr>, Error> {
+        let x: &ast::Join = match from {
+            ResultSetRef::Join(x) => x,
+            ResultSetRef::Node(ast::ResultSetNode::Join(x)) => x,
+            ResultSetRef::Node(_) => return Ok(HashMap::new()),
+        };
+        let Some(on) = &x.on else {
+            return Ok(HashMap::new());
+        };
+        let on_conditions = split_where(Some(&on.expr));
+        let mut col_depend_map = HashMap::with_capacity(on_conditions.len());
+        for cond in on_conditions {
+            let Some((mut l_col, mut r_col)) = build_func_depend_col(arena, p, cond)? else {
+                continue;
+            };
+            let l_tbl = match &x.left {
+                Some(left) => {
+                    let l_name = names_of(arena, p)
+                        .iter()
+                        .find(|n| field_name_ptr(n) == l_col)
+                        .expect("buildFuncDependCol returns an output name of p");
+                    self.tbl_info_from_col(ResultSetRef::Node(left), l_name)?
+                }
+                None => None,
+            };
+            if l_tbl.is_none() {
+                std::mem::swap(&mut l_col, &mut r_col);
+            }
+            match x.tp {
+                ast::JoinType::CrossJoin => {
+                    col_depend_map.insert(l_col, r_col);
+                    col_depend_map.insert(r_col, l_col);
+                }
+                ast::JoinType::LeftJoin => {
+                    col_depend_map.insert(r_col, l_col);
+                }
+                ast::JoinType::RightJoin => {
+                    col_depend_map.insert(l_col, r_col);
+                }
+                // Go's switch has no other case (a FULL join stops in buildJoin first).
+                ast::JoinType::FullJoin => {}
+            }
+        }
+        Ok(col_depend_map)
     }
 
     /// buildSelection.
@@ -875,9 +1461,10 @@ impl<'ast> PlanBuilder<'ast> {
     }
 
     /// buildProjectionField builds the field object according to SelectField in projection.
-    /// A column of the redundant side of a NATURAL / USING join (`findColFromNaturalUsingJoin`)
-    /// is `blocked-by:D09.3`; correlated columns exist only in subqueries (D09.6).
-    // go: PlanBuilder.buildProjectionField L2 (the natural-join columns are blocked-by:D09.3; correlated columns are subqueries')
+    /// Correlated columns exist only in subqueries (D09.6), so the correlated-column arm is
+    /// not here. A redundant column of a NATURAL / USING join that is missing from the join's
+    /// full schema panics, as Go's nil name does.
+    // go: PlanBuilder.buildProjectionField L2 (correlated columns are subqueries')
     fn build_projection_field(
         &mut self,
         ctx: &mut PlanCtx<'_>,
@@ -896,38 +1483,32 @@ impl<'ast> PlanBuilder<'ast> {
                 CIStr::default(),
             )
         };
-        let (col_name, orig_col_name, tbl_name, orig_tbl_name, db_name) = if let (
-            Expr::Column(col_name_field),
-            Some(col),
-        ) = (inner_node, col)
-        {
-            // Field is a column reference.
-            let idx = schema_of(&ctx.arena, p).column_index(col);
-            // The column maybe the one from join's redundant part.
-            if idx == -1 {
-                // name = findColFromNaturalUsingJoin(p, col)
-                // glue: blocked-by:D09.3 (findColFromNaturalUsingJoin: the redundant columns of NATURAL / USING joins)
-                return Err(blocked(
-                    "D09.3",
-                    "a column of the redundant side of a NATURAL / USING join (findColFromNaturalUsingJoin)",
-                ));
-            }
-            let name = Arc::clone(&names_of(&ctx.arena, p)[idx as usize]);
-            self.build_projection_field_name_from_columns(field, col_name_field, &name)
-        } else if let Expr::Column(_) = inner_node {
-            // !isCol: a correlated column (subqueries, D09.6) or another expression.
-            if !field.as_name.l().is_empty() {
+        let (col_name, orig_col_name, tbl_name, orig_tbl_name, db_name) =
+            if let (Expr::Column(col_name_field), Some(col)) = (inner_node, col) {
+                // Field is a column reference.
+                let idx = schema_of(&ctx.arena, p).column_index(col);
+                // The column maybe the one from join's redundant part.
+                let name = if idx == -1 {
+                    find_col_from_natural_using_join(&ctx.arena, p, col)
+                        .expect("a column of the redundant side of a NATURAL / USING join")
+                } else {
+                    Arc::clone(&names_of(&ctx.arena, p)[idx as usize])
+                };
+                self.build_projection_field_name_from_columns(field, col_name_field, &name)
+            } else if let Expr::Column(_) = inner_node {
+                // !isCol: a correlated column (subqueries, D09.6) or another expression.
+                if !field.as_name.l().is_empty() {
+                    only_col_name(ci(&field.as_name))
+                } else {
+                    only_col_name(self.build_projection_field_name_from_expressions(field)?)
+                }
+            } else if !field.as_name.l().is_empty() {
+                // Field has alias.
                 only_col_name(ci(&field.as_name))
             } else {
+                // Other: field is an expression.
                 only_col_name(self.build_projection_field_name_from_expressions(field)?)
-            }
-        } else if !field.as_name.l().is_empty() {
-            // Field has alias.
-            only_col_name(ci(&field.as_name))
-        } else {
-            // Other: field is an expression.
-            only_col_name(self.build_projection_field_name_from_expressions(field)?)
-        };
+            };
         let name = FieldName {
             tbl_name,
             orig_tbl_name,
@@ -1472,7 +2053,7 @@ impl<'ast> PlanBuilder<'ast> {
     /// buildAggregation builds a LogicalAggregation plan and returns the plan id and
     /// `aggIndexMap` (mapping input index in `agg_func_list` to deduplicated index in
     /// `plan4Agg.agg_funcs`).
-    // go: PlanBuilder.buildAggregation L2 (ROLLUP Expand is Part C; correlatedAggMap is Part D; findJoinFullSchema is D09.3; immutable AST uses agg_col_replacements)
+    // go: PlanBuilder.buildAggregation L2 (ROLLUP Expand is Part C; correlatedAggMap is Part D; the LogicalApply arm of findJoinFullSchema comes with LogicalApply; immutable AST uses agg_col_replacements)
     pub fn build_aggregation<'a>(
         &mut self,
         ctx: &mut PlanCtx<'_>,
@@ -1637,7 +2218,29 @@ impl<'ast> PlanBuilder<'ast> {
             schema4_agg.append([Arc::new(new_col)]);
             names.push(Arc::clone(&p_names[i]));
         }
-        // findJoinFullSchema: joins are blocked-by:D09.3 before reaching here.
+        // findJoinFullSchema walks through LogicalSelection wrappers and handles
+        // both LogicalJoin and LogicalApply, so USING/NATURAL JOIN redundant columns
+        // are included in the aggregate schema regardless of wrapping.
+        if let Some((full_schema, full_names)) = find_join_full_schema(&ctx.arena, p) {
+            let p_schema = schema_of(&ctx.arena, p);
+            for (i, col) in full_schema.columns.iter().enumerate() {
+                if p_schema.contains(col) {
+                    continue;
+                }
+                let new_func = new_agg_func_desc(
+                    &*ctx.expr_ctx,
+                    ast::funcs::AggFuncFirstRow,
+                    vec![PExpr::Column(Column::clone(col)).into_ref()],
+                    false,
+                )?;
+                let ret_tp = Arc::clone(&new_func.base.ret_tp);
+                plan4_agg.agg_funcs.push(new_func);
+                let mut new_col = Column::clone(col);
+                new_col.ret_type = ret_tp;
+                schema4_agg.append([Arc::new(new_col)]);
+                names.push(Arc::clone(&full_names[i]));
+            }
+        }
         let has_group_by = !gby_items.is_empty();
         for (i, agg_func) in plan4_agg.agg_funcs.iter_mut().enumerate() {
             agg_func.update_not_null_flag4_ret_type(has_group_by, all_aggs_first_row)?;
@@ -1999,7 +2602,7 @@ impl<'ast> HavingWindowAndOrderbyExprResolver<'_, 'ast> {
         false
     }
 
-    // go: havingWindowAndOrderbyExprResolver.resolveFromPlan L2 (joins and applies are blocked-by:D09.3)
+    // go: havingWindowAndOrderbyExprResolver.resolveFromPlan L2 (no LogicalMaxOneRow or LogicalApply arm yet: subqueries and the apply part)
     fn resolve_from_plan(
         &mut self,
         v: &ast::ColumnName,
@@ -2007,7 +2610,9 @@ impl<'ast> HavingWindowAndOrderbyExprResolver<'_, 'ast> {
         resolve_fields_first: bool,
     ) -> Result<isize, Error> {
         let arena = self.arena;
-        let idx = find_field_name(names_of(arena, p), v)?;
+        let mut idx = find_field_name(names_of(arena, p), v)?;
+        let (mut schema_cols, mut output_names) =
+            (&schema_of(arena, p).columns, names_of(arena, p));
         if idx < 0 {
             // For SQL like `select t2.a from t1 join t2 using(a) where t2.a > 0
             // order by t2.a`, the query plan will be `join->selection->sort`. The
@@ -2021,22 +2626,38 @@ impl<'ast> HavingWindowAndOrderbyExprResolver<'_, 'ast> {
                     let child = arena.get(p).children()[0];
                     return self.resolve_from_plan(v, child, resolve_fields_first);
                 }
-                // LogicalMaxOneRow, LogicalJoin and LogicalApply are not built yet (subqueries
-                // D09.6, joins D09.3).
+                LogicalKind::Join => {
+                    let x = arena
+                        .downcast_ref::<LogicalJoin>(p)
+                        .expect("a Join is a LogicalJoin");
+                    if !x.full_names.is_empty() {
+                        idx = find_field_name(&x.full_names, v)?;
+                        schema_cols = &x
+                            .full_schema
+                            .as_ref()
+                            .expect("a join with FullNames has a FullSchema")
+                            .columns;
+                        output_names = &x.full_names;
+                    }
+                }
+                // LogicalMaxOneRow and LogicalApply are not built yet (subqueries D09.6,
+                // the apply part of the join block).
                 _ => {}
             }
-            // nowhere to be found.
-            return Ok(-1);
+            if idx < 0 {
+                // nowhere to be found.
+                return Ok(-1);
+            }
         }
         let idx = idx as usize;
-        let col = &schema_of(arena, p).columns[idx];
+        let col = &schema_cols[idx];
         if col.is_hidden {
             return Err(ErrUnknownColumn.gen_with_stack_by_args(go_args![
                 column_name_string(v),
                 clause_msg(self.cur_clause)
             ]));
         }
-        let name = &names_of(arena, p)[idx];
+        let name = &output_names[idx];
         let new_col_name = column_name_of(name);
         for (i, field) in self.select_fields.iter().enumerate() {
             if let Some(Expr::Column(c)) = field.expr()
@@ -3192,7 +3813,7 @@ impl<'ast> PlanBuilder<'ast> {
         }
     }
 
-    // go: PlanBuilder.checkOnlyFullGroupByWithGroupClause L2 (buildJoinFuncDepend is empty for single-table queries, joins are D09.3; deterministic iteration order, M-MAPORDER)
+    // go: PlanBuilder.checkOnlyFullGroupByWithGroupClause L2 (deterministic iteration order, M-MAPORDER)
     fn check_only_full_group_by_with_group_clause(
         &self,
         arena: &PlanArena,
@@ -3283,9 +3904,8 @@ impl<'ast> PlanBuilder<'ast> {
         }
 
         let where_depends = build_where_func_depend(arena, p, sel.where_.as_ref())?;
-        // buildJoinFuncDepend: single-table queries have no join ON conditions (joins are D09.3).
-        let join_depends: HashMap<FieldNamePtr, FieldNamePtr> = HashMap::new();
         let from_ref = ResultSetRef::Join(&sel.from.as_ref().expect("sel.from").table_refs);
+        let join_depends = self.build_join_func_depend(arena, p, from_ref)?;
         let rollup = sel.group_by.as_ref().is_some_and(|g| g.rollup);
         let mut tbl_map: HashSet<usize> =
             HashSet::with_capacity(not_in_gby_or_single_value_col_names.entries.len());
@@ -3352,7 +3972,7 @@ impl<'ast> PlanBuilder<'ast> {
         Ok(())
     }
 
-    // go: PlanBuilder.checkOnlyFullGroupByWithOutGroupClause L2 (buildJoinFuncDepend is empty for single-table queries, joins are D09.3)
+    // go: PlanBuilder.checkOnlyFullGroupByWithOutGroupClause L2 (a blocked error of FindFieldName is returned, not turned into ErrMixOfGroupFuncAndFields)
     fn check_only_full_group_by_with_out_group_clause(
         &self,
         arena: &PlanArena,
@@ -3405,9 +4025,8 @@ impl<'ast> PlanBuilder<'ast> {
             &mut single_value_col_names,
         )?;
         let where_depends = build_where_func_depend(arena, p, sel.where_.as_ref())?;
-        // buildJoinFuncDepend: single-table queries have no join ON conditions (joins are D09.3).
-        let join_depends: HashMap<FieldNamePtr, FieldNamePtr> = HashMap::new();
         let from_ref = ResultSetRef::Join(&sel.from.as_ref().expect("sel.from").table_refs);
+        let join_depends = self.build_join_func_depend(arena, p, from_ref)?;
         let output_names = names_of(arena, p);
         let mut tbl_map: HashSet<usize> = HashSet::with_capacity(resolver.non_agg_cols.len());
         for (i, col_name) in resolver.non_agg_cols.iter().enumerate() {
@@ -3458,7 +4077,7 @@ impl<'ast> PlanBuilder<'ast> {
     /// - `gby_exprs` is passed to `rewrite_gby_exprs`.
     /// - `resolved_gby_items` mirrors Go's in-place update of `gby.Items[i].Expr` when `!isParam`.
     /// - `gby_col_replacements` stores inner column-alias replacements for an immutable AST.
-    // go: PlanBuilder.resolveGbyExprs L2 (immutable AST returns gby_exprs, resolved_gby_items and gby_col_replacements; findJoinFullSchema is D09.3)
+    // go: PlanBuilder.resolveGbyExprs L2 (immutable AST returns gby_exprs, resolved_gby_items and gby_col_replacements)
     #[allow(clippy::type_complexity)]
     pub fn resolve_gby_exprs(
         &mut self,
@@ -3501,8 +4120,14 @@ impl<'ast> PlanBuilder<'ast> {
         let mut exprs = Vec::with_capacity(gby.items.len());
         let mut resolved_items = Vec::with_capacity(gby.items.len());
         let mut col_replacements = HashMap::new();
-        // findJoinFullSchema: joins are blocked-by:D09.3 before reaching here.
-        let names = names_of(&ctx.arena, p);
+        let mut names = names_of(&ctx.arena, p);
+        // findJoinFullSchema walks through transparent wrappers (LogicalSelection)
+        // and handles both LogicalJoin and LogicalApply, so GROUP BY resolution sees
+        // redundant USING/NATURAL JOIN columns even when a Selection sits above the join.
+        // (The resolver reads no schema, only the names.)
+        if let Some((_, full_names)) = find_join_full_schema(&ctx.arena, p) {
+            names = full_names;
+        }
         let in_execute = ctx.vars.stmt_ctx().in_prepared_plan_building;
         let mut resolver = GbyResolver {
             ctx: &*ctx.expr_ctx,
@@ -3606,15 +4231,19 @@ impl<'ast> PlanBuilder<'ast> {
         Ok(())
     }
 
-    // go: PlanBuilder.unfoldWildStar L2 (the FullSchema of joins: joins are blocked-by:D09.3)
+    // go: PlanBuilder.unfoldWildStar L2 (no LogicalApply arm yet: the apply part)
     fn unfold_wild_star(
         &self,
         arena: &PlanArena,
         p: PlanId,
         select_fields: Vec<SelectFieldW<'ast>>,
     ) -> Result<Vec<SelectFieldW<'ast>>, Error> {
-        // Extract FullSchema/FullNames from LogicalJoin or LogicalApply (which embeds LogicalJoin):
-        // no join is built yet (D09.3), so there is none.
+        // Extract FullSchema/FullNames from LogicalJoin or LogicalApply (which embeds LogicalJoin).
+        // (There is no LogicalApply yet: the apply part of the join block.)
+        let (full_schema, full_names) = match arena.downcast_ref::<LogicalJoin>(p) {
+            Some(x) => (x.full_schema.as_ref(), Some(&x.full_names)),
+            None => (None, None),
+        };
         let mut result_list = Vec::with_capacity(select_fields.len().max(2));
         for (i, field) in select_fields.into_iter().enumerate() {
             let Some(wild_card) = field.wild_card else {
@@ -3624,8 +4253,16 @@ impl<'ast> PlanBuilder<'ast> {
             if wild_card.table.l().is_empty() && i > 0 {
                 return Err(ErrInvalidWildCard.clone());
             }
-            let list =
+            let mut list =
                 unfold_wild_star(wild_card, names_of(arena, p), &schema_of(arena, p).columns);
+            // For sql like `select t1.*, t2.* from t1 join t2 using(a)` or `select t1.*, t2.* from t1 natual join t2`,
+            // the schema of the Join doesn't contain enough columns because the join keys are coalesced in this schema.
+            // We should collect the columns from the FullSchema.
+            if let (Some(full_schema), Some(full_names)) = (full_schema, full_names)
+                && !wild_card.table.l().is_empty()
+            {
+                list = unfold_wild_star(wild_card, full_names, &full_schema.columns);
+            }
             if list.is_empty() {
                 return Err(ErrBadTable.gen_with_stack_by_args(go_args![wild_card.table.o.clone()]));
             }
@@ -4279,6 +4916,31 @@ fn clear_not_null_in_subtree(arena: &mut PlanArena, root: PlanId, target_uid: i6
                     }
                 }
                 clear_not_null_in_frame(&mut win.frame, target_uid);
+            }
+            LogicalKind::Join => {
+                // The join's conditions hold the children's columns, and `FullSchema` is a
+                // `MergeSchema` of the children's (full) schemas: Go's column copies share the
+                // `*FieldType` (`Column.Clone` is shallow), except the null-supplying side of an
+                // outer join, which `ResetNotNullFlag` copied and which has no NOT NULL flag.
+                let join = node.as_any_mut().downcast_mut::<LogicalJoin>().unwrap();
+                for cond in join
+                    .equal_conditions
+                    .iter_mut()
+                    .chain(join.na_eq_conditions.iter_mut())
+                    .chain(join.left_conditions.iter_mut())
+                    .chain(join.right_conditions.iter_mut())
+                    .chain(join.other_conditions.iter_mut())
+                {
+                    clear_not_null_in_expr(cond, target_uid);
+                }
+                if let Some(full_schema) = &mut join.full_schema {
+                    for col in &mut full_schema.columns {
+                        if col.unique_id == target_uid && has_not_null_flag(col.ret_type.get_flag())
+                        {
+                            Arc::make_mut(&mut Arc::make_mut(col).ret_type).del_flag(NotNullFlag);
+                        }
+                    }
+                }
             }
             LogicalKind::Sort => {
                 let sort = node.as_any_mut().downcast_mut::<LogicalSort>().unwrap();
@@ -6029,6 +6691,159 @@ impl<'ast> PlanBuilder<'ast> {
     }
 }
 
+/// The `defer` of `coalesceCommonColumns` that restores `checkColPriv` on every return,
+/// errors included (M-DEFER: `defer` → drop guard).
+// glue: M-DEFER drop guard for PlanBuilder.coalesceCommonColumns
+struct RestoreCheckColPriv<'a, 'ast> {
+    b: &'a mut PlanBuilder<'ast>,
+    origin: CheckSelectColumnPrivOption,
+}
+
+impl Drop for RestoreCheckColPriv<'_, '_> {
+    // glue: the deferred b.checkColPriv = originColPriv
+    fn drop(&mut self) {
+        self.b.check_col_priv = self.origin;
+    }
+}
+
+impl<'ast> std::ops::Deref for RestoreCheckColPriv<'_, 'ast> {
+    type Target = PlanBuilder<'ast>;
+    // glue: access to the builder through the guard
+    fn deref(&self) -> &PlanBuilder<'ast> {
+        self.b
+    }
+}
+
+impl std::ops::DerefMut for RestoreCheckColPriv<'_, '_> {
+    // glue: access to the builder through the guard
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.b
+    }
+}
+
+/// findJoinFullSchema walks through single-child wrapper operators (e.g., LogicalSelection
+/// created by ON clauses on inner joins) to find an underlying LogicalJoin or LogicalApply
+/// with FullSchema. This is needed because USING/NATURAL joins set FullSchema on the
+/// LogicalJoin, but when that join has an ON condition with InnerJoin type, the result is
+/// wrapped in a LogicalSelection, hiding the FullSchema from direct type assertions.
+///
+/// L2: there is no `LogicalApply` yet (the apply part of the join block, with correlated
+/// subqueries), so its arm is not here.
+// go: findJoinFullSchema L2 (no LogicalApply arm yet: the apply part)
+fn find_join_full_schema(arena: &PlanArena, mut p: PlanId) -> Option<(&Schema, &NameSlice)> {
+    loop {
+        let node = arena.get(p);
+        match node.kind() {
+            LogicalKind::Join => {
+                let x = arena
+                    .downcast_ref::<LogicalJoin>(p)
+                    .expect("a Join is a LogicalJoin");
+                return x.full_schema.as_ref().map(|s| (s, &x.full_names));
+            }
+            LogicalKind::Selection => {
+                // LogicalSelection is a transparent wrapper (e.g., from ON clauses); look through it.
+                // Do NOT walk through LogicalProjection: it represents a derived table boundary,
+                // and exposing its inner join's FullSchema would leak inner table aliases.
+                let children = node.children();
+                if children.len() != 1 {
+                    return None;
+                }
+                p = children[0];
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// containsLateralTableSource checks if a ResultSetNode contains a LATERAL table source
+/// anywhere in its subtree. Used only to decide whether to push outerSchemas before
+/// building the right side, so nested LATERAL sources can resolve outer columns.
+// go: containsLateralTableSource L1
+fn contains_lateral_table_source(node: &ast::ResultSetNode) -> bool {
+    match node {
+        ast::ResultSetNode::TableSource(n) => {
+            if n.lateral {
+                return true;
+            }
+            // Descend into the inner source (derived table / set-op) so nested
+            // LATERAL inside a subquery or set-op used as a table source is detected.
+            contains_lateral_table_source(&n.source)
+        }
+        ast::ResultSetNode::Join(n) => {
+            let left = n.left.as_ref().is_some_and(contains_lateral_table_source);
+            // For parenthesized single table refs, the parser creates Join{Left: TableSource, Right: nil}
+            match &n.right {
+                None => left,
+                // Check both sides for nested LATERAL
+                Some(right) => left || contains_lateral_table_source(right),
+            }
+        }
+        _ => false,
+    }
+}
+
+/// isImmediateLateralTableSource checks whether the top-level ResultSetNode is itself a
+/// LATERAL TableSource, without recursing into both sides of a multi-table nested join.
+/// A parenthesized single-table form (Join{Left: source, Right: nil}) is transparent and
+/// is unwrapped, but a multi-table join on the right side is not itself a LATERAL source.
+/// This is used after rightPlan is built to decide whether to produce a LogicalApply.
+///
+/// Its only caller is the LATERAL branch of `buildJoin`, which stops at
+/// `blocked-by:D09.3` until the apply part is ported, so it is unused outside tests.
+// go: isImmediateLateralTableSource L1
+#[allow(dead_code)]
+fn is_immediate_lateral_table_source(node: &ast::ResultSetNode) -> bool {
+    match node {
+        ast::ResultSetNode::TableSource(n) => n.lateral,
+        ast::ResultSetNode::Join(n) => {
+            // Parenthesized single-table ref: parser creates Join{Left: source, Right: nil}
+            if n.right.is_none() {
+                return n
+                    .left
+                    .as_ref()
+                    .is_some_and(is_immediate_lateral_table_source);
+            }
+            // A multi-table join is not itself a single LATERAL source
+            false
+        }
+        _ => false,
+    }
+}
+
+/// findColFromNaturalUsingJoin is used to recursively find the column from the
+/// underlying natural-using-join.
+/// e.g. For SQL like `select t2.a from t1 join t2 using(a) where t2.a > 0`, the
+/// plan will be `join->selection->projection`. The schema of the `selection`
+/// will be `[t1.a]`, thus we need to recursively retrieve the `t2.a` from the
+/// underlying join.
+///
+/// L2: there is no `LogicalMaxOneRow` yet (subqueries, D09.6). A column missing from the
+/// full schema panics, as Go's index -1 does.
+// go: findColFromNaturalUsingJoin L2 (no LogicalMaxOneRow arm yet: subqueries)
+fn find_col_from_natural_using_join(
+    arena: &PlanArena,
+    p: PlanId,
+    col: &Column,
+) -> Option<Arc<FieldName>> {
+    let node = arena.get(p);
+    match node.kind() {
+        LogicalKind::Limit | LogicalKind::Selection | LogicalKind::TopN | LogicalKind::Sort => {
+            find_col_from_natural_using_join(arena, node.children()[0], col)
+        }
+        LogicalKind::Join => {
+            let x = arena
+                .downcast_ref::<LogicalJoin>(p)
+                .expect("a Join is a LogicalJoin");
+            let full_schema = x.full_schema.as_ref()?;
+            let idx = full_schema.column_index(col);
+            Some(Arc::clone(
+                &x.full_names[usize::try_from(idx).expect("the column is in the full schema")],
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// The table hints of a query block (Go's `*h.PlanHints`): there are none here, because
 /// `buildSelect` stops at any table hint (`blocked-by:D13.3`).
 #[derive(Debug)]
@@ -6132,6 +6947,49 @@ mod tests {
         b.visit_info.clear();
         b.pop_visit_info();
         assert!(b.visit_info.is_empty());
+    }
+
+    /// containsLateralTableSource looks into every subtree; isImmediateLateralTableSource
+    /// only through the parenthesized single-table form (Go `:683-724`).
+    #[test]
+    fn lateral_table_source_detection() {
+        let ts = |lateral: bool| {
+            ast::ResultSetNode::TableSource(Box::new(ast::TableSource {
+                source: ast::ResultSetNode::TableName(Box::default()),
+                as_name: ast::CIStr::default(),
+                lateral,
+            }))
+        };
+        let join = |left: ast::ResultSetNode, right: Option<ast::ResultSetNode>| {
+            ast::ResultSetNode::Join(Box::new(ast::Join {
+                left: Some(left),
+                right,
+                ..ast::Join::default()
+            }))
+        };
+        assert!(!contains_lateral_table_source(&ts(false)));
+        assert!(contains_lateral_table_source(&ts(true)));
+        assert!(is_immediate_lateral_table_source(&ts(true)));
+        // Parenthesized single table: transparent for both.
+        let paren = join(ts(true), None);
+        assert!(contains_lateral_table_source(&paren));
+        assert!(is_immediate_lateral_table_source(&paren));
+        // A LATERAL nested in a multi-table join: contained, not immediate.
+        let nested = join(ts(false), Some(ts(true)));
+        assert!(contains_lateral_table_source(&nested));
+        assert!(!is_immediate_lateral_table_source(&nested));
+        assert!(!contains_lateral_table_source(&join(
+            ts(false),
+            Some(ts(false))
+        )));
+        // A LATERAL inside a derived table's source.
+        let derived = ast::ResultSetNode::TableSource(Box::new(ast::TableSource {
+            source: join(ts(false), Some(ts(true))),
+            as_name: ast::CIStr::default(),
+            lateral: false,
+        }));
+        assert!(contains_lateral_table_source(&derived));
+        assert!(!is_immediate_lateral_table_source(&derived));
     }
 
     #[test]

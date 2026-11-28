@@ -12,7 +12,9 @@ use tidb_expr_pushdown::infer_pushdown::{
 use tidb_kv::kv::Client;
 use tidb_privilege::PrivilegeManagerRef;
 use tidb_sessionctx::context::InstancePlanCache;
-use tidb_sessionctx::exprctx::{BuildContextRef, EvalContextRef, ExprContext, ExprContextRef};
+use tidb_sessionctx::exprctx::{
+    BuildContextRef, EvalContextRef, ExprContext, ExprContextRef, with_null_reject_check,
+};
 use tidb_sessionctx::ranger::context::RangerContext;
 use tidb_sessionctx::variable::session::SessionVars;
 
@@ -151,6 +153,18 @@ impl<'s> PlanCtx<'s> {
             self.vars,
             Arc::clone(client),
         ))
+    }
+
+    /// `p.SCtx().GetNullRejectCheckExprCtx()`: the expression context wrapped by
+    /// `exprctx.WithNullRejectCheck`, which the null-reject proof (`util.IsNullRejected`)
+    /// evaluates with.
+    ///
+    /// L2: Go's `PlanCtxExtended` builds the wrapper once in `NewPlanCtxExtended` and asserts
+    /// the wrapped context stays `sctx.GetExprCtx()`; here it wraps the statement's
+    /// `expr_ctx` on each call (the wrapper holds no state, so the contexts are equal).
+    // go: PlanCtxExtended.GetNullRejectCheckExprCtx L2
+    pub fn get_null_reject_check_expr_ctx(&self) -> BuildContextRef {
+        Arc::new(with_null_reject_check(Arc::clone(&self.expr_ctx)))
     }
 
     /// `p.SCtx().GetExprCtx().GetEvalCtx()`.

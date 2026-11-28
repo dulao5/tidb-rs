@@ -75,6 +75,24 @@ pub trait InfoSchemaLookup: Send + Sync {
     fn snapshot(&self) -> Arc<dyn InfoSchemaLookup>;
 }
 
+/// TableIsView indicates whether the schema.table is a view.
+///
+/// L2: the `InfoSchema` interface is the planner's [`InfoSchemaLookup`]. Go treats every
+/// `TableByName` error as "not a view"; a `blocked` lookup error (an InfoSchema part not
+/// ported yet) is returned instead, so the answer never silently differs from Go's.
+// go: pkg/infoschema/infoschema.go TableIsView L2 (InfoSchemaLookup; a blocked lookup error is returned)
+pub fn table_is_view(
+    is: &dyn InfoSchemaLookup,
+    schema: &CIStr,
+    table: &CIStr,
+) -> Result<bool, Error> {
+    match is.table_by_name(schema, table) {
+        Ok(tbl) => Ok(tbl.is_view()),
+        Err(e) if tidb_base::blocked::blocked_by(&e).is_some() => Err(e),
+        Err(_) => Ok(false),
+    }
+}
+
 /// The error of a table that is in the InfoSchema but not in its table cache: loading it
 /// reads TiKV, which the synchronous planner does not do (D06.3 spec §11.2).
 // glue: the cache miss of a synchronous table lookup

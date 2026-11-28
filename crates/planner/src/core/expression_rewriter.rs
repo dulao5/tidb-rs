@@ -2253,10 +2253,10 @@ fn set_type_collate(e: &mut ExprRef, collate: &str) {
 /// findFieldNameFromNaturalUsingJoin.
 ///
 /// Walks down Limit / Selection / TopN / Sort to a join's full schema (the merged columns
-/// of NATURAL JOIN / USING). Joins are D09.3: no plan reaches one yet, so the walk ends at
-/// the first other operator with Go's "not found" (spec §4).
-// go: findFieldNameFromNaturalUsingJoin L2 (joins are blocked-by:D09.3; MaxOneRow and Apply come with D09.3 / D09.6)
-#[allow(clippy::only_used_in_recursion)] // the join arm (D09.3) reads `v`
+/// of NATURAL JOIN / USING). `LogicalMaxOneRow` (built only for subqueries, D09.6) and
+/// `LogicalApply` (the join builder's part C, with D09.6) are not ported: no plan holds one
+/// yet, so their arms come with them.
+// go: findFieldNameFromNaturalUsingJoin L2 (no LogicalMaxOneRow / LogicalApply arm yet, see above)
 pub fn find_field_name_from_natural_using_join(
     arena: Option<&PlanArena>,
     p: Option<PlanId>,
@@ -2269,6 +2269,22 @@ pub fn find_field_name_from_natural_using_join(
     match plan.kind() {
         LogicalKind::Limit | LogicalKind::Selection | LogicalKind::TopN | LogicalKind::Sort => {
             find_field_name_from_natural_using_join(Some(arena), Some(plan.children()[0]), v)
+        }
+        LogicalKind::Join => {
+            let x = plan
+                .as_any()
+                .downcast_ref::<crate::logicalop::LogicalJoin>()
+                .expect("LogicalJoin");
+            if let Some(full_schema) = &x.full_schema {
+                let idx = tidb_expression::simple_rewriter::find_field_name(&x.full_names, v)?;
+                if idx >= 0 {
+                    return Ok(Some((
+                        Arc::new(Expr::Column((*full_schema.columns[idx as usize]).clone())),
+                        Arc::clone(&x.full_names[idx as usize]),
+                    )));
+                }
+            }
+            Ok(None)
         }
         _ => Ok(None),
     }

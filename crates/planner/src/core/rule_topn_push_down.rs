@@ -23,7 +23,7 @@ impl LogicalOptRule for PushDownTopNOptimizer {
         opt: &LogicalOptimizeOp,
     ) -> Result<(PlanId, bool), Error> {
         let plan_changed = false;
-        Ok((base::push_down_top_n(ctx, p, None, opt), plan_changed))
+        Ok((base::push_down_top_n(ctx, p, None, opt)?, plan_changed))
     }
 
     /// Name implements the base.LogicalOptRule.<1st> interface.

@@ -51,11 +51,11 @@ impl LogicalOptRule for ConstantPropagationSolver {
     ) -> Result<(PlanId, bool), Error> {
         let plan_changed = false;
         // constant propagation root plan
-        let new_root = dispatch_constant_propagation(ctx, p, None, 0, opt);
+        let new_root = dispatch_constant_propagation(ctx, p, None, 0, opt)?;
         // recursive optimize
         let children = ctx.arena.get(p).children().to_vec();
         for (i, child) in children.into_iter().enumerate() {
-            self.exec_optimize(ctx, child, Some(p), i, opt);
+            self.exec_optimize(ctx, child, Some(p), i, opt)?;
         }
         match new_root {
             None => Ok((p, plan_changed)),
@@ -80,17 +80,18 @@ impl ConstantPropagationSolver {
         parent_plan: Option<PlanId>,
         current_child_idx: usize,
         opt: &LogicalOptimizeOp,
-    ) {
+    ) -> Result<(), Error> {
         if parent_plan.is_none() {
             // Attention: The function 'execOptimize' could not handle the root plan, so the parent plan could not be nil.
-            return;
+            return Ok(());
         }
         // constant propagation
-        dispatch_constant_propagation(ctx, current_plan, parent_plan, current_child_idx, opt);
+        dispatch_constant_propagation(ctx, current_plan, parent_plan, current_child_idx, opt)?;
         // recursive optimize
         let children = ctx.arena.get(current_plan).children().to_vec();
         for (i, child) in children.into_iter().enumerate() {
-            self.exec_optimize(ctx, child, Some(current_plan), i, opt);
+            self.exec_optimize(ctx, child, Some(current_plan), i, opt)?;
         }
+        Ok(())
     }
 }

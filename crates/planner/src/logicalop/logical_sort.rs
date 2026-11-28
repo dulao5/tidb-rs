@@ -112,7 +112,7 @@ impl LogicalPlan for LogicalSort {
         this: PlanId,
         top_n: Option<PlanId>,
         opt: &LogicalOptimizeOp,
-    ) -> PlanId {
+    ) -> Result<PlanId, Error> {
         let Some(top_n) = top_n else {
             return crate::logicalop::base_logical_plan::push_down_top_n(
                 self, ctx, this, None, opt,
