@@ -375,11 +375,18 @@ impl SysVar {
         Ok(())
     }
 
-    /// GetGlobalFromHook calls the GetSession func if it exists.
-    // go: SysVar.GetGlobalFromHook L2 (no context argument: the read-path getters do not use it)
+    /// GetGlobalFromHook calls the GetGlobal func if it exists.
+    // go: SysVar.GetGlobalFromHook L2 (no context argument; bypasses process-wide atomics when GlobalVarAccessor::uses_cached_globals is true, #539)
     pub fn get_global_from_hook(&self, s: &mut SessionVars) -> Result<String, Error> {
         // Call the Getter if there is one defined.
         if let Some(get_global) = self.get_global {
+            if s.global_vars_accessor.uses_cached_globals()
+                && self.has_global_scope()
+                && !self.skip_sysvar_cache()
+            {
+                let val = s.global_vars_accessor.get_global_sys_var(self.name)?;
+                return Ok(self.redact_cached_global(val));
+            }
             let val = get_global(s)?;
             // Ensure that the results from the getter are validated
             // Since some are read directly from tables.
@@ -389,6 +396,23 @@ impl SysVar {
             return Ok(self.value.clone());
         }
         s.global_vars_accessor.get_global_sys_var(self.name)
+    }
+
+    /// Apply Go's `GetGlobal` redaction/masking when returning a cluster-cached global value
+    /// directly without invoking the process-state `GetGlobal` hook.
+    // glue: mirrors masking/redaction in gg_authentication_ldap_*_bind_root_pwd and gg_tidb_cloud_storage_uri
+    fn redact_cached_global(&self, val: String) -> String {
+        if val.is_empty() {
+            return val;
+        }
+        match self.name {
+            "authentication_ldap_sasl_bind_root_pwd"
+            | "authentication_ldap_simple_bind_root_pwd" => {
+                super::session_hooks_ext::MaskPwd.to_owned()
+            }
+            "tidb_cloud_storage_uri" => tidb_parser::ast_misc::redact_url(&val),
+            _ => val,
+        }
     }
 
     /// GetSessionFromHook calls the GetSession func if it exists.

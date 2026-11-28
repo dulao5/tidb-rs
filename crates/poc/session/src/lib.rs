@@ -1285,10 +1285,7 @@ fn check_set(
                 }
                 return Err(SqlError::not_supported("SET GLOBAL"));
             }
-            if sys_var.is_noop
-                && !tidb_sessionctx::variable::tidb_vars::EnableNoopVariables
-                    .load(std::sync::atomic::Ordering::SeqCst)
-            {
+            if sys_var.is_noop && !vars.is_noop_variables_enabled() {
                 // The variable is a noop. For compatibility we allow it to still
                 // be changed, but we append a warning since users might be expecting
                 // something that's not going to happen.
@@ -3169,5 +3166,180 @@ mod fence_tests {
         let stmt4 = tidb_sql::parse_and_lower_with(r#"SELECT "abc""#, &opts(&s)).unwrap();
         let err = eval_const_select(&mut s, &stmt4).unwrap_err();
         assert_eq!(err.code, 1054, "{}", err.message);
+    }
+
+    /// Walks every registered system variable with a `GetGlobal` hook and verifies that
+    /// `ClusterGlobals` (which rebuilds `SysVarCache` without running `SetGlobal` hooks, #539)
+    /// returns the cluster value from `SysVarCache` for all `ScopeGlobal` (`!skip_sysvar_cache`)
+    /// variables instead of unpopulated process-wide atomics, while still applying Go redaction
+    /// (`authentication_ldap_*_bind_root_pwd`, `tidb_cloud_storage_uri`) and keeping `GetGlobal`
+    /// hooks for `skip_sysvar_cache` (`mysql.tidb` GC vars) and `ScopeInstance` variables.
+    #[test]
+    fn get_global_hooks_read_cluster_cache_not_process_state() {
+        use tidb_sessionctx::variable::{ScopeGlobal, get_sys_vars};
+
+        // 1. Default cluster cache (empty `mysql.global_variables`): every `ScopeGlobal`
+        //    variable with a `GetGlobal` hook (!skip_sysvar_cache) must match its validated
+        //    compiled default rather than tidb-rs's unpopulated process atomics.
+        let mut defaults = validation_session(&[]);
+        let mut global_cached_count = 0usize;
+        let mut skip_cache_count = 0usize;
+        let mut instance_count = 0usize;
+
+        for sv in get_sys_vars().filter(|sv| sv.get_global.is_some()) {
+            let got = defaults
+                .vars_mut()
+                .get_global_system_var(sv.name)
+                .unwrap_or_else(|e| panic!("get_global_system_var({}) failed: {e}", sv.name));
+            if sv.has_global_scope() && !sv.skip_sysvar_cache() {
+                global_cached_count += 1;
+                let want = sv.validate_with_relaxed_validation(
+                    defaults.vars_mut(),
+                    &sv.value,
+                    ScopeGlobal,
+                );
+                assert_eq!(
+                    got, want,
+                    "ScopeGlobal var `{}` read process state instead of cached default",
+                    sv.name
+                );
+            } else if sv.skip_sysvar_cache() {
+                skip_cache_count += 1;
+            } else {
+                instance_count += 1;
+            }
+        }
+        assert!(
+            global_cached_count >= 100,
+            "expected >=100 ScopeGlobal GetGlobal vars, saw {global_cached_count}"
+        );
+        assert_eq!(skip_cache_count, 6); // 5 tidb_gc_* + tidb_external_ts
+        assert!(
+            instance_count >= 25,
+            "expected >=25 ScopeInstance GetGlobal vars, saw {instance_count}"
+        );
+
+        // Pin every variable from Maya's Go v8.5.8 live comparison table on default cache.
+        for (name, want) in [
+            ("tidb_enable_resource_control", "ON"),
+            ("tidb_server_memory_limit", "80%"),
+            ("tidb_server_memory_limit_gc_trigger", "0.7"),
+            ("tidb_enable_instance_plan_cache", "ON"), // Ruling R14 (A3 default override)
+            ("tidb_enable_dist_task", "ON"),
+            ("tidb_ddl_enable_fast_reorg", "ON"),
+            ("authentication_ldap_sasl_auth_method_name", "SCRAM-SHA-1"),
+            ("authentication_ldap_sasl_server_port", "389"),
+            ("authentication_ldap_sasl_user_search_attr", "uid"),
+            ("authentication_ldap_sasl_init_pool_size", "10"),
+            ("authentication_ldap_sasl_max_pool_size", "1000"),
+            ("authentication_ldap_simple_server_port", "389"),
+            ("authentication_ldap_simple_user_search_attr", "uid"),
+            ("authentication_ldap_simple_init_pool_size", "10"),
+            ("authentication_ldap_simple_max_pool_size", "1000"),
+        ] {
+            assert_eq!(
+                defaults.vars_mut().get_global_system_var(name).unwrap(),
+                want,
+                "{name}"
+            );
+        }
+
+        // 2. Overridden cluster `mysql.global_variables` rows (never invoking `SetGlobal` hooks):
+        //    must reflect cluster values for `@@global.<var>`, `@@<var>`, `SHOW VARIABLES`,
+        //    and redact passwords/URIs matching Go's `GetGlobal` hooks.
+        let mut cluster = validation_session(&[
+            ("tidb_enable_dist_task", "OFF"),
+            ("tidb_ddl_enable_fast_reorg", "OFF"),
+            ("tidb_enable_instance_plan_cache", "OFF"),
+            ("tidb_enable_resource_control", "OFF"),
+            ("tidb_server_memory_limit", "4GiB"),
+            ("tidb_server_memory_limit_gc_trigger", "0.5"),
+            ("tidb_enable_noop_variables", "OFF"),
+            ("authentication_ldap_sasl_server_port", "636"),
+            ("authentication_ldap_sasl_bind_root_pwd", "top-secret-sasl"),
+            (
+                "authentication_ldap_simple_bind_root_pwd",
+                "top-secret-simple",
+            ),
+            (
+                "tidb_cloud_storage_uri",
+                "s3://bucket/prefix?access-key=AKIAEXAMPLE&secret-access-key=SECRET123",
+            ),
+        ]);
+        for (name, want) in [
+            ("tidb_enable_dist_task", "OFF"),
+            ("tidb_ddl_enable_fast_reorg", "OFF"),
+            ("tidb_enable_instance_plan_cache", "OFF"),
+            ("tidb_enable_resource_control", "OFF"),
+            ("tidb_server_memory_limit", "4GiB"),
+            ("tidb_server_memory_limit_gc_trigger", "0.5"),
+            ("tidb_enable_noop_variables", "OFF"),
+            ("authentication_ldap_sasl_server_port", "636"),
+            ("authentication_ldap_sasl_bind_root_pwd", "******"),
+            ("authentication_ldap_simple_bind_root_pwd", "******"),
+        ] {
+            assert_eq!(
+                cluster.vars_mut().get_global_system_var(name).unwrap(),
+                want,
+                "@@global.{name}"
+            );
+            assert_eq!(
+                cluster
+                    .vars_mut()
+                    .get_session_or_global_system_var(name)
+                    .unwrap(),
+                want,
+                "@@{name}"
+            );
+        }
+        let redacted_uri = cluster
+            .vars_mut()
+            .get_global_system_var("tidb_cloud_storage_uri")
+            .unwrap();
+        assert!(
+            redacted_uri.starts_with("s3://bucket/prefix"),
+            "unexpected redacted uri: {redacted_uri}"
+        );
+        assert!(
+            !redacted_uri.contains("SECRET123"),
+            "cloud storage secret leaked: {redacted_uri}"
+        );
+        assert!(!cluster.vars_mut().is_noop_variables_enabled());
+
+        // `SHOW GLOBAL VARIABLES LIKE 'tidb_server_memory_limit%'` sees the cluster values too.
+        let mut warnings = Vec::new();
+        let rs = show::show_variables(
+            cluster.vars_mut(),
+            true,
+            Some(&tidb_sql::ir::ShowExpr::Literal(Literal::Str(
+                "tidb_server_memory_limit%".into(),
+            ))),
+            None,
+            &[],
+            "8.0.11-TiDB-v8.5.8",
+            "DISABLED",
+            &mut warnings,
+        )
+        .unwrap();
+        let map: HashMap<String, String> = rs
+            .rows
+            .into_iter()
+            .map(|r| match (&r[0], &r[1]) {
+                (Value::Bytes(k), Value::Bytes(v)) => (
+                    String::from_utf8(k.clone()).unwrap(),
+                    String::from_utf8(v.clone()).unwrap(),
+                ),
+                other => panic!("unexpected row {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            map.get("tidb_server_memory_limit").map(String::as_str),
+            Some("4GiB")
+        );
+        assert_eq!(
+            map.get("tidb_server_memory_limit_gc_trigger")
+                .map(String::as_str),
+            Some("0.5")
+        );
     }
 }

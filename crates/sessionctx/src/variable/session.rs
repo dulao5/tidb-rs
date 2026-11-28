@@ -56,6 +56,14 @@ pub trait GlobalVarAccessor: Send {
     fn session_cache(&self) -> Option<Result<HashMap<String, String>, Error>> {
         None
     }
+    /// True when global values come from a sysvar cache rebuilt without running `SetGlobal`
+    /// hooks (#539). `SysVar::get_global_from_hook` then reads `ScopeGlobal` variables
+    /// (`!skip_sysvar_cache()`) from `get_global_sys_var` instead of process-wide atomics
+    /// that were never populated by `SetGlobal`.
+    // glue: read cluster global values from SysVarCache when SetGlobal hooks are disabled (#539, #541)
+    fn uses_cached_globals(&self) -> bool {
+        false
+    }
 }
 
 /// The fields of `SessionVars` the D05.1 validation hooks use.
@@ -458,6 +466,19 @@ impl SessionVars {
             );
         };
         sv.get_global_from_hook(self)
+    }
+
+    /// Whether noop variables are enabled: reads `tidb_enable_noop_variables` from the cluster
+    /// sysvar cache when `SetGlobal` hooks are not executed (#539), otherwise reads the
+    /// process-wide atomic directly as Go does.
+    // glue: reads tidb_enable_noop_variables from SysVarCache when SetGlobal hooks are disabled (#539, #541)
+    pub fn is_noop_variables_enabled(&mut self) -> bool {
+        if self.global_vars_accessor.uses_cached_globals()
+            && let Ok(v) = self.get_global_system_var("tidb_enable_noop_variables")
+        {
+            return super::varsutil::tidb_opt_on(&v);
+        }
+        super::tidb_vars::EnableNoopVariables.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// SetSystemVar sets the value of a system variable for session scope.

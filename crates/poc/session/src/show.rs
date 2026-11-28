@@ -3,14 +3,11 @@
 
 #![allow(non_upper_case_globals)]
 
-use std::sync::atomic::Ordering::SeqCst;
-
 use tidb_base::contextutil::SQLWarn;
 use tidb_base::mysql::DefaultCollationName;
 use tidb_mysql_protocol::constants::collation;
 use tidb_mysql_protocol::{ColumnDef, ColumnType, ResultSet, SqlError, Value};
 use tidb_sessionctx::variable::session::SessionVars;
-use tidb_sessionctx::variable::tidb_vars::EnableNoopVariables;
 use tidb_sessionctx::variable::{ScopeSession, get_sys_vars};
 use tidb_sql::ir::{ColumnName, Literal, ShowBinaryOp, ShowExpr, ShowUnaryOp};
 use tidb_types::collate::{BinPaddingCollator, Collator};
@@ -121,7 +118,7 @@ pub(crate) fn show_variables(
 
     let [mut name_col, mut val_col] = show_variables_columns();
 
-    let enable_noop = EnableNoopVariables.load(SeqCst);
+    let enable_noop = vars.is_noop_variables_enabled();
     let mut svs: Vec<_> = get_sys_vars()
         .filter(|sv| {
             if global && sv.scope == ScopeSession {

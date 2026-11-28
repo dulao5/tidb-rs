@@ -175,6 +175,10 @@ impl GlobalVarAccessor for ClusterGlobals {
         }
         Some(Ok(self.cache.session_cache()))
     }
+    // glue: SysVarSync::rebuild skips SetGlobal hooks (#539), so ScopeGlobal reads come from SysVarCache
+    fn uses_cached_globals(&self) -> bool {
+        true
+    }
 }
 
 /// The ported stack of one connection.

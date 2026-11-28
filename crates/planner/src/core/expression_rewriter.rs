@@ -1429,10 +1429,7 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
             }
             return Err(err);
         };
-        if sys_var.is_noop
-            && !tidb_sessionctx::variable::tidb_vars::EnableNoopVariables
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if sys_var.is_noop && !vars.is_noop_variables_enabled() {
             // The variable does nothing, append a warning to the statement output.
             vars.stmt_ctx().append_warning(
                 tidb_base::dbterror::plannererrors::ErrGettingNoopVariable

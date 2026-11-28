@@ -81,10 +81,7 @@ pub(crate) fn eval_sysvar_datum(
     check_system_variable(name, global, explicit_scope)?;
     let sys_var = tidb_sessionctx::variable::get_sys_var(name)
         .expect("check_system_variable ensures registered");
-    if sys_var.is_noop
-        && !tidb_sessionctx::variable::tidb_vars::EnableNoopVariables
-            .load(std::sync::atomic::Ordering::SeqCst)
-    {
+    if sys_var.is_noop && !vars.is_noop_variables_enabled() {
         warnings.push(SQLWarn {
             level: WarnLevelWarning.into(),
             err: ErrGettingNoopVariable.fast_gen_by_args(go_args![sys_var.name.to_owned()]),
@@ -170,8 +167,7 @@ impl ConstEnv<'_> {
                 check_system_variable(name, *global, *explicit_scope)?;
                 if let Some(sv) = tidb_sessionctx::variable::get_sys_var(name)
                     && sv.is_noop
-                    && !tidb_sessionctx::variable::tidb_vars::EnableNoopVariables
-                        .load(std::sync::atomic::Ordering::SeqCst)
+                    && !self.vars.is_noop_variables_enabled()
                 {
                     // The variable does nothing, append a warning to the statement output.
                     self.warnings.push(SQLWarn {
