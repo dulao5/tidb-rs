@@ -3889,7 +3889,8 @@ CharsetName -> String:
         match crate::charset::get_charset_info(&$1) {
             Ok((name, _)) => name.to_string(),
             Err(_) => {
-                p.fail(format!("Unknown character set: '{}'", $1), $span.start());
+                // `ErrUnknownCharacterSet` (1115).
+                p.fail_code(1115, format!("Unknown character set: '{}'", $1), $span.start());
                 String::new()
             }
         }
@@ -3901,7 +3902,8 @@ CollationName -> String:
         match crate::charset::get_collation_by_name(&$1) {
             Some(name) => name.to_string(),
             None => {
-                p.fail(format!("Unknown collation: '{}'", $1), $span.start());
+                // `charset.GetCollationByName`'s `ErrUnknownCollation` (1273).
+                p.fail_code(1273, format!("Unknown collation: '{}'", $1), $span.start());
                 String::new()
             }
         }

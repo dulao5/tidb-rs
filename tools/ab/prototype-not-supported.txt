@@ -76,6 +76,7 @@ reading system variable '.*' \(the prototype answers only the variables clients 
 reading the virtual generated column '.*'
 returning value .*
 setting system variable '.*'
+sql_select_limit other than 18446744073709551615 \(the prototype applies no select limit\)
 subqueries
 table scan without columns
 these index hints

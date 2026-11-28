@@ -16,7 +16,10 @@ use tidb_sql::ir::Select;
 use tidb_sql::ranges::eval_const;
 
 use crate::router::sql_error;
+use tidb_base::contextutil::{SQLWarn, WarnLevelWarning};
+use tidb_base::dbterror::plannererrors::ErrGettingNoopVariable;
 use tidb_base::go_args;
+use tidb_sessionctx::variable::session::SessionVars;
 
 /// Comment returned for `@@version_comment` (shown by the `mysql` CLI banner).
 pub const VERSION_COMMENT: &str =
@@ -33,20 +36,67 @@ pub struct ConstEnv<'a> {
     pub connection_id: u64,
     pub have_ssl: &'a str,
     pub autocommit: bool,
-    /// `@@character_set_results` etc. as set by `SET NAMES`.
-    pub charset: &'a str,
-    pub collation: &'a str,
     /// `@@last_plan_from_cache` / `@@last_plan_from_binding`: the previous statement's, as
     /// the router recorded it (VS1 plan §4.5; the PoC's own statements never use a cache).
     pub last_plan_from_cache: bool,
     pub last_plan_from_binding: bool,
+    /// The prototype's session variables (`Session::default_session`): the session values its
+    /// `SET`s and the handshake gave them, over the cluster's global values.
+    pub vars: &'a mut SessionVars,
+    /// The statement's warnings (Go's `StmtCtx`).
+    pub warnings: &'a mut Vec<SQLWarn>,
 }
 
+/// The system variables the prototype reads from its session variables
+/// ([`ConstEnv::vars`]): the ones clients read while connecting (Connector/J, Connector/Python,
+/// Go-MySQL-Driver, the `mysql` client) and the ones the prototype's `SET` accepts. Any other
+/// variable Go knows is not supported (1235): its Go value may come from state the prototype
+/// does not keep (a statement's, a startup setting's).
+pub const READ_FROM_SESSION: &[&str] = &[
+    "auto_increment_increment",
+    "auto_increment_offset",
+    "character_set_client",
+    "character_set_connection",
+    "character_set_database",
+    "character_set_results",
+    "character_set_server",
+    "collation_connection",
+    "collation_database",
+    "collation_server",
+    "foreign_key_checks",
+    "group_concat_max_len",
+    "init_connect",
+    "innodb_lock_wait_timeout",
+    "interactive_timeout",
+    "license",
+    "lower_case_table_names",
+    "max_allowed_packet",
+    "max_execution_time",
+    "net_buffer_length",
+    "net_read_timeout",
+    "net_write_timeout",
+    "performance_schema",
+    "query_cache_size",
+    "query_cache_type",
+    "sql_mode",
+    "sql_safe_updates",
+    "sql_select_limit",
+    "system_time_zone",
+    "time_zone",
+    "transaction_isolation",
+    "transaction_read_only",
+    "tx_isolation",
+    "tx_read_only",
+    "unique_checks",
+    "wait_timeout",
+];
+
 impl ConstEnv<'_> {
-    /// The few system variables clients read while connecting, with TiDB's defaults and
-    /// result types (Go `SysVar.GetNativeValType`: unsigned and boolean variables are
-    /// LONGLONG, everything else a string in the connection charset).
-    fn sysvar(&self, name: &str) -> Option<(ColumnDef, Value)> {
+    /// The value of `@@[global.]name` and its column, with Go's result types (Go
+    /// `SysVar.GetNativeValType`: unsigned and boolean variables are LONGLONG, everything else
+    /// a string in the connection charset). `None` for a variable the prototype does not
+    /// answer.
+    fn sysvar(&mut self, name: &str, global: bool) -> Result<Option<(ColumnDef, Value)>, SqlError> {
         let unsigned = |v: u64| {
             let col = ColumnDef::new("", ColumnType::LongLong).with_flags(column_flag::UNSIGNED);
             Some((col, Value::UInt(v)))
@@ -63,34 +113,42 @@ impl ConstEnv<'_> {
                 .with_decimals(31);
             Some((col, Value::from(v)))
         };
+        // The prototype's own state.
         match name {
-            "version_comment" => string(VERSION_COMMENT),
-            "version" => string(self.server_version),
-            "max_allowed_packet" => unsigned(64 << 20),
-            "wait_timeout" | "interactive_timeout" => unsigned(28800),
-            "net_write_timeout" => unsigned(60),
-            "net_read_timeout" => unsigned(30),
-            "auto_increment_increment" | "auto_increment_offset" => unsigned(1),
-            "autocommit" => boolean(self.autocommit),
-            "last_plan_from_cache" => boolean(self.last_plan_from_cache),
-            "last_plan_from_binding" => boolean(self.last_plan_from_binding),
-            "transaction_read_only" | "tx_read_only" => boolean(false),
-            "lower_case_table_names" => string("2"),
-            "transaction_isolation" | "tx_isolation" => string("REPEATABLE-READ"),
-            "character_set_client" | "character_set_connection" | "character_set_results" => {
-                string(self.charset)
-            }
-            "character_set_server" | "character_set_database" => string("utf8mb4"),
-            "collation_connection" => string(self.collation),
-            "collation_server" | "collation_database" => string("utf8mb4_bin"),
-            "time_zone" | "system_time_zone" => string("SYSTEM"),
-            "have_ssl" | "have_openssl" => string(self.have_ssl),
-            "license" => string("Apache License 2.0"),
-            "sql_mode" => string(
-                "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
-            ),
-            _ => None,
+            "version_comment" => return Ok(string(VERSION_COMMENT)),
+            "version" => return Ok(string(self.server_version)),
+            "autocommit" => return Ok(boolean(self.autocommit)),
+            "last_plan_from_cache" => return Ok(boolean(self.last_plan_from_cache)),
+            "last_plan_from_binding" => return Ok(boolean(self.last_plan_from_binding)),
+            "have_ssl" | "have_openssl" => return Ok(string(self.have_ssl)),
+            _ => {}
         }
+        if !READ_FROM_SESSION.contains(&name) {
+            return Ok(None);
+        }
+        let Some(sys_var) = tidb_sessionctx::variable::get_sys_var(name) else {
+            return Ok(None);
+        };
+        // Go's `rewriteSystemVariable` (expression_rewriter.go:1829-1842).
+        let val = if sys_var.has_none_scope() {
+            sys_var.value.clone()
+        } else if global {
+            self.vars
+                .get_global_system_var(name)
+                .map_err(|e| sql_error(&e))?
+        } else {
+            self.vars
+                .get_session_or_global_system_var(name)
+                .map_err(|e| sql_error(&e))?
+        };
+        let (native, tp, flag) = sys_var.get_native_val_type(&val);
+        Ok(match tp {
+            tidb_base::mysql::TypeLonglong if flag & tidb_base::mysql::UnsignedFlag != 0 => {
+                unsigned(native.get_uint64())
+            }
+            tidb_base::mysql::TypeLonglong => boolean(native.get_int64() != 0),
+            _ => string(&val),
+        })
     }
 
     fn func(&self, name: &str) -> Option<(ColumnDef, Value)> {
@@ -118,7 +176,7 @@ impl ConstEnv<'_> {
         }
     }
 
-    fn item(&self, e: &Expr, params: &[Literal]) -> Result<(ColumnDef, Value), SqlError> {
+    fn item(&mut self, e: &Expr, params: &[Literal]) -> Result<(ColumnDef, Value), SqlError> {
         let unsupported = || SqlError::not_supported("this expression in a SELECT without FROM");
         match e {
             Expr::SysVar {
@@ -127,7 +185,18 @@ impl ConstEnv<'_> {
                 explicit_scope,
             } => {
                 check_system_variable(name, *global, *explicit_scope)?;
-                self.sysvar(name).ok_or_else(|| {
+                if let Some(sv) = tidb_sessionctx::variable::get_sys_var(name)
+                    && sv.is_noop
+                    && !tidb_sessionctx::variable::tidb_vars::EnableNoopVariables
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    // The variable does nothing, append a warning to the statement output.
+                    self.warnings.push(SQLWarn {
+                        level: WarnLevelWarning.into(),
+                        err: ErrGettingNoopVariable.fast_gen_by_args(go_args![sv.name.to_owned()]),
+                    });
+                }
+                self.sysvar(name, *global)?.ok_or_else(|| {
                     SqlError::not_supported(format!(
                         "reading system variable '{name}' (the prototype answers only the \
                          variables clients read while connecting)"
@@ -147,7 +216,7 @@ impl ConstEnv<'_> {
     }
 
     /// Evaluates a SELECT without FROM.
-    pub fn select(&self, sel: &Select, params: &[Literal]) -> Result<ResultSet, SqlError> {
+    pub fn select(&mut self, sel: &Select, params: &[Literal]) -> Result<ResultSet, SqlError> {
         if sel.where_.is_some() || !sel.group_by.is_empty() || !sel.order_by.is_empty() {
             return Err(SqlError::not_supported(
                 "WHERE/GROUP BY/ORDER BY in a SELECT without FROM",
@@ -206,7 +275,7 @@ impl ConstEnv<'_> {
 /// Errors go to the client as Go's `writeError` sends them.
 ///
 /// Not done here: the warning Go appends when reading a no-op variable while
-/// `tidb_enable_noop_variables` is off (the prototype keeps no warnings), and the
+/// `tidb_enable_noop_variables` is off ([`ConstEnv`]'s caller appends it), and the
 /// `RESTRICTED_VARIABLES_ADMIN` check under security enhanced mode (no SEM on this node).
 // glue: the prototype's stand-in for the name and scope checks of expressionRewriter.rewriteSystemVariable (the function itself is the rewriter's part 2, D09.2, still a stub)
 pub(crate) fn check_system_variable(
@@ -298,19 +367,48 @@ mod tests {
 
     use super::*;
 
-    fn env() -> ConstEnv<'static> {
-        ConstEnv {
-            server_version: "8.0.11-TiDB-tidb-rs",
-            current_db: Some("sbtest"),
-            user: "root@127.0.0.1",
-            current_user: "root@%",
-            connection_id: 9,
-            have_ssl: "YES",
-            autocommit: true,
-            charset: "utf8mb4",
-            collation: "utf8mb4_general_ci",
-            last_plan_from_cache: true,
-            last_plan_from_binding: false,
+    /// Go's compiled defaults with the session values a utf8mb4 handshake gives, and the
+    /// statement's warnings.
+    struct Fixture {
+        session: tidb_session::Session,
+        warnings: Vec<SQLWarn>,
+    }
+
+    fn fixture() -> Fixture {
+        let mut session = crate::plan_cache::compiled_defaults_session().unwrap();
+        session
+            .vars_mut()
+            .set_system_var_without_validation("collation_connection", "utf8mb4_general_ci")
+            .unwrap();
+        Fixture {
+            session,
+            warnings: Vec::new(),
+        }
+    }
+
+    impl Fixture {
+        fn env(&mut self) -> ConstEnv<'_> {
+            ConstEnv {
+                server_version: "8.0.11-TiDB-tidb-rs",
+                current_db: Some("sbtest"),
+                user: "root@127.0.0.1",
+                current_user: "root@%",
+                connection_id: 9,
+                have_ssl: "YES",
+                autocommit: true,
+                last_plan_from_cache: true,
+                last_plan_from_binding: false,
+                vars: self.session.vars_mut(),
+                warnings: &mut self.warnings,
+            }
+        }
+
+        fn run(&mut self, sql: &str) -> Result<ResultSet, SqlError> {
+            let l = tidb_sql::parse_and_lower(sql)?;
+            let Statement::Select(s) = l.stmt else {
+                panic!("{sql}")
+            };
+            self.env().select(&s, &[])
         }
     }
 
@@ -330,7 +428,7 @@ mod tests {
         let Statement::Select(s) = l.stmt else {
             panic!("{sql}")
         };
-        env().select(&s, params)
+        fixture().env().select(&s, params)
     }
 
     #[test]
@@ -480,8 +578,14 @@ mod tests {
             "have_openssl",
             "license",
             "sql_mode",
-        ] {
-            assert!(env().sysvar(name).is_some(), "{name}");
+        ]
+        .into_iter()
+        .chain(READ_FROM_SESSION.iter().copied())
+        {
+            assert!(
+                fixture().env().sysvar(name, false).unwrap().is_some(),
+                "{name}"
+            );
             assert!(
                 tidb_sessionctx::variable::get_sys_var(name).is_some(),
                 "{name}"
@@ -511,5 +615,55 @@ mod tests {
         assert_eq!(run("SELECT c", &[]).unwrap_err().code, 1054);
         assert_eq!(run("SELECT *", &[]).unwrap_err().code, 1096);
         assert_eq!(run("SELECT 1 WHERE 1 = 1", &[]).unwrap_err().code, 1235);
+    }
+
+    /// What connectors read while connecting comes from the session variables, typed as Go
+    /// types it (`GetNativeValType`): booleans and unsigned integers are LONGLONG, the rest
+    /// strings.
+    #[test]
+    fn connector_reads_come_from_the_session_variables() {
+        let mut f = fixture();
+        let r = f
+            .run(
+                "SELECT @@init_connect, @@sql_select_limit, @@foreign_key_checks, \
+                 @@group_concat_max_len, @@system_time_zone, @@global.sql_mode",
+            )
+            .unwrap();
+        assert_eq!(
+            r.rows[0],
+            vec![
+                Value::from(""),
+                Value::UInt(u64::MAX),
+                Value::Int(1),
+                Value::UInt(1024),
+                Value::from("CST"),
+                Value::from(
+                    "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,\
+                     ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION"
+                ),
+            ]
+        );
+        assert!(r.columns[1].is_unsigned());
+        assert_eq!(r.columns[2].column_type, ColumnType::LongLong);
+        assert_eq!(r.columns[4].column_type, ColumnType::VarString);
+        // A session value written through the session variables is read back.
+        f.session
+            .vars_mut()
+            .set_system_var("foreign_key_checks", "OFF")
+            .unwrap();
+        let r = f.run("SELECT @@foreign_key_checks").unwrap();
+        assert_eq!(r.rows[0], vec![Value::Int(0)]);
+        assert!(f.warnings.is_empty());
+    }
+
+    /// Go's `rewriteSystemVariable` warns when a noop variable is read
+    /// (`ErrGettingNoopVariable`) only when `tidb_enable_noop_variables` is OFF; it is ON by
+    /// default, so a connector's read of a noop variable has no warning.
+    #[test]
+    fn reading_a_noop_variable_with_the_defaults() {
+        let mut f = fixture();
+        let r = f.run("SELECT @@query_cache_type").unwrap();
+        assert_eq!(r.rows[0], vec![Value::from("OFF")]);
+        assert!(f.warnings.is_empty());
     }
 }

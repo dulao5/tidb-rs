@@ -41,7 +41,8 @@ fn action_error_aborts_with_position() {
         err("SELECT ALL DISTINCT a FROM t"),
         ParseError::Semantic(Diagnostic {
             msg: "Incorrect usage of ALL and DISTINCT".into(),
-            pos: 7
+            pos: 7,
+            code: 0
         })
     );
     // TableName with an invalid schema name.
@@ -49,9 +50,28 @@ fn action_error_aborts_with_position() {
         err("SELECT * FROM `a `.t"),
         ParseError::Semantic(Diagnostic {
             msg: "Incorrect database name 'a '".into(),
-            pos: 14
+            pos: 14,
+            code: 0
         })
     );
+}
+
+#[test]
+fn charset_and_collation_actions_carry_their_code() {
+    // goyacc: `CharsetName` appends `ErrUnknownCharacterSet` (1115), `CollationName` the
+    // `ErrUnknownCollation` of `charset.GetCollationByName` (1273).
+    assert_eq!(
+        err("SET NAMES nosuch"),
+        ParseError::Semantic(Diagnostic {
+            msg: "Unknown character set: 'nosuch'".into(),
+            pos: 10,
+            code: 1115
+        })
+    );
+    assert!(matches!(
+        err("SELECT 'a' COLLATE nosuch"),
+        ParseError::Semantic(Diagnostic { code: 1273, .. })
+    ));
 }
 
 #[test]

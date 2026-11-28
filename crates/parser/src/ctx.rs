@@ -11,6 +11,10 @@ pub struct Diagnostic {
     pub msg: String,
     /// Byte offset into the SQL text.
     pub pos: usize,
+    /// The MySQL error code of the TiDB error the Go action appends (for example
+    /// `ErrUnknownCharacterSet`, 1115), which Go's `util.SyntaxError` passes to the client
+    /// unchanged. `0` for a plain error, which `util.SyntaxError` wraps as `ErrParse` (1064).
+    pub code: u16,
 }
 
 // Fields and methods not used by the hand-ported actions yet are kept: they are the targets of
@@ -49,9 +53,15 @@ impl Ctx {
     }
     /// goyacc `yylex.AppendError(err); return 1`
     pub fn fail(&self, msg: impl Into<String>, pos: usize) {
+        self.fail_code(0, msg, pos);
+    }
+    /// goyacc `yylex.AppendError(terr.GenWithStackByArgs(..)); return 1` for a TiDB error of
+    /// MySQL code `code` (see [`Diagnostic::code`]).
+    pub fn fail_code(&self, code: u16, msg: impl Into<String>, pos: usize) {
         self.errors.borrow_mut().push(Diagnostic {
             msg: msg.into(),
             pos,
+            code,
         });
         self.abort.set(true);
     }
@@ -60,6 +70,7 @@ impl Ctx {
         self.errors.borrow_mut().push(Diagnostic {
             msg: msg.into(),
             pos,
+            code: 0,
         });
     }
     #[allow(dead_code)]
@@ -67,6 +78,7 @@ impl Ctx {
         self.warnings.borrow_mut().push(Diagnostic {
             msg: msg.into(),
             pos,
+            code: 0,
         });
     }
 }

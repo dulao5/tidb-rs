@@ -22,6 +22,8 @@ tidb-expression = { workspace = true }
 tidb-executor = { workspace = true }
 # The session the result set belongs to (driver_tidb: TiDBContext → session).
 tidb-session = { workspace = true }
+# The instance variable system_time_zone (setSystemTimeZoneVariable).
+tidb-sessionctx = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -24,7 +24,7 @@ use tidb_parser::ast;
 use tidb_session::{Dialect, Session};
 use tidb_sessionctx::stmtctx::new_stmt_ctx;
 use tidb_sessionctx::variable::session_state::TxnReadTS;
-use tidb_sql::ir::SetAssignment;
+use tidb_sql::ir::{SetAssignment, SetValue};
 use tidb_sql::{Lowered, Statement};
 
 use super::newstack::{ClusterGlobals, NewSession, compiled_defaults_cache};
@@ -118,9 +118,11 @@ impl PocEngine for FakePoc {
                     self.set_applied = 0;
                     for a in assignments {
                         // Like the PoC: an assignment it rejects ends the statement, and the
-                        // ones before it stay applied.
-                        if let SetAssignment::SysVar { name, .. } = a
+                        // ones before it stay applied (it accepts only the default
+                        // sql_select_limit).
+                        if let SetAssignment::SysVar { name, value, .. } = a
                             && name == "sql_select_limit"
+                            && *value != SetValue::Default
                         {
                             return Err(SqlError::not_supported("setting system variable"));
                         }
@@ -1460,6 +1462,23 @@ fn session_state_sync() {
     assert_eq!(get(&mut r, "time_zone"), "+08:00");
     block_on(r.query(&mut p, "SET sql_mode = 'ANSI_QUOTES'")).unwrap();
     assert_eq!(get(&mut r, "sql_mode"), "ANSI_QUOTES");
+    // What drivers SET while connecting reaches the new session too (#505); a removed
+    // variable is ignored, as Go ignores it, and diverges nothing.
+    block_on(r.query(
+        &mut p,
+        "SET SQL_SELECT_LIMIT=DEFAULT, group_concat_max_len = 1048576, sql_safe_updates = 0, \
+         foreign_key_checks = 0, unique_checks = 0, innodb_lock_wait_timeout = 100, \
+         max_execution_time = 2.0e3, tidb_enable_streaming = 1",
+    ))
+    .unwrap();
+    assert_eq!(get(&mut r, "sql_select_limit"), "18446744073709551615");
+    assert_eq!(get(&mut r, "group_concat_max_len"), "1048576");
+    assert_eq!(get(&mut r, "sql_safe_updates"), "OFF");
+    assert_eq!(get(&mut r, "foreign_key_checks"), "OFF");
+    assert_eq!(get(&mut r, "unique_checks"), "OFF");
+    assert_eq!(get(&mut r, "innodb_lock_wait_timeout"), "100");
+    assert_eq!(get(&mut r, "max_execution_time"), "2000");
+    assert_eq!(r.session_condition(&p), None);
     block_on(r.query(&mut p, "USE test")).unwrap();
     assert_eq!(r.new.session().current_db(), "test");
     // COM_INIT_DB.

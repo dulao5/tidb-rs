@@ -12,7 +12,8 @@
 //!   (`internal/util`);
 //! - [`params`]: `parseBinaryParams` (`conn_stmt_params.go`);
 //! - [`resultset`]: the result set over the session's result (`internal/resultset`);
-//! - [`conn`]: `writeResultSet` / `writeChunks` / `writeColumnInfo` into packet payloads.
+//! - [`conn`]: `writeResultSet` / `writeChunks` / `writeColumnInfo` into packet payloads;
+//! - [`server`]: `setSystemTimeZoneVariable` of the server start (`server.go`).
 //!
 //! The connection loop, handshake and authentication stay with the PoC
 //! (`tidb-mysql-protocol`) until part 2 (spec `specs/D03.1-server/spec.md`).
@@ -27,4 +28,5 @@ pub mod dump;
 pub mod params;
 pub mod result_encoder;
 pub mod resultset;
+pub mod server;
 pub mod util;

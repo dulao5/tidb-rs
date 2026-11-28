@@ -444,6 +444,11 @@ fn main() {
         let new_collation = poc_session::detect_new_collation(&kv, &schema)
             .await
             .map_err(|e| std::io::Error::other(format!("read mysql.tidb: {e}")))?;
+        // Go: `BootstrapSession` reads mysql.tidb system_tz (failing when it is missing),
+        // then the server start runs `setSystemTimeZoneVariable`.
+        poc_session::load_system_tz(&kv, &schema)
+            .await
+            .map_err(|e| std::io::Error::other(format!("read mysql.tidb system_tz: {e}")))?;
         let pd_refs: Vec<&str> = args.pd.iter().map(String::as_str).collect();
         tidb_base::log_info!(
             "connected to the cluster",
