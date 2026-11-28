@@ -23,6 +23,8 @@
 #![forbid(unsafe_code)]
 
 pub mod constant;
+pub mod plan_cache;
+pub mod privilege;
 pub mod router;
 pub mod timing;
 
@@ -38,12 +40,14 @@ use poc_domain::SchemaSync;
 use poc_domain::StmtGuard;
 use poc_executor::ExecContext;
 use poc_kv::KvClient;
+use tidb_base::contextutil::SQLWarn;
 use tidb_distsql::DagContext;
 use tidb_meta::InfoSchema;
 use tidb_meta::SchemaCache;
 use tidb_meta::SchemaCheck;
 use tidb_metrics::ExpensiveExec;
 use tidb_metrics::StmtType;
+use tidb_mysql_protocol::AccountAuth;
 use tidb_mysql_protocol::ConnectionInfo;
 use tidb_mysql_protocol::Credential;
 use tidb_mysql_protocol::OkInfo;
@@ -79,13 +83,17 @@ pub struct Shared {
     pub kv: KvClient,
     pub schema: SchemaCache,
     pub dag: DagContext,
-    /// The single account accepted until users are read from the cluster.
+    /// Fallback single account used only when `privileges` is `None` (unit tests without cluster
+    /// `mysql.*` privilege tables).
     pub user: String,
     pub credential: Credential,
     pub server_version: String,
     pub tls_enabled: bool,
     /// Schema sync (ADR 0005); `None` with `--schema-sync=off`.
     pub sync: Option<SchemaSync>,
+    /// Cluster-loaded `mysql.*` privilege cache (D04.1 Part 5/5). When `Some`, drives multi-account
+    /// login authentication and session-level privilege enforcement on both stacks.
+    pub privileges: Option<privilege::PrivilegeSource>,
 }
 
 /// Creates [`Session`]s.
@@ -133,15 +141,43 @@ impl Factory {
 impl SessionFactory for Factory {
     type Session = Session;
 
-    async fn lookup_user(&self, user: &str, _host: &str) -> Option<Credential> {
-        (user == self.shared.user).then(|| self.shared.credential.clone())
+    async fn lookup_user(&self, user: &str, host: &str) -> Option<Credential> {
+        self.lookup_account(user, host).await.map(|a| a.credential)
+    }
+
+    async fn lookup_account(&self, user: &str, host: &str) -> Option<AccountAuth> {
+        let Some(privs) = &self.shared.privileges else {
+            return (user == self.shared.user).then(|| AccountAuth {
+                credential: self.shared.credential.clone(),
+                auth_user: Some(self.shared.user.clone()),
+                auth_host: Some("%".to_owned()),
+                account_locked: false,
+            });
+        };
+        // Read directly from the in-memory cache (same as Go's `ConnectionVerification`).
+        // Never trigger an unauthenticated KV scan on miss; privilege updates arrive via the
+        // etcd `/tidb/privilege` watch and periodic background refresh loop.
+        let snap = privs.handle().get();
+        privilege::authenticate_user_record(&snap, user, host)
     }
 
     fn open_session(&self, info: &ConnectionInfo) -> Result<Session, SqlError> {
-        let host = info
-            .peer
-            .rsplit_once(':')
-            .map_or(info.peer.as_str(), |(h, _)| h);
+        let host = {
+            let h = info
+                .peer
+                .rsplit_once(':')
+                .map_or(info.peer.as_str(), |(h, _)| h)
+                .trim_matches(|c| c == '[' || c == ']');
+            if let Some(v4) = h
+                .strip_prefix("::ffff:")
+                .or_else(|| h.strip_prefix("::FFFF:"))
+                .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
+            {
+                v4
+            } else {
+                h
+            }
+        };
         // Go: the handshake collation sets character_set_client/connection/results and
         // collation_connection; unknown ids fall back to the server default.
         let (charset, collation) = match info.collation {
@@ -153,20 +189,41 @@ impl SessionFactory for Factory {
             63 => ("binary", "binary"),
             _ => ("utf8mb4", "utf8mb4_bin"),
         };
+        let (auth_user, auth_host, active_roles, privilege_manager) =
+            if let Some(privs) = &self.shared.privileges {
+                // Bind the exact `(auth_user, auth_host)` matched during `authenticate` with no
+                // TOCTOU re-match and no `(user, "%")` fallback; fail closed if absent.
+                let (Some(au), Some(ah)) = (&info.auth_user, &info.auth_host) else {
+                    return Err(SqlError::access_denied(&info.user, host, false));
+                };
+                let snap = privs.handle().get();
+                let roles = snap.get_default_roles(au, ah);
+                let pm: tidb_privilege::PrivilegeManagerRef =
+                    Arc::new(tidb_privilege::UserPrivileges::new(
+                        au.clone(),
+                        ah.clone(),
+                        Arc::clone(privs.handle()),
+                    ));
+                (au.clone(), ah.clone(), roles, Some(pm))
+            } else {
+                (info.user.clone(), "%".to_owned(), Vec::new(), None)
+            };
         let mut session = Session {
             shared: self.shared.clone(),
             current_db: None,
-            user: format!(
-                "{}@{}",
-                info.user,
-                host.trim_matches(|c| c == '[' || c == ']')
-            ),
-            current_user: format!("{}@%", info.user),
+            user: format!("{}@{host}", info.user),
+            current_user: format!("{auth_user}@{auth_host}"),
+            auth_user: auth_user.clone(),
+            auth_host: auth_host.clone(),
+            active_roles: active_roles.clone(),
+            privilege_manager: privilege_manager.clone(),
             connection_id: info.connection_id,
             charset: charset.to_owned(),
             collation: collation.to_owned(),
             results_charset: Some(charset.to_owned()),
             stmts: HashMap::new(),
+            warnings: Vec::new(),
+            default_vars: None,
             timer: Timer::default(),
             mdl: None,
             stmt: StmtMetrics::default(),
@@ -179,11 +236,23 @@ impl SessionFactory for Factory {
                 .sync
                 .as_ref()
                 .and_then(|s| s.ported_domain().cloned());
-            let new = Box::new(router::newstack::NewSession::new(
+            let mut new = Box::new(router::newstack::NewSession::new(
                 domain,
                 self.new_store.clone(),
                 self.shared.kv.exec_pool(),
             ));
+            if let Some(pm) = privilege_manager {
+                let ns = router::NewStack::session_mut(&mut *new);
+                ns.vars_mut().user = Some(tidb_parser::auth::UserIdentity {
+                    username: info.user.clone(),
+                    hostname: host.to_owned(),
+                    auth_username: auth_user,
+                    auth_hostname: auth_host,
+                    ..Default::default()
+                });
+                ns.vars_mut().active_roles = active_roles;
+                ns.set_privilege_manager(Some(pm));
+            }
             let mut r = Router::new(self.new_stack, new, &session.poc_values());
             r.set_connection_id(session.connection_id);
             session.router = Some(Box::new(r));
@@ -205,6 +274,10 @@ pub struct Session {
     current_db: Option<String>,
     user: String,
     current_user: String,
+    auth_user: String,
+    auth_host: String,
+    active_roles: Vec<tidb_parser::auth::RoleIdentity>,
+    privilege_manager: Option<tidb_privilege::PrivilegeManagerRef>,
     connection_id: u64,
     /// `SET NAMES` charset / collation (`character_set_client`/`connection`).
     charset: String,
@@ -215,7 +288,16 @@ pub struct Session {
     /// what `@@last_plan_from_cache` and `@@last_plan_from_binding` read.
     prev_stmt: router::LastStmtInfo,
     /// Prepared statements by id.
-    stmts: HashMap<u32, Arc<Lowered>>,
+    stmts: HashMap<u32, PocStmt>,
+    /// The warnings of the statement the prototype ran last (Go's `StmtCtx` warnings): the
+    /// plan cache's `skip prepared plan-cache` warning (#512, [`plan_cache`]) is the only
+    /// one the prototype reports. Cleared when a statement other than SHOW WARNINGS / SHOW
+    /// ERRORS starts, as Go's `ResetContextOfStmt` does.
+    warnings: Vec<SQLWarn>,
+    /// With `--new-stack=off` (no router, no new session): a session with Go's default
+    /// variables, the input of a PREPARE's plan-cache decision ([`plan_cache`]); made at the
+    /// first PREPARE.
+    default_vars: Option<Box<tidb_session::Session>>,
     /// Phase timing (`timing`), off by default.
     timer: Timer,
     /// Metadata-lock entry of the current synced statement, released once its response has
@@ -225,6 +307,13 @@ pub struct Session {
     stmt: StmtMetrics,
     /// The router between the PoC and the ported stack (`--new-stack=fallback|strict`); `None` with `off`.
     router: Option<Box<Router>>,
+}
+
+/// A statement the prototype prepared.
+struct PocStmt {
+    lowered: Arc<Lowered>,
+    /// Go's `PlanCacheStmt.UncacheableReason` ([`plan_cache`]): warned on every EXECUTE.
+    plan_cache_reason: String,
 }
 
 /// What the Go session metrics need to know about the statement in flight: its type and how
@@ -487,7 +576,34 @@ impl Session {
         Ok((ts, is))
     }
 
+    /// Runs a statement; the response carries the statement's warning count, as Go's OK / EOF
+    /// packets do (`StmtCtx.WarningCount()`).
     async fn run(
+        &mut self,
+        lowered: &Lowered,
+        params: &[Literal],
+        ts: Option<TsFuture>,
+    ) -> Result<Response, SqlError> {
+        let mut r = self.run_stmt(lowered, params, ts).await;
+        let n = u16::try_from(self.warnings.len()).unwrap_or(u16::MAX);
+        match &mut r {
+            Ok(Response::ResultSet(rs)) => rs.warnings = n,
+            Ok(Response::Encoded(rs)) => rs.warnings = n,
+            Ok(Response::Ok(ok)) => ok.warnings = n,
+            Err(_) => {}
+        }
+        r
+    }
+
+    /// A statement starts: Go's `ResetContextOfStmt` drops the previous statement's warnings,
+    /// except for SHOW WARNINGS / SHOW ERRORS, which show them.
+    fn reset_warnings(&mut self, stmt: &Statement) {
+        if !matches!(stmt, Statement::ShowWarnings { .. }) {
+            self.warnings.clear();
+        }
+    }
+
+    async fn run_stmt(
         &mut self,
         lowered: &Lowered,
         params: &[Literal],
@@ -506,7 +622,10 @@ impl Session {
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 Err(txn_fence(&lowered.stmt).unwrap_or_else(|| not_in_txn("this statement")))
             }
-            Statement::ShowWarnings { .. } => Ok(Response::ResultSet(show_warnings())),
+            Statement::ShowWarnings { errors } => Ok(Response::ResultSet(warnings_result_set(
+                &self.warnings,
+                *errors,
+            ))),
         }
     }
 
@@ -569,6 +688,20 @@ impl Session {
         params: &[Literal],
     ) -> Result<tidb_sql::Plan, SqlError> {
         let start = Instant::now();
+        // Match Go's `preprocess -> build_logical_plan -> check_privilege` order:
+        // 1. Preprocess R31 missing-table check (1142 before 1146).
+        if let Some(pm) = &self.privilege_manager {
+            privilege::check_poc_missing_table_privilege(
+                pm.as_ref(),
+                &self.active_roles,
+                &self.auth_user,
+                &self.auth_host,
+                self.current_db.as_deref(),
+                sel,
+                is,
+            )?;
+        }
+        // 2. Plan build (unknown columns, only_full_group_by, unsupported SQL errors come first).
         let plan = tidb_sql::plan_select(
             sel,
             is,
@@ -580,7 +713,20 @@ impl Session {
         );
         let compile = &self.stmt.compile;
         compile.set(compile.get() + start.elapsed());
-        plan
+        let plan = plan?;
+        // 3. Post-build privilege verification (R29/R30/R32).
+        if let Some(pm) = &self.privilege_manager {
+            privilege::check_poc_select_privilege(
+                pm.as_ref(),
+                &self.active_roles,
+                &self.auth_user,
+                &self.auth_host,
+                self.current_db.as_deref(),
+                sel,
+                is,
+            )?;
+        }
+        Ok(plan)
     }
 
     /// Synced mode (ADR 0005): plan with the newest loaded schema, narrow the statement's
@@ -798,8 +944,34 @@ impl Session {
     }
 }
 
-/// `SHOW WARNINGS`: statements here never leave warnings.
-pub(crate) fn show_warnings() -> ResultSet {
+/// The rows of `SHOW WARNINGS` (`errors`: `SHOW ERRORS`, only the errors) for `warns`, as
+/// Go's `ShowExec.fetchShowWarnings` makes them: a TiDB error is shown with its MySQL code
+/// and message (`terror.ToSQLError`), any other error with `ErrUnknown` and its text. Used for
+/// the prototype's own warnings and, by the router, for the new session's.
+// glue: rows as Go ShowExec.fetchShowWarnings (the prototype's SHOW WARNINGS)
+pub(crate) fn warnings_result_set(warns: &[SQLWarn], errors: bool) -> ResultSet {
+    let mut rs = show_warnings_columns();
+    for w in warns {
+        if errors && w.level != tidb_base::contextutil::WarnLevelError {
+            continue;
+        }
+        let (code, message) = if w.err.is_normalized() {
+            let sql_err = tidb_base::terror::to_sql_error(&w.err);
+            (i64::from(sql_err.code), sql_err.message)
+        } else {
+            (i64::from(tidb_base::mysql::ErrUnknown), w.err.error())
+        };
+        rs.rows.push(vec![
+            Value::Bytes(w.level.as_bytes().to_vec()),
+            Value::Int(code),
+            Value::Bytes(message),
+        ]);
+    }
+    rs
+}
+
+/// The columns of `SHOW WARNINGS` (Go's), with no rows.
+fn show_warnings_columns() -> ResultSet {
     use tidb_mysql_protocol::ColumnDef;
     use tidb_mysql_protocol::ColumnType;
     let mut level = ColumnDef::new("Level", ColumnType::VarString).with_length(28);
@@ -989,6 +1161,7 @@ impl Session {
             Ok(l) => l,
             Err(e) => {
                 if e.code == tidb_base::errno::ErrParse {
+                    // Go fails before `ResetContextOfStmt`: the warnings stay.
                     return Err(router::log_and_wrap_parse_error(
                         self.connection_id,
                         "",
@@ -997,6 +1170,8 @@ impl Session {
                         e,
                     ));
                 }
+                // A statement the prototype does not lower: Go would have started it.
+                self.warnings.clear();
                 return Err(e);
             }
         };
@@ -1004,6 +1179,7 @@ impl Session {
         tidb_metrics::parse_duration(parse);
         self.stmt.start(stmt_type(&lowered.stmt), parse);
         self.timer.mark(Phase::Parse);
+        self.reset_warnings(&lowered.stmt);
         if lowered.param_count > 0 {
             return Err(param_in_query());
         }
@@ -1012,6 +1188,7 @@ impl Session {
 
     /// A `COM_QUERY` statement after parsing: request the TSO early, then run it.
     async fn run_query(&mut self, lowered: &Lowered) -> Result<Response, SqlError> {
+        self.reset_warnings(&lowered.stmt);
         let ts =
             (needs_ts(lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
         self.run(lowered, &[], ts).await
@@ -1027,9 +1204,51 @@ impl Session {
         }
     }
 
+    /// `COM_STMT_PREPARE` with `--new-stack=off`: prepare on the prototype, then take Go's
+    /// prepare-time plan-cache decision with Go's default variables and no InfoSchema
+    /// ([`plan_cache`], #512).
     async fn prepare_inner(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
-        let lowered = tidb_sql::parse_and_lower(sql)?;
-        self.prepare_lowered(stmt_id, lowered).await
+        // A parse error comes before Go's `ResetContextOfStmt` (`PrepareExec.Next`): the
+        // warnings stay.
+        let stmt = tidb_sql::ir::parse_one(sql)?;
+        let lowered = match tidb_sql::ir::lower_statement(&stmt, sql) {
+            Ok(l) => l,
+            Err(e) => {
+                self.warnings.clear();
+                return Err(e);
+            }
+        };
+        let info = self.prepare_lowered(stmt_id, lowered).await?;
+        let decision = match self.default_vars() {
+            Ok(vars) => plan_cache::prepare_time_cacheability(vars, &stmt, None),
+            Err(e) => Err(e),
+        };
+        match decision {
+            Ok(c) => {
+                router::PocEngine::set_cacheability(self, stmt_id, c);
+                Ok(info)
+            }
+            Err(e) => {
+                self.stmts.remove(&stmt_id);
+                Err(e)
+            }
+        }
+    }
+
+    /// The variables of the off-mode plan-cache decision: a new session's, Go's defaults.
+    fn default_vars(
+        &mut self,
+    ) -> Result<&tidb_sessionctx::variable::session::SessionVars, SqlError> {
+        if self.default_vars.is_none() {
+            let mut s = tidb_session::Session::new(
+                tidb_session::Dialect::MySQL,
+                Box::new(router::newstack::DefaultGlobals),
+            );
+            s.load_common_global_variables_if_needed()
+                .map_err(|e| router::sql_error(&e))?;
+            self.default_vars = Some(Box::new(s));
+        }
+        Ok(self.default_vars.as_ref().expect("set above").vars())
     }
 
     async fn prepare_lowered(
@@ -1037,14 +1256,27 @@ impl Session {
         stmt_id: u32,
         lowered: Lowered,
     ) -> Result<PreparedInfo, SqlError> {
+        self.reset_warnings(&lowered.stmt);
         let param_count = u16::try_from(lowered.param_count).map_err(|_| {
             SqlError::new(1390, "Prepared statement contains too many placeholders")
         })?;
         let mut columns = Vec::new();
         if let Statement::Select(sel) = &lowered.stmt {
             if sel.from.is_some() {
-                // Resolve names now, like Go's prepare: unknown tables/columns fail here.
+                // Resolve names now, like Go's prepare: preprocess missing-table R31 check,
+                // then plan build (unknown tables/columns & semantic checks), then privilege check.
                 let is = self.name_schema().await?;
+                if let Some(pm) = &self.privilege_manager {
+                    privilege::check_poc_missing_table_privilege(
+                        pm.as_ref(),
+                        &self.active_roles,
+                        &self.auth_user,
+                        &self.auth_host,
+                        self.current_db.as_deref(),
+                        sel,
+                        &is,
+                    )?;
+                }
                 let plan = tidb_sql::plan_select(
                     sel,
                     &is,
@@ -1054,6 +1286,17 @@ impl Session {
                         describe_only: true,
                     },
                 )?;
+                if let Some(pm) = &self.privilege_manager {
+                    privilege::check_poc_select_privilege(
+                        pm.as_ref(),
+                        &self.active_roles,
+                        &self.auth_user,
+                        &self.auth_host,
+                        self.current_db.as_deref(),
+                        sel,
+                        &is,
+                    )?;
+                }
                 columns = plan.columns;
                 for c in &mut columns {
                     apply_result_charset(c, self.results_charset.as_deref());
@@ -1062,7 +1305,13 @@ impl Session {
                 columns = self.const_env().select(sel, &[])?.columns;
             }
         }
-        self.stmts.insert(stmt_id, Arc::new(lowered));
+        self.stmts.insert(
+            stmt_id,
+            PocStmt {
+                lowered: Arc::new(lowered),
+                plan_cache_reason: String::new(),
+            },
+        );
         Ok(PreparedInfo {
             param_count,
             columns,
@@ -1076,10 +1325,10 @@ impl Session {
         params: Vec<Param>,
     ) -> Result<Response, SqlError> {
         self.stmt.stmt_type = None;
-        let lowered = self
+        let (lowered, reason) = self
             .stmts
             .get(&stmt_id)
-            .cloned()
+            .map(|s| (Arc::clone(&s.lowered), s.plan_cache_reason.clone()))
             .ok_or_else(|| SqlError::unknown_stmt(stmt_id, "stmt_execute"))?;
         self.timer.begin();
         self.mdl = None;
@@ -1088,6 +1337,10 @@ impl Session {
             (needs_ts(&lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
         let params = params_to_literals(params)?;
         self.stmt.start(stmt_type(&lowered.stmt), start.elapsed());
+        self.reset_warnings(&lowered.stmt);
+        // Go's `GetPlanFromPlanCache` warns `skip prepared plan-cache: <reason>` on every
+        // EXECUTE of a statement prepared as uncacheable (#512).
+        self.warnings.extend(plan_cache::execute_warnings(&reason));
         // No plan cache: every execute plans again (Go counts a prepared plan cache miss).
         tidb_metrics::plan_cache_miss_prepared();
         self.timer.mark(Phase::Parse);
@@ -1095,6 +1348,15 @@ impl Session {
     }
 
     async fn use_db_inner(&mut self, db: &str) -> Result<(), SqlError> {
+        if let Some(pm) = &self.privilege_manager
+            && !pm.db_is_visible(&self.active_roles, db)
+        {
+            return Err(SqlError::db_access_denied(
+                &self.auth_user,
+                &self.auth_host,
+                db,
+            ));
+        }
         let is = self.name_schema().await?;
         if is.schema_by_name(db).is_none() {
             return Err(SqlError::bad_db(db));
@@ -1170,6 +1432,17 @@ impl router::PocEngine for Session {
 
     fn close(&mut self, stmt_id: u32) {
         self.stmts.remove(&stmt_id);
+    }
+
+    fn clear_warnings(&mut self) {
+        self.warnings.clear();
+    }
+
+    fn set_cacheability(&mut self, stmt_id: u32, c: plan_cache::PrepareCacheability) {
+        if let Some(s) = self.stmts.get_mut(&stmt_id) {
+            s.plan_cache_reason = c.reason;
+        }
+        self.warnings.extend(c.warnings);
     }
 
     fn set_prev_stmt(&mut self, last: &router::LastStmtInfo) {

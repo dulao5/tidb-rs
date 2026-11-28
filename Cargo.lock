@@ -1084,7 +1084,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1833,7 +1833,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.3",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2524,6 +2524,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tidb-base",
+ "tidb-codec",
  "tidb-distsql",
  "tidb-domain",
  "tidb-infoschema",
@@ -2531,6 +2532,8 @@ dependencies = [
  "tidb-meta",
  "tidb-model",
  "tidb-mysql-protocol",
+ "tidb-parser",
+ "tidb-privilege",
  "tidb-sql",
  "tidb-systable",
  "tidb-tablecodec",
@@ -2618,6 +2621,7 @@ dependencies = [
  "tidb-mysql-protocol",
  "tidb-parser",
  "tidb-planner",
+ "tidb-privilege",
  "tidb-runtime",
  "tidb-server",
  "tidb-session",
@@ -3142,7 +3146,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3601,7 +3605,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4045,6 +4049,7 @@ dependencies = [
  "tidb-metrics",
  "tidb-model",
  "tidb-parser",
+ "tidb-privilege",
  "tidb-sessionctx",
  "tidb-statistics",
  "tidb-store",
@@ -4066,9 +4071,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb-privilege"
+version = "0.0.0"
+dependencies = [
+ "arc-swap 1.9.3",
+ "tidb-base",
+ "tidb-parser",
+ "tidb-types",
+]
+
+[[package]]
 name = "tidb-query-smoke"
 version = "0.0.0"
 dependencies = [
+ "bytes",
+ "protobuf",
+ "tidb-base",
+ "tidb-chunk",
+ "tidb-codec",
+ "tidb-expr-pushdown",
+ "tidb-expression",
+ "tidb-kv",
+ "tidb-parser",
+ "tidb-sessionctx",
+ "tidb-types",
  "tidb_query_datatype",
  "tidb_query_expr",
  "tipb",
@@ -4125,6 +4151,7 @@ dependencies = [
  "tidb-model",
  "tidb-parser",
  "tidb-planner",
+ "tidb-privilege",
  "tidb-runtime",
  "tidb-sessionctx",
  "tidb-sessiontxn",
@@ -4415,7 +4442,7 @@ dependencies = [
 [[package]]
 name = "tikv-client"
 version = "0.4.0"
-source = "git+https://github.com/dulao5/client-rust.git?rev=5cbc0d7fa3dece01002730d02e4ac3b3d13ab9c0#5cbc0d7fa3dece01002730d02e4ac3b3d13ab9c0"
+source = "git+https://github.com/dulao5/client-rust.git?rev=e210ec757496b23625787a3093b7d7ddec0917d0#e210ec757496b23625787a3093b7d7ddec0917d0"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -5058,7 +5085,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

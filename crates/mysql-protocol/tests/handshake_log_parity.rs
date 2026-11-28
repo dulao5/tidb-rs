@@ -11,8 +11,8 @@ use mysql_async::{Opts, OptsBuilder};
 use tidb_base::config::LogConfig;
 use tidb_log::sink::{LogSink, MemorySink};
 use tidb_mysql_protocol::{
-    ConnectionInfo, Credential, OkInfo, Param, PreparedInfo, Response, Server, ServerConfig,
-    SessionFactory, SessionHandler, SqlError,
+    AccountAuth, ConnectionInfo, Credential, OkInfo, Param, PreparedInfo, Response, Server,
+    ServerConfig, SessionFactory, SessionHandler, SqlError,
 };
 use tokio::io::AsyncReadExt as _;
 use tokio::net::{TcpListener, TcpStream};
@@ -25,6 +25,19 @@ impl SessionFactory for AuthTestFactory {
 
     async fn lookup_user(&self, user: &str, _host: &str) -> Option<Credential> {
         (user == "root").then(|| Credential::native_from_password(""))
+    }
+
+    async fn lookup_account(&self, user: &str, _host: &str) -> Option<AccountAuth> {
+        match user {
+            "root" => Some(AccountAuth::from(Credential::native_from_password(""))),
+            "locked" => Some(AccountAuth {
+                credential: Credential::native_from_password(""),
+                auth_user: Some("locked".to_owned()),
+                auth_host: Some("%".to_owned()),
+                account_locked: true,
+            }),
+            _ => None,
+        }
     }
 
     fn open_session(&self, _info: &ConnectionInfo) -> Result<AuthTestSession, SqlError> {
@@ -241,7 +254,27 @@ async fn handshake_eof_auth_failure_and_lifecycle_logs_match_go() {
         ]
     );
 
-    // 6. Successful connection + clean disconnect.
+    // 6. Locked account with valid password: Go checks Account_locked after password verification
+    //    and emits `[privilege:3118]` on both handshake WARN lines.
+    let locked_opts = Opts::from(
+        OptsBuilder::default()
+            .ip_or_hostname("127.0.0.1")
+            .tcp_port(addr.port())
+            .user(Some("locked")),
+    );
+    assert!(mysql_async::Conn::new(locked_opts).await.is_err());
+
+    let locked_lines = take_lines(&sink, 3).await;
+    assert_eq!(
+        locked_lines,
+        vec![
+            "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]",
+            "[WARN] [conn.rs:LINE] [\"open new session or authentication failure\"] [conn=6] [error=\"[privilege:3118]Access denied for user 'locked'@'127.0.0.1'. Account is locked.\"]",
+            "[WARN] [conn.rs:LINE] [\"Server.onConn handshake\"] [conn=6] [error=\"[privilege:3118]Access denied for user 'locked'@'127.0.0.1'. Account is locked.\"] [\"remote addr\"=127.0.0.1:PORT]",
+        ]
+    );
+
+    // 7. Successful connection + clean disconnect.
     let ok_opts = Opts::from(
         OptsBuilder::default()
             .ip_or_hostname("127.0.0.1")
@@ -256,8 +289,8 @@ async fn handshake_eof_auth_failure_and_lifecycle_logs_match_go() {
         ok_lines,
         vec![
             "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]",
-            "[DEBUG] [conn.rs:LINE] [\"new connection\"] [conn=6] [remoteAddr=127.0.0.1:PORT]",
-            "[DEBUG] [conn.rs:LINE] [\"connection closed\"] [conn=6]",
+            "[DEBUG] [conn.rs:LINE] [\"new connection\"] [conn=7] [remoteAddr=127.0.0.1:PORT]",
+            "[DEBUG] [conn.rs:LINE] [\"connection closed\"] [conn=7]",
         ]
     );
 

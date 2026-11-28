@@ -128,6 +128,8 @@ pub struct SessCtx {
     /// The `ExecPool` the connection runs on, which the statement's executors start their
     /// tasks on (N3-A1 §3.1 items 3 and 5); `None` until the server sets it.
     pub(crate) exec_pool: Option<tidb_runtime::pool::ExecPool>,
+    /// `privilege.GetPrivilegeManager(s)` (D04.1); `None` when unbound.
+    pub(crate) privilege_manager: Option<tidb_privilege::PrivilegeManagerRef>,
 }
 
 /// `sessionctx.SessionPlanCache` (`plannercore.NewLRUPlanCache`): the cache is the plan-cache
@@ -182,7 +184,7 @@ const _: () = {
 /// (`InfoSchema.TableByName`, which refills the cache), so that the synchronous planner
 /// finds them there (D06.3 spec §11.2). Errors are left to the planner's own lookup.
 // glue: the table loads before planning (D06.3 spec §11.2)
-fn load_stmt_tables(
+pub fn load_stmt_tables(
     sctx: &SessCtx,
     stmt: &ast::Stmt,
 ) -> impl std::future::Future<Output = ()> + Send + use<> {
@@ -1101,6 +1103,7 @@ impl SessionContext for SessionCore {
             advise_txn_warmup: None,
             domain_info_schema: Some(self.sctx.get_domain_info_schema() as _),
             instance_plan_cache: self.sctx.instance_plan_cache.clone(),
+            privilege_manager: self.sctx.privilege_manager.clone(),
         }
     }
     // glue: interface method sessiontxn.TxnManager.GetSnapshotWithStmtReadTS
@@ -1309,6 +1312,7 @@ impl Session {
                     plan_cache: None,
                     instance_plan_cache: None,
                     exec_pool: None,
+                    privilege_manager: None,
                 },
                 txn_manager: new_txn_manager(),
             },
@@ -1326,6 +1330,18 @@ impl Session {
     // glue: N3 ExecPool handle of the session (N3-A1 §3.1)
     pub fn set_exec_pool(&mut self, pool: Option<tidb_runtime::pool::ExecPool>) {
         self.core.sctx.exec_pool = pool;
+    }
+
+    /// Binds the privilege manager (`privilege.BindPrivilegeManager(s, pm)`, D04.1).
+    // go-part: BindPrivilegeManager L1
+    pub fn set_privilege_manager(&mut self, pm: Option<tidb_privilege::PrivilegeManagerRef>) {
+        self.core.sctx.privilege_manager = pm;
+    }
+
+    /// Returns the bound privilege manager (`privilege.GetPrivilegeManager(s)`, D04.1).
+    // go-part: GetPrivilegeManager L1
+    pub fn privilege_manager(&self) -> Option<&tidb_privilege::PrivilegeManagerRef> {
+        self.core.sctx.privilege_manager.as_ref()
     }
 
     /// The connection's dialect (ADR 0010 §4.4).

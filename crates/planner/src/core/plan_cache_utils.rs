@@ -120,6 +120,62 @@ impl InfoSchemaLookup for InfoSchemaV2 {
     }
 }
 
+/// The cacheability decision of `GeneratePlanCacheStmtWithAST` (Go L141-170): "plan cache
+/// is disabled" when the session's switch is off, otherwise `IsASTCacheable` for a prepared
+/// statement, then the `Fix49736` override. Returns `(cacheable, reason, warnings)`: `reason`
+/// becomes `PlanCacheStmt.UncacheableReason` (warned again on every EXECUTE by
+/// `GetPlanFromPlanCache`), and `warnings` are the ones Go appends to the statement context
+/// at this point (`force plan-cache: ...` or `skip prepared plan-cache: ...`), for the caller
+/// to append. A separate function so that the prototype's prepared statements report the
+/// same reason (`poc-session`, #512): they never reach the rest of
+/// `GeneratePlanCacheStmtWithAST`.
+///
+/// `is` is `None` only for the prototype in `--new-stack=off`, which has no ported
+/// InfoSchema: `IsASTCacheable` then skips the table checks, as Go does for a nil schema.
+// go-part: GeneratePlanCacheStmtWithAST
+pub fn prepare_cacheability(
+    vars: &SessionVars,
+    is_prep_stmt: bool,
+    stmt: &Stmt,
+    is: Option<&dyn InfoSchemaLookup>,
+) -> Result<(bool, String, Vec<Error>), Error> {
+    let mut warnings = Vec::new();
+    let mut cacheable;
+    let mut reason;
+    if is_prep_stmt && !vars.enable_prepared_plan_cache
+        || !is_prep_stmt && !vars.enable_non_prepared_plan_cache
+    {
+        cacheable = false;
+        reason = "plan cache is disabled".to_owned();
+    } else {
+        if is_prep_stmt {
+            (cacheable, reason) = is_ast_cacheable(vars, stmt, is)?;
+        } else {
+            cacheable = true; // it is already checked here
+            reason = String::new();
+        }
+
+        if !cacheable
+            && fixcontrol::get_bool_with_default(
+                &vars.state.optimizer_fix_control,
+                fixcontrol::Fix49736,
+                false,
+            )
+        {
+            warnings.push(Error::plain(format!(
+                "force plan-cache: may use risky cached plan: {reason}"
+            )));
+            cacheable = true;
+            reason = String::new();
+        }
+
+        if !cacheable {
+            warnings.push(Error::plain(format!("skip prepared plan-cache: {reason}")));
+        }
+    }
+    Ok((cacheable, reason, warnings))
+}
+
 /// `ast.Prepared`: the prepared statement and its label.
 #[derive(Debug)]
 pub struct Prepared {
@@ -145,15 +201,18 @@ pub struct PointGetExecutorCache {
 
 /// PlanCacheStmt store prepared ast from PrepareExec and other related fields
 ///
-/// Not ported (with the reason): `VisitInfos` (the privilege check, D04.1),
-/// `BindingInfo` (bindings, D13.2), `SnapshotTSEvaluator` (stale read, D05.4: the
-/// preprocessor returns none), `tables` (the table statistics of the plan cache key, A3),
-/// `NormalizedPlan` / `PlanDigest` (written when a plan is put into the cache, A3).
+/// Not ported (with the reason): `BindingInfo` (bindings, D13.2), `SnapshotTSEvaluator`
+/// (stale read, D05.4: the preprocessor returns none), `tables` (the table statistics of the
+/// plan cache key, A3), `NormalizedPlan` / `PlanDigest` (written when a plan is put into the
+/// cache, A3).
 pub struct PlanCacheStmt {
     pub prepared_ast: Prepared,
     pub resolve_ctx: ContextRef,
     /// which DB the statement will be processed over
     pub stmt_db: String,
+    /// `VisitInfos` collected during `PREPARE`, re-checked against the session's live
+    /// `PrivilegeManager` and `active_roles` on every `EXECUTE` cache hit (D04.1 / D13.1).
+    pub visit_infos: Vec<crate::core::planbuilder::VisitInfo>,
     /// The offsets of the parameter markers, in order (see the module doc).
     pub params: Vec<usize>,
 
@@ -212,6 +271,7 @@ impl Default for PlanCacheStmt {
             },
             resolve_ctx: Arc::new(parking_lot::Mutex::new(crate::core::resolve::new_context())),
             stmt_db: String::new(),
+            visit_infos: Vec::new(),
             params: Vec::new(),
             point_get: PointGetExecutorCache::default(),
             schema_version: 0,
@@ -342,13 +402,13 @@ pub fn statement_table_names(stmt: &Stmt) -> Vec<(String, String)> {
 /// and leaves the normalized SQL and digest empty (they feed Top SQL, the statement summary
 /// and the plan cache key, none of which the new stack has); `planCacheStmtProcessor` is
 /// ported except the table list it keeps for the plan cache key (A3); `checkPreparedPriv`
-/// has no privilege manager (D04.1) and no table locks (write path).
+/// checks the bound `PrivilegeManager` when present and omits table locks (write path).
 ///
 /// `parsed_param_markers` is the number of `?` the parser built for `param_stmt`
 /// (`ParseOutput::param_markers`), which Go does not have: if the AST walk finds a
 /// different number, the walk missed a marker that would keep order 0, and PREPARE stops at
 /// a boundary instead of numbering the markers wrongly (#356, plan cache spec §5).
-// go: GeneratePlanCacheStmtWithAST L2 (label / NormalizeDigest / privileges / marker count guard: see the doc comment)
+// go: GeneratePlanCacheStmtWithAST L2 (label / NormalizeDigest / marker count guard: see the doc comment)
 pub fn generate_plan_cache_stmt_with_ast(
     ctx: &mut PlanCtx<'_>,
     is_prep_stmt: bool,
@@ -413,6 +473,11 @@ pub fn generate_plan_cache_stmt_with_ast(
         if let Some(d) = domain_is {
             opts.push(with_domain_info_schema(d.snapshot()));
         }
+        if let Some(pm) = &ctx.privilege_manager {
+            opts.push(crate::core::preprocess::with_privilege_manager(Arc::clone(
+                pm,
+            )));
+        }
         let (_, res) = preprocess(vars, &mut node_w, opts);
         res?;
         node_w.get_resolve_context()
@@ -434,39 +499,10 @@ pub fn generate_plan_cache_stmt_with_ast(
     // glue: stub, blocked-by:D02.2 (parser.NormalizeDigest: the normalized SQL feeds Top SQL, the statement summary and the plan cache key, none on the new stack)
     let (normalized_sql, digest) = (String::new(), String::new());
 
-    let mut cacheable;
-    let mut reason;
-    if is_prep_stmt && !vars.enable_prepared_plan_cache
-        || !is_prep_stmt && !vars.enable_non_prepared_plan_cache
-    {
-        cacheable = false;
-        reason = "plan cache is disabled".to_owned();
-    } else {
-        if is_prep_stmt {
-            (cacheable, reason) = is_ast_cacheable(vars, &prepared.stmt, Some(is))?;
-        } else {
-            cacheable = true; // it is already checked here
-            reason = String::new();
-        }
-
-        if !cacheable
-            && fixcontrol::get_bool_with_default(
-                &vars.state.optimizer_fix_control,
-                fixcontrol::Fix49736,
-                false,
-            )
-        {
-            vars.stmt_ctx().append_warning(Error::plain(format!(
-                "force plan-cache: may use risky cached plan: {reason}"
-            )));
-            cacheable = true;
-            reason = String::new();
-        }
-
-        if !cacheable {
-            vars.stmt_ctx()
-                .append_warning(Error::plain(format!("skip prepared plan-cache: {reason}")));
-        }
+    let (mut cacheable, mut reason, warnings) =
+        prepare_cacheability(vars, is_prep_stmt, &prepared.stmt, Some(is))?;
+    for w in warnings {
+        vars.stmt_ctx().append_warning(w);
     }
 
     // For prepared statements like `prepare st from 'select * from t where a<?'`,
@@ -485,6 +521,7 @@ pub fn generate_plan_cache_stmt_with_ast(
     });
     let opt_flag = dest_builder.get_opt_flag();
     let for_update_read = dest_builder.get_is_for_update_read();
+    let visit_infos = dest_builder.get_visit_info().to_vec();
     drop(dest_builder);
     let vars = &mut *ctx.vars;
 
@@ -519,6 +556,7 @@ pub fn generate_plan_cache_stmt_with_ast(
         prepared_ast: prepared,
         resolve_ctx,
         stmt_db: vars.current_db.clone(),
+        visit_infos,
         stmt_text: param_sql.to_owned(),
         normalized_sql,
         sql_digest: digest,
@@ -539,7 +577,12 @@ pub fn generate_plan_cache_stmt_with_ast(
 
     plan_cache_stmt_process(&mut prepared_obj);
 
-    crate::core::plan_cache::check_prepared_priv(&prepared_obj)?;
+    crate::core::plan_cache::check_prepared_priv(
+        ctx.vars,
+        is,
+        ctx.privilege_manager.as_deref(),
+        &prepared_obj,
+    )?;
     Ok((prepared_obj, p, param_count))
 }
 
@@ -1009,19 +1052,18 @@ pub fn new_plan_cache_key(
     };
     let (conn_charset, conn_collation) = vars.get_charset_info();
 
-    // not allow to share the same plan among different users for safety: the session has no
-    // user identity (SessionVars.User is not carried), as Go's nil User. With one account this
-    // is Go's key; once identity exists, different users must not share plans.
-    // glue: blocked-by:D04.1 (the user and host of the key: different users must not share plans once identity exists)
-    let (user_name, host_name) = ("", "");
+    // Do not allow sharing the same plan among different users for safety (A3 decision 9, R16):
+    // `key.push_str` length-prefixes `user_name` and `host_name` separately so e.g.
+    // `'a127.0.0.'@'%'` and `'a'@'127.0.0.%'` cannot collide.
+    let (user_name, host_name) = tidb_parser::auth::get_user_and_host_name(vars.user.as_ref());
 
     // the user might switch the prune mode dynamically
     let prune_mode = vars.state.partition_prune_mode.clone();
 
     let key = &mut stmt.cache_key;
     key.reset(&stmt.stmt_text);
-    key.push_str(user_name);
-    key.push_str(host_name);
+    key.push_str(&user_name);
+    key.push_str(&host_name);
     key.push_str(stmt_db);
     key.push_u64(stmt.schema_version as u64);
     hash_int64_uint64_map(key, &stmt.relate_version);

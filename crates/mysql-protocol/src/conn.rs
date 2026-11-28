@@ -495,15 +495,14 @@ where
     };
     let capability = resp.capability & config.advertised_capability();
     let host = peer_host(peer);
-
     // Go pkg/server/conn.go:682-691 (`handleAuthPlugin`) -> `checkAuthPlugin` (`conn.go:886-930`):
     // when CLIENT_PLUGIN_AUTH is set, MatchIdentity runs BEFORE any auth switch or
     // openSessionAndDoAuth; an unknown user is rejected with `[server:1045]` and logs
     // `"failed to check the user authplugin"`, returning without logging `:677`.
     let mut auth = resp.auth_response.clone();
-    let cred = if resp.capability & CLIENT_PLUGIN_AUTH != 0 {
-        let Some(cred) = factory.lookup_user(&resp.user, host).await else {
-            let e = SqlError::access_denied(&resp.user, host, !auth.is_empty());
+    let account = if resp.capability & CLIENT_PLUGIN_AUTH != 0 {
+        let Some(account) = factory.lookup_account(&resp.user, &host).await else {
+            let e = SqlError::access_denied(&resp.user, &host, !auth.is_empty());
             let err_str = format!("[server:{}]{}", e.code, e.message);
             tidb_base::log_warn!(
                 "failed to check the user authplugin",
@@ -579,17 +578,31 @@ where
                 HandshakeError::from(e)
             })?;
         }
-        Some(cred)
+        Some(account)
     } else {
-        factory.lookup_user(&resp.user, host).await
+        factory.lookup_account(&resp.user, &host).await
     };
 
-    let verified = match cred {
-        Some(cred @ Credential::NativePassword(_)) => cred.verify_native(salt, &auth),
+    let verified = match &account {
+        Some(acc) => match &acc.credential {
+            cred @ Credential::NativePassword(_) => cred.verify_native(salt, &auth),
+        },
         None => false,
     };
     if !verified {
-        let e = SqlError::access_denied(&resp.user, host, !auth.is_empty());
+        let e = SqlError::access_denied(&resp.user, &host, !auth.is_empty());
+        let err_str = e.error_for_log();
+        tidb_base::log_warn!(
+            "open new session or authentication failure",
+            "conn" => connection_id,
+            "error" => err_str.as_str(),
+        );
+        write_handshake_err(io, capability, connection_id, &e).await;
+        return Err(HandshakeError::Other(err_str));
+    }
+    let account = account.expect("verified implies Some");
+    if account.account_locked {
+        let e = SqlError::account_locked(&resp.user, &host);
         let err_str = e.error_for_log();
         tidb_base::log_warn!(
             "open new session or authentication failure",
@@ -604,6 +617,8 @@ where
         connection_id,
         user: resp.user.clone(),
         peer: peer.to_string(),
+        auth_user: account.auth_user,
+        auth_host: account.auth_host,
         database: resp.database.clone(),
         collation: resp.collation,
         capability,
@@ -824,12 +839,19 @@ fn format_cmd_sql_for_log(
     }
 }
 
-/// Host part of an `ip:port` peer address.
-fn peer_host(peer: &str) -> &str {
-    match peer.rsplit_once(':') {
+/// Host part of an `ip:port` peer address, normalizing IPv4-mapped IPv6 (`::ffff:a.b.c.d`)
+/// to dotted IPv4 so dual-stack `::` listeners match IPv4 host grants like `'10.%'`.
+fn peer_host(peer: &str) -> std::borrow::Cow<'_, str> {
+    let raw = match peer.rsplit_once(':') {
         Some((host, _)) => host.trim_start_matches('[').trim_end_matches(']'),
         None => peer,
+    };
+    if let Ok(std::net::IpAddr::V6(v6)) = raw.parse::<std::net::IpAddr>()
+        && let Some(v4) = v6.to_ipv4_mapped()
+    {
+        return std::borrow::Cow::Owned(v4.to_string());
     }
+    std::borrow::Cow::Borrowed(raw)
 }
 
 #[cfg(test)]
@@ -1505,6 +1527,8 @@ mod tests {
     fn peer_host_strips_port() {
         assert_eq!(peer_host("127.0.0.1:5000"), "127.0.0.1");
         assert_eq!(peer_host("[::1]:5000"), "::1");
+        assert_eq!(peer_host("[::ffff:10.0.0.5]:5000"), "10.0.0.5");
+        assert_eq!(peer_host("[::FFFF:127.0.0.1]:5000"), "127.0.0.1");
         assert_eq!(peer_host("local"), "local");
     }
 

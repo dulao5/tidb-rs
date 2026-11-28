@@ -140,6 +140,8 @@ impl Env {
                 connection_id: 1,
                 user: "root".to_owned(),
                 peer: "127.0.0.1:1".to_owned(),
+                auth_user: None,
+                auth_host: None,
                 database: Some(DB.to_owned()),
                 collation: 255,
                 capability: 0,
@@ -215,6 +217,7 @@ async fn setup(listening_port: u32) -> Option<Env> {
         credential: Credential::native_from_password(""),
         server_version: "8.0.11-TiDB-tidb-rs".to_owned(),
         tls_enabled: false,
+        privileges: None,
     });
     Some(Env {
         port,

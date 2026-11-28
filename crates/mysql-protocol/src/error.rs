@@ -5,14 +5,18 @@ use std::fmt;
 /// Error codes used by the protocol layer (values from TiDB's `pkg/errno`).
 pub mod code {
     pub const ER_NET_PACKET_TOO_LARGE: u16 = 1153;
+    pub const ER_DBACCESS_DENIED: u16 = 1044;
     pub const ER_ACCESS_DENIED: u16 = 1045;
     pub const ER_NO_DB: u16 = 1046;
     pub const ER_BAD_DB: u16 = 1049;
     pub const ER_UNKNOWN: u16 = 1105;
+    pub const ER_TABLEACCESS_DENIED: u16 = 1142;
+    pub const ER_COLUMNACCESS_DENIED: u16 = 1143;
     pub const ER_WRONG_ARGUMENTS: u16 = 1210;
     pub const ER_NOT_SUPPORTED_YET: u16 = 1235;
     pub const ER_UNKNOWN_STMT_HANDLER: u16 = 1243;
     pub const ER_NOT_SUPPORTED_AUTH_MODE: u16 = 1251;
+    pub const ER_ACCOUNT_HAS_BEEN_LOCKED: u16 = 3118;
     pub const ER_INVALID_SEQUENCE: u16 = 8052;
     pub const ER_UNKNOWN_FIELD_TYPE: u16 = 8051;
     pub const ER_INVALID_TYPE: u16 = 8057;
@@ -85,6 +89,47 @@ impl SqlError {
         )
     }
 
+    /// Error 3118 (`ER_ACCOUNT_HAS_BEEN_LOCKED`, SQLSTATE `HY000`) with TiDB's exact message format
+    /// (`pkg/privilege/privileges/privileges.go`: `errAccountHasBeenLocked`).
+    pub fn account_locked(user: &str, host: &str) -> Self {
+        Self::new(
+            code::ER_ACCOUNT_HAS_BEEN_LOCKED,
+            format!("Access denied for user '{user}'@'{host}'. Account is locked."),
+        )
+    }
+
+    /// Error 1044 (`ER_DBACCESS_DENIED_ERROR`) with TiDB's message format.
+    pub fn db_access_denied(user: &str, host: &str, db: &str) -> Self {
+        Self::new(
+            code::ER_DBACCESS_DENIED,
+            format!("Access denied for user '{user}'@'{host}' to database '{db}'"),
+        )
+    }
+
+    /// Error 1142 (`ER_TABLEACCESS_DENIED_ERROR`) with TiDB's message format.
+    pub fn table_access_denied(cmd: &str, user: &str, host: &str, table: &str) -> Self {
+        Self::new(
+            code::ER_TABLEACCESS_DENIED,
+            format!("{cmd} command denied to user '{user}'@'{host}' for table '{table}'"),
+        )
+    }
+
+    /// Error 1143 (`ER_COLUMNACCESS_DENIED_ERROR`) with TiDB's message format.
+    pub fn column_access_denied(
+        cmd: &str,
+        user: &str,
+        host: &str,
+        column: &str,
+        table: &str,
+    ) -> Self {
+        Self::new(
+            code::ER_COLUMNACCESS_DENIED,
+            format!(
+                "{cmd} command denied to user '{user}'@'{host}' for column '{column}' in table '{table}'"
+            ),
+        )
+    }
+
     /// Error 1049.
     pub fn bad_db(db: &str) -> Self {
         Self::new(code::ER_BAD_DB, format!("Unknown database '{db}'"))
@@ -105,7 +150,11 @@ impl SqlError {
             return String::from_utf8_lossy(&src.error()).into_owned();
         }
         match self.code {
-            code::ER_ACCESS_DENIED => format!("[privilege:{}]{}", self.code, self.message),
+            code::ER_DBACCESS_DENIED
+            | code::ER_ACCESS_DENIED
+            | code::ER_ACCOUNT_HAS_BEEN_LOCKED => {
+                format!("[privilege:{}]{}", self.code, self.message)
+            }
             code::ER_BAD_DB => format!("[schema:{}]{}", self.code, self.message),
             code::ER_NOT_SUPPORTED_AUTH_MODE => format!("[server:{}]{}", self.code, self.message),
             _ => self.message.clone(),
@@ -147,11 +196,14 @@ mod tests {
             (1292, "22007"), // ErrTruncatedWrongValue
             (1062, "23000"), // ErrDupEntry
             (1065, "42000"), // ErrEmptyQuery
+            (1044, "42000"), // ErrDBaccessDenied
             (1045, "28000"),
             (1046, "3D000"),
             (1049, "42000"),
             (1054, "42S22"),
             (1064, "42000"),
+            (1142, "42000"), // ErrTableaccessDenied
+            (1143, "42000"), // ErrColumnaccessDenied
             (1146, "42S02"),
             (1153, "08S01"),
             (1235, "42000"),
@@ -160,6 +212,7 @@ mod tests {
             (1105, "HY000"),
             (1193, "HY000"),
             (1243, "HY000"),
+            (3118, "HY000"), // ErrAccountHasBeenLocked
             (9001, "HY000"),
         ] {
             assert_eq!(sql_state(code), state, "code {code}");

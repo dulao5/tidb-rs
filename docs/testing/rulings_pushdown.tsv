@@ -1,0 +1,64 @@
+# Which rulings of docs/testing/rulings.toml change a scalar function signature that is pushed
+# down to TiKV, and why that is safe (#476). Checked by
+# crates/query-smoke/tests/copr_eval_oracle.rs::go_bug_fixed_rulings_stay_off_pushdown_or_match_tikv.
+#
+# TiKV evaluates a pushed signature with its own code, which follows Go, not tidb-rs. A ruling
+# that changes how tidb-rs evaluates a signature that still goes to TiKV can therefore give
+# different answers depending on where the expression runs.
+# Every ruling has at least one row (the test fails on a ruling without one); a ruling may have
+# several rows, one per justification.
+#
+# Columns (tab-separated):
+#   ruling          the ruling id (R<n>)
+#   sigs            Go ScalarFuncSig names (comma-separated, as in
+#                   crates/query-smoke/tests/data/tikv_pushable_sigs.tsv), or - when the ruling
+#                   changes no scalar function evaluation
+#   justification   none          (sigs = -) nothing to check; the note says why
+#                   tikv-oracle   the coprocessor evaluation oracle covers every listed
+#                                 signature and finds no mismatch on it (the test checks)
+#                   not-pushable  tidb-rs keeps every listed signature off TiKV (the test checks)
+#                   unported      tidb-rs cannot build the signature yet; the test fails once it
+#                                 can, so the oracle must then cover it
+#                   evidence:<text>  a recorded check the test cannot run (e.g. EXPLAIN on v8.5.8
+#                                 showing no push-down); the text names the evidence
+#                   pending:<ref>  NOT a justification: a maintainer decision on these
+#                                 signatures is still open (<ref> says who decides); nothing is
+#                                 checked until it is made
+#   note            free text
+ruling	sigs	justification	note
+R1	-	none	session variable scope (SET tidb_redact_log)
+R2	-	none	system variable parsing (tidb_opt_fix_control)
+R3	EQString,NEString,LTString,LEString,GTString,GEString,NullEQString	pending:maintainer decision	utf8mb4_0900_ai_ci string comparisons; whether they stay pushable under the ruling is a pending maintainer decision
+R3	InString,LikeSig,Strcmp,FieldString	unported	the same collator in IN, LIKE, STRCMP, FIELD (families not ported yet)
+R4	-	none	KILL signal handling
+R5	-	none	URL redaction in variable output
+R6	-	none	log tool
+R7	CastStringAsReal	evidence:the ruling changes only the text of the Truncated incorrect DOUBLE value warning, which Go formats late from a reused column buffer; TiKV formats it from the row's own bytes when it appends the warning (third_party/tikv tidb_query_datatype codec/convert.rs ConvertTo<f64> for &[u8], codec/error.rs truncated_wrong_val), as tidb-rs does; the oracle compares the warning codes	warning text
+R8	-	none	constant propagation in the planner (YEAR); TiKV evaluates the rewritten predicate tidb-rs sends
+R9	-	none	schema cache
+R10	-	none	infoschema GC
+R11	-	none	status port
+R12	-	none	observability
+R13	-	none	transaction / MDL
+R14	-	none	plan cache
+R15	-	none	plan cache
+R16	-	none	plan cache
+R18	-	none	privileges of ADMIN FLUSH
+R19	-	none	prepared statement result columns
+R20	-	none	prepared statement metadata
+R21	-	none	hash aggregation executor (TiDB side)
+R22	-	none	hash aggregation executor (TiDB side)
+R23	-	none	aggregate function COUNT(DISTINCT) key encoding; not a scalar signature (aggregate push-down is not covered by the oracle: follow-up)
+R24	-	none	aggregate function JSON_ARRAYAGG / JSON_OBJECTAGG memory ownership; not a scalar signature
+R25	-	none	window functions; never pushed to TiKV (TiFlash only, see the ruling)
+R26	-	none	window function LEAD; never pushed to TiKV
+R27	-	none	prepared statement AST resolution
+R28	-	none	window RANGE frame bound type; windows are never pushed to TiKV and DATE_ADD / DATE_SUB themselves are unchanged
+R29	-	none	privileges
+R30	-	none	privileges
+R31	-	none	privileges
+R32	-	none	privileges
+R33	-	none	logging
+R34	-	none	logging
+R35	-	none	version banner
+R36	-	none	privileges

@@ -26,6 +26,11 @@ tokio = { workspace = true }
 tidb-systable = { workspace = true }
 tidb-base = { workspace = true }
 tidb-model = { workspace = true }
+# D04.1 Part 5: cluster mysql.* privilege table loading and etcd /tidb/privilege reload.
+tidb-parser = { workspace = true }
+tidb-privilege = { workspace = true }
+tidb-tablecodec = { workspace = true }
+tidb-types = { workspace = true }
 # The ported domain (D06.5 part 1) and the kv.Storage it reads through (ported_domain.rs).
 tidb-domain = { workspace = true }
 tidb-kv = { workspace = true }
@@ -36,6 +41,8 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 # examples/meta_cli.rs (D06.2 mixed-cluster check).
 tidb-infoschema = { workspace = true }
+# privilege_loader.rs unit tests (common-handle key encoding).
+tidb-codec = { workspace = true }
 # examples/systable_cli.rs (raw).
 tidb-tablecodec = { workspace = true }
 tidb-types = { workspace = true }
