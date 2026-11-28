@@ -268,7 +268,7 @@ pub fn parse_one(sql: &str) -> Result<ast::Stmt, SqlError> {
     }
 }
 
-/// TiDB's syntax error (1064) for a parse error.
+/// TiDB's syntax error (1064) for a parse error, or the TiDB error a grammar action appended.
 fn parse_error(sql: &str, e: &tidb_parser::ParseError) -> SqlError {
     use tidb_parser::ParseError;
     let near = |pos: usize| -> String {
@@ -284,6 +284,9 @@ fn parse_error(sql: &str, e: &tidb_parser::ParseError) -> SqlError {
                 near(*pos)
             )
         }
+        // A TiDB error a grammar action appended keeps its code (Go's `util.SyntaxError`
+        // passes a terror with a stack through): `SET NAMES nosuch` is 1115.
+        ParseError::Semantic(d) if d.code != 0 => return SqlError::new(d.code, d.msg.clone()),
         ParseError::Semantic(d) => d.msg.clone(),
     };
     SqlError::new(1064, msg)
@@ -645,9 +648,15 @@ impl Lowerer<'_> {
                     .unwrap_or(SetValue::Other),
                 ast::Expr::Column(c) if c.table.o.is_empty() => SetValue::Ident(c.name.o.clone()),
                 ast::Expr::Default(_) => SetValue::Default,
+                // Go evaluates the unary minus over the literal (`SET x = -1.5` is the decimal
+                // -1.5, whose text the SET executor validates).
                 ast::Expr::Unary(u) if u.op == ast::Op::Minus => match &u.v {
                     ast::Expr::Value(val) => match literal(&val.datum) {
                         Ok(Literal::Int(i)) => SetValue::Literal(Literal::Int(-i)),
+                        Ok(Literal::Decimal(d)) if !d.starts_with('-') => {
+                            SetValue::Literal(Literal::Decimal(format!("-{d}")))
+                        }
+                        Ok(Literal::Float(f)) => SetValue::Literal(Literal::Float(-f)),
                         _ => SetValue::Other,
                     },
                     _ => SetValue::Other,
@@ -937,5 +946,78 @@ mod tests {
         }
         assert_eq!(err("SELEC 1").code, 1064);
         assert_eq!(err("").code, 1065);
+    }
+
+    /// A TiDB error a grammar action appends keeps its code, SQLSTATE and message (Go's
+    /// `util.SyntaxError` passes it through): an unknown charset is 1115, an unknown collation
+    /// 1273; other semantic errors are `ErrParse` (1064).
+    #[test]
+    fn grammar_action_errors_keep_their_code() {
+        let whole = |sql: &str| {
+            let e = err(sql);
+            (e.code, e.state.to_string(), e.message)
+        };
+        assert_eq!(
+            whole("SET NAMES nosuch"),
+            (
+                1115,
+                "42000".to_owned(),
+                "Unknown character set: 'nosuch'".to_owned()
+            )
+        );
+        assert_eq!(
+            whole("SET CHARACTER SET 'nosuch'"),
+            (
+                1115,
+                "42000".to_owned(),
+                "Unknown character set: 'nosuch'".to_owned()
+            )
+        );
+        // Every statement using the rule, not only SET.
+        assert_eq!(
+            whole("SELECT CONVERT('a' USING nosuch)"),
+            (
+                1115,
+                "42000".to_owned(),
+                "Unknown character set: 'nosuch'".to_owned()
+            )
+        );
+        assert_eq!(
+            whole("SELECT _ujis '3F'"),
+            (
+                1115,
+                "42000".to_owned(),
+                "Unsupported character introducer: 'ujis'".to_owned()
+            )
+        );
+        assert_eq!(
+            whole("SELECT 'a' COLLATE nosuch"),
+            (
+                1273,
+                "HY000".to_owned(),
+                "Unknown collation: 'nosuch'".to_owned()
+            )
+        );
+    }
+
+    /// A negative decimal or float SET value keeps its sign (`Datum.ToString` of the negated
+    /// constant).
+    #[test]
+    fn negative_set_values() {
+        let value = |sql: &str| match lower(sql).stmt {
+            Statement::Set(a) => match &a[0] {
+                SetAssignment::SysVar { value, .. } => value.clone(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            value("SET max_execution_time = -1.5"),
+            SetValue::Literal(Literal::Decimal("-1.5".into()))
+        );
+        assert_eq!(
+            value("SET max_execution_time = -2e3"),
+            SetValue::Literal(Literal::Float(-2000.0))
+        );
     }
 }

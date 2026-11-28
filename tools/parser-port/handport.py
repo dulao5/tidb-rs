@@ -344,7 +344,7 @@ for k, (tok, conv) in enumerate([("stringLit", "Datum::Str(tok_text($lexer, &$2)
         let cs = underscore_cs($lexer.src_str(tok_span(&$1)));
         match crate::charset::get_default_collation_legacy(cs) {
             None => {
-                p.fail(format!("Unsupported character introducer: '{cs}'"), $span.start());
+                p.fail_code(1115, crate::ctx::go_sprintf("Unsupported character introducer: '%%-.64s'", tidb_base::go_args![cs.to_owned()]), $span.start());
                 Expr::default()
             }
             Some(co) => {
@@ -352,12 +352,13 @@ for k, (tok, conv) in enumerate([("stringLit", "Datum::Str(tok_text($lexer, &$2)
                 let mut expr = ValueExpr::new(%s, cs, co);
                 expr.charset = cs;
                 expr.collate = co;
+                expr.underscore_charset = true;
                 Expr::Value(Box::new(expr))
             }
         }
     }""" % conv)
-act("SimpleExpr", "paramMarker", "Expr::ParamMarker(Box::new(ParamMarkerExpr { offset: tok_span(&$1).start(), order: 0 }))")
-act("LimitOption", "paramMarker", "Expr::ParamMarker(Box::new(ParamMarkerExpr { offset: tok_span(&$1).start(), order: 0 }))")
+act("SimpleExpr", "paramMarker", "param_marker(&$1, p)")
+act("LimitOption", "paramMarker", "param_marker(&$1, p)")
 act("SystemVariable", "doubleAtIdentifier", """{
         let mut v = at_ident_text($lexer.src_str(tok_span(&$1))).to_lowercase();
         let (mut is_global, mut is_instance, mut explicit_scope) = (false, false, true);
@@ -808,7 +809,8 @@ act("CharsetName", "StringName", """{
         match crate::charset::get_charset_info(&$1) {
             Ok((name, _)) => name.to_string(),
             Err(_) => {
-                p.fail(format!("Unknown character set: '{}'", $1), $span.start());
+                // `ErrUnknownCharacterSet` (1115).
+                p.fail_code(1115, crate::ctx::tidb_message(1115, tidb_base::go_args![$1.clone()]), $span.start());
                 String::new()
             }
         }
@@ -818,7 +820,8 @@ act("CollationName", "StringName", """{
         match crate::charset::get_collation_by_name(&$1) {
             Some(name) => name.to_string(),
             None => {
-                p.fail(format!("Unknown collation: '{}'", $1), $span.start());
+                // `charset.GetCollationByName`'s `ErrUnknownCollation` (1273).
+                p.fail_code(1273, crate::ctx::tidb_message(1273, tidb_base::go_args![$1.clone()]), $span.start());
                 String::new()
             }
         }
@@ -827,7 +830,7 @@ act("CollationName", "binaryType", "crate::charset::COLLATION_BIN.to_string()")
 act("OptCharsetWithOptBinary", "ascii", "Box::new(OptBinary { is_binary: false, charset: crate::charset::CHARSET_LATIN1.into() })")
 act("OptCharsetWithOptBinary", "unicodeSym", """{
         // charset.GetCharsetInfo("ucs2") fails (ucs2 is not supported)
-        p.fail("Unknown character set: 'ucs2'", $span.start());
+        p.fail_code(1115, crate::ctx::tidb_message(1115, tidb_base::go_args!["ucs2"]), $span.start());
         Box::new(OptBinary::default())
     }""")
 act("OptCharsetWithOptBinary", "byteType", "Box::new(OptBinary { is_binary: false, charset: crate::charset::CHARSET_BIN.into() })")
@@ -894,7 +897,7 @@ for bound, kw in [("Preceding", "preceding"), ("Following", "following")]:
     act(rule, f"unbounded {kw}", "FrameBound { tp: BoundType::%s, unbounded: true, ..Default::default() }" % bound)
     act(rule, f"NumLiteral {kw}", "FrameBound { tp: BoundType::%s, expr: Some(val($1, p)), ..Default::default() }" % bound)
     act(rule, f"paramMarker {kw}",
-        "FrameBound { tp: BoundType::%s, expr: Some(Expr::ParamMarker(Box::new(ParamMarkerExpr { offset: tok_span(&$1).start(), order: 0 }))), ..Default::default() }" % bound)
+        "FrameBound { tp: BoundType::%s, expr: Some(param_marker(&$1, p)), ..Default::default() }" % bound)
     act(rule, f"interval Expression TimeUnit {kw}",
         "FrameBound { tp: BoundType::%s, expr: Some($2), unit: $3, ..Default::default() }" % bound)
 act("WindowFrameStart", "current row", "FrameBound { tp: BoundType::CurrentRow, ..Default::default() }")
@@ -920,7 +923,7 @@ act("WindowFuncCall", "nthValue '(' Expression ',' SimpleExpr ')' OptFromFirstLa
 act("OptLeadLagInfo", "',' NumLiteral OptLLDefault",
     "{ let mut args = vec![val($2, p)]; if let Some(d) = $3 { args.push(d); } args }")
 act("OptLeadLagInfo", "',' paramMarker OptLLDefault", """{
-        let mut args = vec![Expr::ParamMarker(Box::new(ParamMarkerExpr { offset: tok_span(&$2).start(), order: 0 }))];
+        let mut args = vec![param_marker(&$2, p)];
         if let Some(d) = $3 { args.push(d); }
         args
     }""")
@@ -1407,6 +1410,14 @@ fn position_expr(e: Expr) -> Expr {
 /// ast.NewValueExpr(x, parser.charset, parser.collation)
 fn val(d: Datum, p: &Ctx) -> Expr {
     Expr::Value(Box::new(ValueExpr::new(d, p.charset, p.collation)))
+}
+
+/// `ast.NewParamMarkerExpr(yyS[yypt].offset)`: a `?` at the token's byte offset.
+/// Counts the markers built (`Ctx::param_markers`), so PREPARE can check that its AST walk
+/// reached every one (#356).
+fn param_marker(t: &Tok, p: &Ctx) -> Expr {
+    p.param_markers.set(p.param_markers.get() + 1);
+    Expr::ParamMarker(Box::new(ParamMarkerExpr::new(tok_span(t).start())))
 }
 
 /// ast.NewValueExpr(x, "", "")

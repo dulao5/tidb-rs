@@ -41,7 +41,8 @@ fn action_error_aborts_with_position() {
         err("SELECT ALL DISTINCT a FROM t"),
         ParseError::Semantic(Diagnostic {
             msg: "Incorrect usage of ALL and DISTINCT".into(),
-            pos: 7
+            pos: 7,
+            code: 0
         })
     );
     // TableName with an invalid schema name.
@@ -49,9 +50,50 @@ fn action_error_aborts_with_position() {
         err("SELECT * FROM `a `.t"),
         ParseError::Semantic(Diagnostic {
             msg: "Incorrect database name 'a '".into(),
-            pos: 14
+            pos: 14,
+            code: 0
         })
     );
+}
+
+#[test]
+fn charset_and_collation_actions_carry_their_code() {
+    // goyacc: `CharsetName` appends `ErrUnknownCharacterSet` (1115), `CollationName` the
+    // `ErrUnknownCollation` of `charset.GetCollationByName` (1273).
+    assert_eq!(
+        err("SET NAMES nosuch"),
+        ParseError::Semantic(Diagnostic {
+            msg: "Unknown character set: 'nosuch'".into(),
+            pos: 10,
+            code: 1115
+        })
+    );
+    assert!(matches!(
+        err("SELECT 'a' COLLATE nosuch"),
+        ParseError::Semantic(Diagnostic { code: 1273, .. })
+    ));
+    // The name is cut at 64 characters (`'%-.64s'` of `MySQLErrName`).
+    let long = "x".repeat(70);
+    assert_eq!(
+        err(&format!("SET NAMES {long}")),
+        ParseError::Semantic(Diagnostic {
+            msg: format!("Unknown character set: '{}'", &long[..64]),
+            pos: 10,
+            code: 1115
+        })
+    );
+    // A known introducer without a legacy collation (Go's TestUnderscoreCharset) and
+    // `UNICODE` (ucs2) are `ErrUnknownCharacterSet` too.
+    assert!(matches!(
+        err("select hex(_ujis '3F')"),
+        ParseError::Semantic(Diagnostic { code: 1115, ref msg, .. })
+            if msg == "Unsupported character introducer: 'ujis'"
+    ));
+    assert!(matches!(
+        err("CREATE TABLE t (a TEXT UNICODE)"),
+        ParseError::Semantic(Diagnostic { code: 1115, ref msg, .. })
+            if msg == "Unknown character set: 'ucs2'"
+    ));
 }
 
 #[test]

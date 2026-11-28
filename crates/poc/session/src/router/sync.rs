@@ -33,16 +33,24 @@ pub const SYNCED_SYSVARS: &[&str] = &[
     "tx_read_only",
     "time_zone",
     "max_execution_time",
+    // Connect-time SETs of drivers and pools (#505).
+    "sql_select_limit",
+    "sql_safe_updates",
+    "foreign_key_checks",
+    "unique_checks",
+    "innodb_lock_wait_timeout",
+    "group_concat_max_len",
 ];
 
 /// Go `variable.SetNamesVariables`.
-const SET_NAMES_VARIABLES: [&str; 3] = [
+pub(crate) const SET_NAMES_VARIABLES: [&str; 3] = [
     "character_set_client",
     "character_set_connection",
     "character_set_results",
 ];
 /// Go `variable.SetCharsetVariables`.
-const SET_CHARSET_VARIABLES: [&str; 2] = ["character_set_client", "character_set_results"];
+pub(crate) const SET_CHARSET_VARIABLES: [&str; 2] =
+    ["character_set_client", "character_set_results"];
 
 /// Writes `name = value` into the new session, recording whether it diverged.
 fn set(vars: &mut SessionVars, diverged: &mut BTreeSet<String>, name: &str, value: &str) {
@@ -58,7 +66,7 @@ fn set(vars: &mut SessionVars, diverged: &mut BTreeSet<String>, name: &str, valu
 /// its original text, `PlanBuilder.buildSet`), the empty string for `NULL`, and for `DEFAULT`
 /// the global value, read through `vars`'s accessor (the cluster's `mysql.global_variables`,
 /// the loader's sysvar cache, D06.5 spec §8). `None` when the prototype cannot tell (an
-/// expression, a float or decimal literal) or the global value cannot be read: the PoC does
+/// expression) or the global value cannot be read: the PoC does
 /// not validate it, and the variable diverges. Used for the PoC's validation of `SET`
 /// (`crate::validated_session_value`) and for the sync.
 // glue: getVarValue of the literal values the prototype's SET lowers (the SET executor is D12.12)
@@ -68,6 +76,17 @@ pub(crate) fn value_text(vars: &mut SessionVars, name: &str, v: &SetValue) -> Op
         SetValue::Literal(Literal::UInt(u)) => Some(u.to_string()),
         SetValue::Literal(Literal::Bool(b)) => Some(if *b { "1" } else { "0" }.to_owned()),
         SetValue::Literal(Literal::Str(s)) | SetValue::Ident(s) => Some(s.clone()),
+        // `Datum.ToString()` of a decimal (`MyDecimal.String()`) and of a float
+        // (`strconv.FormatFloat(f, 'f', -1, 64)`): `SET max_execution_time = 1.5` validates
+        // the text `1.5`, which Go rejects with 1232.
+        SetValue::Literal(Literal::Decimal(d)) => {
+            let mut dec = tidb_types::mydecimal::MyDecimal::default();
+            dec.from_string(d.as_bytes()).ok()?;
+            Some(dec.string())
+        }
+        SetValue::Literal(Literal::Float(f)) => {
+            String::from_utf8(tidb_types::datum::new_float64_datum(*f).to_string().ok()?).ok()
+        }
         // `if err != nil || nativeVal.IsNull() { return "", err }`.
         SetValue::Literal(Literal::Null) => Some(String::new()),
         // `SET x = DEFAULT` of a session variable: the global value (Go
@@ -111,6 +130,12 @@ pub(super) fn sync_set(
                     }
                 }
             }
+            // Go's `setSysVariable` parses and ignores a removed variable.
+            SetAssignment::SysVar {
+                name,
+                global: false,
+                ..
+            } if tidb_sessionctx::variable::removed::is_removed_sys_var(name) => {}
             SetAssignment::SysVar {
                 name,
                 global: false,

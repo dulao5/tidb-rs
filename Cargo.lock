@@ -2631,6 +2631,7 @@ dependencies = [
  "tidb-sql",
  "tidb-store",
  "tidb-systable",
+ "tidb-types",
  "tokio",
 ]
 
@@ -4129,6 +4130,7 @@ dependencies = [
  "tidb-log",
  "tidb-parser",
  "tidb-session",
+ "tidb-sessionctx",
  "tidb-types",
 ]
 

@@ -71,16 +71,41 @@ rejected with `ER_NOT_SUPPORTED_YET` (1235) before any data is read. Unsupported
 - Session statements: `USE db` (1049 for unknown databases), `SET NAMES`, `SET CHARACTER SET`,
   `SET [SESSION] autocommit = 1/ON`, `SET character_set_*`/`collation_connection`, `SET
   sql_mode` (unless it contains PAD_CHAR_TO_FULL_LENGTH), a few timeouts/isolation variables
-  that cannot affect results; `SHOW WARNINGS`/`SHOW ERRORS` (always empty). Since #489 the
+  that cannot affect results; `SHOW WARNINGS`/`SHOW ERRORS`. Since #489 the
   value of each of these variables is first checked by the ported `SysVar.Validate` (D05.1),
   so a value Go rejects gets Go's error (`SET autocommit = 'abc'`: 1231 with the value;
   `SET sql_mode = 'NOSUCHMODE'`: 1105). Validations that read another variable read the
   cluster's global value from the loader's sysvar cache (#539; the domain block (D06.5), spec
   §8): with `GLOBAL tidb_skip_isolation_level_check = ON` the prototype accepts
   `SET transaction_isolation = 'SERIALIZABLE'` as Go does. Until the loader has built the
-  cache, the compiled defaults are used (logged once). Validation warnings are dropped. As
+  cache, the compiled defaults are used (logged once). As
   in Go's `SetExecutor.Next`, the assignments of a `SET` run in order and the first error
   ends the statement; the ones before it stay.
+- Connect-time SETs and reads of the common drivers (#505: Connector/J 5.1 and 8.x,
+  Connector/Python, Go-MySQL-Driver, the `mysql` client; workloads
+  `tools/ab/workloads/connect/`). The prototype keeps its session values in a ported
+  `SessionVars` (the session variable block (D05.1)) over the cluster's globals: an accepted
+  `SET` is written there with Go's `SetSessionFromHook` and synced to the new session, and
+  `@@name` of the variables clients read (`constant::READ_FROM_SESSION`: `@@init_connect`,
+  `@@sql_select_limit`, `@@system_time_zone`, ...) is read from it as Go's
+  `rewriteSystemVariable` reads it, typed by `GetNativeValType`. Also accepted:
+  `sql_select_limit = DEFAULT` (any other limit is 1235: the prototype applies none),
+  `group_concat_max_len`, `sql_safe_updates`, `foreign_key_checks`, `unique_checks`,
+  `innodb_lock_wait_timeout`. As Go's `setSysVariable`: an unknown variable is 1193, a removed
+  one is ignored (both checked before the `SET GLOBAL` fence, as Go checks the name first),
+  a noop variable warns when `tidb_enable_noop_variables` is OFF; validation warnings go to
+  the statement's warnings. `SET x = DEFAULT` is the global value (Go's `getVarValue`); made
+  before the cluster's globals are loaded, it is read again from them when they are. Decimal and float values are their
+  `Datum.ToString` (`SET max_execution_time = 1.5` is Go's 1232). `SET NAMES` / `SET
+  CHARACTER SET` follow Go's `setCharset`: `COLLATE nosuch` is 1273, `SET NAMES utf8mb4
+  COLLATE latin1_bin` 1253. The parser's charset errors are Go's TiDB errors, which Go's
+  `util.SyntaxError` passes through, in every statement: an unknown charset name (`SET NAMES
+  nosuch`, `CONVERT(... USING nosuch)`, `CAST(... CHARSET nosuch)`, `CREATE/ALTER ...
+  CHARSET nosuch`) is 1115, an unsupported introducer (`_ujis '3F'`) and `UNICODE` (ucs2) are
+  1115, an unknown collation name where the grammar checks it is 1273; names are cut at 64
+  characters as Go's messages do. `@@system_time_zone` is the
+  cluster's `mysql.tidb` `system_tz`, loaded at start as Go's `BootstrapSession` and
+  `setSystemTimeZoneVariable` do (a missing row fails the start, as in Go).
 - Errors that match Go: 1146 unknown table, 1054 unknown column (with Go's clause names), 1046
   no database selected, 1051 unknown table in `t.*`, 1064 syntax errors, 1193 unknown system
   variable (8136 for a removed one), 1238 `@@global.` / `@@session.` of a variable without
@@ -99,6 +124,19 @@ on an UNSIGNED primary key; TIMESTAMP/ENUM/SET/BIT/JSON columns, virtual generat
 clustered non-integer primary keys, partitioned tables, views; BEGIN/START TRANSACTION, COMMIT,
 ROLLBACK, `SET autocommit=0`, user variables, SET GLOBAL, any other SET; all other statements
 (DML, DDL, other SHOW, ...).
+
+Known differences from Go, decided by the maintainer on #505, answered with 1235 and counted
+as `unsupported` by `tools/ab` (`prototype-not-supported.txt`):
+
+- A `SET` value that is not a literal, a `DEFAULT` or an identifier (`SET sql_mode =
+  CONCAT(@@sql_mode, ',STRICT_TRANS_TABLES')`): Go evaluates the expression the planner
+  rewrote (pkg/executor/set.go:304 `getVarValue`), which needs `rewriteSystemVariable` of the
+  expression rewriter, part 2 (blocked-by the expression rewriter block (D09.2)). Answer:
+  `this SET value`.
+- User variables (`SET @x = 1`): Go stores the value with its expression's type
+  (pkg/executor/set.go:90, the user-variable branch of `SetExecutor.Next`), which needs the
+  ported `getvar` / `setvar` of the miscellaneous functions block (D08.9); no hand-written
+  type logic in the meantime. Answer: `user variables`.
 
 ## How results are kept equal to Go TiDB
 
@@ -127,8 +165,9 @@ ROLLBACK, `SET autocommit=0`, user variables, SET GLOBAL, any other SET; all oth
 - Ties under ORDER BY on non-unique keys may come back in a different order than Go (both are
   valid; Go does not define it either).
 - Warnings: TiKV warnings are dropped (Go reports e.g. 2 truncation warnings for
-  `id='abc'`, which is rejected here anyway). The only warning the prototype reports is the
-  plan cache's `skip prepared plan-cache: <reason>` on PREPARE and EXECUTE of an uncacheable
+  `id='abc'`, which is rejected here anyway). Besides the warnings of `SET` (validation,
+  noop variables) and of reading a noop variable (#505), the only warning the prototype
+  reports is the plan cache's `skip prepared plan-cache: <reason>` on PREPARE and EXECUTE of an uncacheable
   prepared statement (#512; plan cache spec `specs/D13.1-plancache/spec.md` §4.4), with the
   reasons Go decides at PREPARE; reasons Go only finds while optimizing are missing, and with
   `--new-stack=off` the table checks are left out.

@@ -441,9 +441,15 @@ fn main() {
             .with_exec_pool(pool.clone())
             .map_err(|e| std::io::Error::other(format!("coprocessor client: {e}")))?;
         let schema = SchemaCache::new(kv.clone());
-        let new_collation = poc_session::detect_new_collation(&kv, &schema)
+        let tidb_table = poc_session::TidbTable::read(&kv, &schema)
             .await
             .map_err(|e| std::io::Error::other(format!("read mysql.tidb: {e}")))?;
+        let new_collation = tidb_table.new_collation_enabled();
+        // Go: `BootstrapSession` reads mysql.tidb system_tz (failing when it is missing),
+        // then the server start runs `setSystemTimeZoneVariable`.
+        tidb_table
+            .load_system_tz()
+            .map_err(|e| std::io::Error::other(format!("read mysql.tidb system_tz: {e}")))?;
         let pd_refs: Vec<&str> = args.pd.iter().map(String::as_str).collect();
         tidb_base::log_info!(
             "connected to the cluster",

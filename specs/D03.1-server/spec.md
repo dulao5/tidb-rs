@@ -25,6 +25,8 @@
 | `pkg/expression/util.go`：`ExecBinaryParam` 与 6 个 `binary*` 辅助函数（tasks P1-1） | `tidb-expression` 的 `util.rs` | 7 |
 | `pkg/param`：`BinaryParam` | `tidb-expression` 的 `param.rs` | （类型） |
 
+另外，#505（驱动连接时的 SET 与读取）提前移植了第 2 部分的 `server.go` `setSystemTimeZoneVariable`（`server.rs`）：服务器启动时把 `mysql.tidb` 的 `system_tz` 写进实例变量 `system_time_zone`，值为空或 `System` 时保留默认值 `CST` 并按 Go 的消息记错误日志。Go 用 `sync.Once` 保证只执行一次，这里由唯一的调用点（原型服务器启动，`poc_session::TidbTable::load_system_tz`，与 `new_collation_enabled` 共用一次 `mysql.tidb` 读取）保证。时区值本身由 `pkg/util/timeutil` 的 `SetSystemTZ` / `GetSystemTZ`（日志与工具块 D00.3，`tidb_base::timeutil`）保存。
+
 converge（`--part ... --item VS1-16`）：本部分列出的 96 个函数中移植 45 个，全部匹配，没有桩；其余 51 个在 `functions.tsv` 的 `not_ported` 列写明原因（见 §3）。块内另外 205 个函数属于第 2 部分。
 
 ## 3. 怎么接到 PoC 的连接上

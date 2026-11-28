@@ -96,6 +96,12 @@ jobs:
           python3 scripts/test_check_model_mutability.py
           python3 scripts/check_model_mutability.py
 
+      # The committed grammar is generated from handport.py (tools/parser-port/regen.sh needs a
+      # TiDB checkout CI does not have): every hand-ported action is in it verbatim, so an edit
+      # made only in the grammar, which a regen would undo, is red.
+      - name: parser grammar carries the hand-ported actions
+        run: python3 -I tools/parser-port/check_handport.py
+
       - name: weekly report verdicts, fault error classification
         run: |
           python3 scripts/prototype_not_supported.py --check
