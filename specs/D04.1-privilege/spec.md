@@ -363,7 +363,7 @@ Go 的漏洞源于两处：清除了 `DEFINER` 内部权限且**漏记调用者�
   - **选项 B（未采用）** —— 照 Go v8.5.8 原样移植、保留漏洞。
   - **选项 C（未采用）** —— 将修复置于兼容性开关之后（负责人明确否决：不加兼容开关，避免双模式复杂度与安全降级入口）。
 - **结论**：**负责人已定：A（`zhigang-du`，2026-11-26）**。系统性修复，常开，不加兼容开关；混合集群下 `tidb-rs` 拒绝（`1142`）、未修复 Go 放行是负责人接受的已知差异（见 `R29`）。
-- **补充决议（2026-11-28，并入 `R29`）**：对于仅持部分列权限 `SELECT(a)` 的用户执行 `SELECT COUNT(*) AS b FROM t GROUP BY b`（投影别名 `b` 与表 `t` 中无权限列同名），`tidb-rs` 拒绝并返回 `1143`（不因投影别名遮蔽表列权限校验），该差异由负责人裁定**并入 `R29`**，登记于 `docs/testing/rulings.toml` 与 `docs/compatibility.md`。
+- **补充决议（2026-11-28，并入 `R29`）**：Go v8.5.8 的 `resolveGbyExprs` 仅做 AST 解析却挂了 `checkColPriv`，而真正做表达式改写的 `rewriteGbyExprs` 遗漏了 `checkColPriv = ReportColumnErrOption`，导致仅持部分列权限 `SELECT(a)` 的用户执行 `SELECT COUNT(*) FROM t GROUP BY b` 与 `SELECT COUNT(*) AS b FROM t GROUP BY b`（投影别名 `b` 与表 `t` 中无权限列同名）均绕过列权限校验。`tidb-rs` 在新栈规划器 `rewrite_gby_exprs` 与原型路径均对 `GROUP BY` 项强制校验列 `SELECT` 权限，统一拒绝并返回 `1143`，该差异由负责人裁定**并入 `R29`**，登记于 `docs/testing/rulings.toml` 与 `docs/compatibility.md`。
 
 #### D3：完全无权限用户查询具体列（如 `SELECT a FROM test.t`）时，返回“表拒止 `1142`”还是保持 Go 的“列拒止 `1143`”——负责人已定：A（2026-11-26）
 
