@@ -21,13 +21,15 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use async_trait::async_trait;
 use tidb_base::Error;
-use tidb_chunk::chunk::Chunk;
+use tidb_chunk::ColAlloc;
+use tidb_chunk::chunk::{self, Chunk};
 use tidb_execdetails::execdetails::{
     ConcurrencyInfo, RuntimeStatsColl, RuntimeStatsWithConcurrencyInfo,
 };
 use tidb_expression::eval::RpnState;
 use tidb_expression::evaluator::EvaluatorSuite;
 use tidb_expression::expression::EvalState;
+use tidb_memory::TrackedAlloc;
 use tidb_memory::tracker::{Tracker, new_tracker};
 use tidb_sessionctx::exprctx::EvalContextRef;
 use tokio::sync::{mpsc, watch};
@@ -36,7 +38,6 @@ use tokio::task::JoinHandle;
 use crate::exec::ExecCtx;
 use crate::glue::SessionContext;
 use crate::internal::exec::executor::{self as exec, BaseExecutorV2, Executor};
-use crate::select::consume;
 
 // This file contains the implementation of the physical Projection Operator:
 // https://en.wikipedia.org/wiki/Projection_(relational_algebra)
@@ -133,6 +134,7 @@ pub struct ProjectionExec {
     parent_req_rows: Arc<AtomicI64>,
 
     pub(crate) mem_tracker: Option<Arc<Tracker>>,
+    pub(crate) alloc: Option<TrackedAlloc>,
 
     pub(crate) calculate_no_delay: bool,
     pub(crate) prepared: bool,
@@ -164,6 +166,7 @@ impl ProjectionExec {
             child_result: None,
             parent_req_rows: Arc::new(AtomicI64::new(0)),
             mem_tracker: None,
+            alloc: None,
             calculate_no_delay,
             prepared: false,
             eval_state: EvalState::new(),
@@ -240,18 +243,14 @@ impl Executor for ProjectionExec {
     /// Close implements the Executor Close interface.
     // go: ProjectionExec.Close L2 (the tasks give back their channels and the child: M-WG)
     async fn close(&mut self) -> Result<(), Error> {
-        // if e.BaseExecutor.Open returns error, e.childResult will be nil, see `24210`
-        // for more information
-        if self.is_unparallel_exec()
-            && let Some(child_result) = self.child_result.take()
-        {
-            // Releasing memory never runs an action.
-            let _ = consume(&self.mem_tracker, -child_result.memory_usage());
-        }
+        // Drop internal buffered chunk before flushing TrackedAlloc.
+        self.child_result = None;
         if self.prepared {
             if let Some(finish) = &self.finish_tx {
                 finish.send_replace(true);
             }
+            self.output_rx = None;
+            self.fetcher_output_tx = None;
             // Wait for fetcher and workers to finish and exit. Each handle leaves `self`
             // only once its task has ended, so a close dropped halfway still leaves the
             // running tasks to `Drop`, which aborts them.
@@ -282,6 +281,13 @@ impl Executor for ProjectionExec {
                 self.drain_input_ch(w.input_rx);
                 self.drain_output_ch(w.output_rx);
             }
+        }
+        if let Some(alloc) = &self.alloc {
+            alloc.flush();
+        }
+        if let Some(mem_tracker) = &self.mem_tracker {
+            mem_tracker.replace_bytes_used(0)?;
+            mem_tracker.detach_without_resetting_killer()?;
         }
         if self.base.stats.runtime_stats().is_some() {
             let runtime_stats = RuntimeStatsWithConcurrencyInfo::default();
@@ -320,6 +326,8 @@ impl ProjectionExec {
         if let Some(parent) = &self.ctx.stmt_mem_tracker {
             mem_tracker.attach_to(parent)?;
         }
+        let alloc = TrackedAlloc::new(Arc::clone(&mem_tracker));
+        self.alloc = Some(alloc.clone());
 
         // For now a Projection can not be executed vectorially only because it
         // contains "SetVar" or "GetVar" functions, in this scenario this
@@ -329,8 +337,16 @@ impl ProjectionExec {
         }
 
         if self.is_unparallel_exec() {
-            let child_result = exec::try_new_cache_chunk(self.base.meta.children(0).as_ref());
-            mem_tracker.consume(child_result.memory_usage())?;
+            let child = self.base.meta.children(0);
+            let child = child.as_ref();
+            let child_result = chunk::new_in(
+                child.ret_field_types(),
+                child.init_cap().max(0) as usize,
+                child.max_chunk_size().max(0) as usize,
+                ColAlloc::Tracked(alloc.clone()),
+            );
+            alloc.flush();
+            mem_tracker.checkpoint()?;
             self.child_result = Some(child_result);
         }
 
@@ -355,9 +371,13 @@ impl ProjectionExec {
             .expect("ProjectionExec.Next before Open or after Close (Go: nil chunk)");
         // transmit the requiredRows
         child_result.set_required_rows(chk.required_rows() as isize, max_chunk_size);
-        let m_size = child_result.memory_usage();
         let err = exec::next(ctx, self.base.meta.children(0).as_mut(), child_result).await;
-        consume(&self.mem_tracker, child_result.memory_usage() - m_size)?;
+        if let Some(alloc) = &self.alloc {
+            alloc.flush();
+        }
+        if let Some(t) = &self.mem_tracker {
+            t.checkpoint()?;
+        }
         err?;
         if child_result.num_rows() == 0 {
             return Ok(());
@@ -395,9 +415,13 @@ impl ProjectionExec {
         }
         {
             let mut output_chk = output.chk.lock();
-            let m_size = output_chk.memory_usage();
             chk.swap_columns(&mut output_chk);
-            consume(&self.mem_tracker, output_chk.memory_usage() - m_size)?;
+        }
+        if let Some(alloc) = &self.alloc {
+            alloc.flush();
+        }
+        if let Some(t) = &self.mem_tracker {
+            t.checkpoint()?;
         }
         if let Some(tx) = &self.fetcher_output_tx {
             // The fetcher's receiver lives until Close joins the fetcher.
@@ -408,7 +432,7 @@ impl ProjectionExec {
 
     /// Go starts the goroutines with `go`; a tracker's action (Go: a panic out of `Next`)
     /// is an error, returned before any task starts.
-    // go: ProjectionExec.prepare L2 (no failpoint; tracker actions are errors, M-PANIC; M-GO, M-CH)
+    // go: ProjectionExec.prepare L2 (no failpoint; tracker actions are errors, M-PANIC; M-GO, M-CH; A1 TrackedAlloc)
     fn prepare(&mut self, ctx: &ExecCtx) -> Result<(), Error> {
         let num_workers = self.num_workers as usize;
         let mem_tracker = Arc::clone(
@@ -416,6 +440,10 @@ impl ProjectionExec {
                 .as_ref()
                 .expect("ProjectionExec.prepare before Open"),
         );
+        let alloc = self
+            .alloc
+            .clone()
+            .unwrap_or_else(|| TrackedAlloc::new(Arc::clone(&mem_tracker)));
         let (finish_tx, finish_rx) = watch::channel(false);
         let (output_tx, output_rx) = mpsc::channel(num_workers);
 
@@ -424,6 +452,18 @@ impl ProjectionExec {
         let (fetcher_output_tx, fetcher_output_rx) = mpsc::channel(num_workers);
 
         // Initialize projectionWorker.
+        let (child_types, child_init_cap, child_max_chunk) = {
+            let child = self.base.meta.children(0);
+            let child_ref = child.as_ref();
+            (
+                child_ref.ret_field_types().to_vec(),
+                child_ref.init_cap().max(0) as usize,
+                child_ref.max_chunk_size().max(0) as usize,
+            )
+        };
+        let self_types = self.ret_field_types();
+        let self_init_cap = self.init_cap().max(0) as usize;
+        let self_max_chunk = self.max_chunk_size().max(0) as usize;
         let mut workers = Vec::with_capacity(num_workers);
         let mut worker_chs = Vec::with_capacity(num_workers);
         for i in 0..num_workers {
@@ -437,23 +477,34 @@ impl ProjectionExec {
                 input_rx,
                 output_rx: worker_output_rx,
                 mem_tracker: Arc::clone(&mem_tracker),
+                alloc: alloc.clone(),
                 eval_state: EvalState::new(),
                 rpn: RpnState::default(),
             });
             worker_chs.push((input_tx, worker_output_tx));
 
-            let input_chk = exec::new_first_chunk(self.base.meta.children(0).as_ref());
-            mem_tracker.consume(input_chk.memory_usage())?;
+            let input_chk = chunk::new_in(
+                &child_types,
+                child_init_cap,
+                child_max_chunk,
+                ColAlloc::Tracked(alloc.clone()),
+            );
             // Capacity numWorkers, numWorkers inputs: never full.
             let _ = fetcher_input_tx.try_send(ProjectionInput {
                 chk: input_chk,
                 target_worker: i,
             });
 
-            let output_chk = exec::new_first_chunk(&*self);
-            mem_tracker.consume(output_chk.memory_usage())?;
+            let output_chk = chunk::new_in(
+                self_types,
+                self_init_cap,
+                self_max_chunk,
+                ColAlloc::Tracked(alloc.clone()),
+            );
             let _ = fetcher_output_tx.try_send(ProjectionOutput::new(output_chk));
         }
+        alloc.flush();
+        mem_tracker.checkpoint()?;
 
         let child = self
             .base
@@ -470,6 +521,7 @@ impl ProjectionExec {
             output_rx: fetcher_output_rx,
             workers: worker_chs,
             mem_tracker,
+            alloc,
             parent_req_rows: Arc::clone(&self.parent_req_rows),
             max_chunk_size: self.max_chunk_size().max(0) as usize,
         };
@@ -493,8 +545,7 @@ impl ProjectionExec {
     fn drain_input_ch(&self, mut ch: mpsc::Receiver<ProjectionInput>) {
         ch.close();
         while let Ok(item) = ch.try_recv() {
-            // Releasing memory never runs an action.
-            let _ = consume(&self.mem_tracker, -item.chk.memory_usage());
+            drop(item);
         }
     }
 
@@ -502,17 +553,16 @@ impl ProjectionExec {
     fn drain_output_ch(&self, mut ch: mpsc::Receiver<OutputRef>) {
         ch.close();
         while let Ok(item) = ch.try_recv() {
-            let usage = item.chk.lock().memory_usage();
-            let _ = consume(&self.mem_tracker, -usage);
+            drop(item);
         }
     }
 }
 
 /// A statement dropped without `Close` (a cancelled future, M-DEFER): the tasks are told to
-/// finish and stopped, so none outlives the executor. Go has no such path (a goroutine is
-/// never dropped).
+/// finish and stopped, and trackers are zeroed/detached without resetting `SqlKiller`. Go has
+/// no such path (a goroutine is never dropped).
 impl Drop for ProjectionExec {
-    // glue: cancellation of the tasks (M-DEFER)
+    // glue: cancellation of the tasks + drop-safety memory zeroing/detach (M-DEFER, A1)
     fn drop(&mut self) {
         if let Some(finish) = &self.finish_tx {
             finish.send_replace(true);
@@ -522,6 +572,16 @@ impl Drop for ProjectionExec {
         }
         for h in &self.worker_handles {
             h.abort();
+        }
+        self.child_result = None;
+        self.output_rx = None;
+        self.fetcher_output_tx = None;
+        if let Some(alloc) = &self.alloc {
+            alloc.flush();
+        }
+        if let Some(mem_tracker) = &self.mem_tracker {
+            let _ = mem_tracker.replace_bytes_used(0);
+            let _ = mem_tracker.detach_without_resetting_killer();
         }
     }
 }
@@ -554,6 +614,7 @@ pub(crate) struct ProjectionInputFetcher {
 
     workers: Vec<(mpsc::Sender<ProjectionInput>, mpsc::Sender<OutputRef>)>,
     mem_tracker: Arc<Tracker>,
+    alloc: TrackedAlloc,
     parent_req_rows: Arc<AtomicI64>,
     max_chunk_size: usize,
 }
@@ -602,7 +663,8 @@ impl ProjectionInputFetcher {
 
             *output = read_projection(&mut self.output_rx, &mut self.global_finish_rx).await;
             let Some(out) = output.clone() else {
-                self.mem_tracker.consume(-input.chk.memory_usage())?;
+                drop(input);
+                self.alloc.flush();
                 return Ok(());
             };
 
@@ -614,13 +676,13 @@ impl ProjectionInputFetcher {
             input
                 .chk
                 .set_required_rows(required_rows as isize, self.max_chunk_size);
-            let m_size = input.chk.memory_usage();
             let err = exec::next(ctx, self.child.as_mut(), &mut input.chk).await;
-            self.mem_tracker
-                .consume(input.chk.memory_usage() - m_size)?;
+            self.alloc.flush();
+            self.mem_tracker.checkpoint()?;
             if err.is_err() || input.chk.num_rows() == 0 {
                 let _ = out.done_tx.send(err).await;
-                self.mem_tracker.consume(-input.chk.memory_usage())?;
+                drop(input);
+                self.alloc.flush();
                 return Ok(());
             }
 
@@ -647,6 +709,7 @@ pub(crate) struct ProjectionWorker {
     output_rx: mpsc::Receiver<OutputRef>,
 
     mem_tracker: Arc<Tracker>,
+    alloc: TrackedAlloc,
     eval_state: EvalState,
     rpn: RpnState,
 }
@@ -692,7 +755,6 @@ impl ProjectionWorker {
 
             let err = {
                 let mut output_chk = out.chk.lock();
-                let m_size = output_chk.memory_usage() + input.chk.memory_usage();
                 let err = self.evaluator_suit.run(
                     &*self.ctx.eval_ctx,
                     &self.eval_state,
@@ -701,8 +763,8 @@ impl ProjectionWorker {
                     &mut input.chk,
                     &mut output_chk,
                 );
-                self.mem_tracker
-                    .consume(output_chk.memory_usage() + input.chk.memory_usage() - m_size)?;
+                self.alloc.flush();
+                self.mem_tracker.checkpoint()?;
                 err
             };
             let failed = err.is_err();
@@ -787,5 +849,205 @@ async fn read_projection<T>(
     tokio::select! {
         _ = finish_rx.wait_for(|finished| *finished) => None,
         t = ch.recv() => t,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::task::{Context, Poll};
+
+    use tidb_base::mysql::TypeLonglong;
+    use tidb_expression::evaluator::new_evaluator_suite;
+    use tidb_expression::expression::Expr;
+    use tidb_expression::schema::new_schema;
+    use tidb_expression::{BuildContext, Column};
+    use tidb_memory::sqlkiller::{QueryInterrupted, SqlKiller};
+    use tidb_memory::tracker::{LabelForSQLText, new_tracker};
+    use tidb_sessionctx::stmtctx::new_stmt_ctx;
+    use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
+    use tidb_types::field_type::new_field_type;
+
+    use super::*;
+    use crate::internal::exec::executor::{new_base_executor_v2, new_first_chunk};
+
+    struct NoGlobals;
+
+    impl GlobalVarAccessor for NoGlobals {
+        fn get_global_sys_var(&self, _: &str) -> Result<String, Error> {
+            Ok(String::new())
+        }
+        fn set_global_sys_var_only(&mut self, _: &str, _: &str, _: bool) -> Result<(), Error> {
+            Ok(())
+        }
+        fn get_tidb_table_value(&self, _: &str) -> Result<String, Error> {
+            Ok(String::new())
+        }
+        fn set_tidb_table_value(&mut self, _: &str, _: &str, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    struct YieldingSource {
+        base: BaseExecutorV2,
+        total: usize,
+        sent: usize,
+        _alive: Arc<()>,
+        yield_on_next: bool,
+        closed: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Executor for YieldingSource {
+        fn base(&self) -> &BaseExecutorV2 {
+            &self.base
+        }
+        fn base_mut(&mut self) -> &mut BaseExecutorV2 {
+            &mut self.base
+        }
+        async fn next(&mut self, _ctx: &ExecCtx, chk: &mut Chunk) -> Result<(), Error> {
+            if self.yield_on_next {
+                tokio::task::yield_now().await;
+            }
+            chk.reset();
+            while self.sent < self.total && chk.num_rows() < chk.required_rows() {
+                chk.append_int64(0, self.sent as i64);
+                self.sent += 1;
+            }
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<(), Error> {
+            self.closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    async fn poll_until_suspension<F: Future + Unpin>(
+        mut fut: F,
+        max_polls: usize,
+    ) -> Option<F::Output> {
+        let mut suspensions = 0usize;
+        std::future::poll_fn(
+            |cx: &mut Context<'_>| match std::pin::Pin::new(&mut fut).poll(cx) {
+                Poll::Ready(out) => Poll::Ready(Some(out)),
+                Poll::Pending => {
+                    suspensions += 1;
+                    if suspensions >= max_polls {
+                        Poll::Ready(None)
+                    } else {
+                        Poll::Pending
+                    }
+                }
+            },
+        )
+        .await
+    }
+
+    /// Drop-at-every-`.await` safety net for `ProjectionExec`: dropping a parallel projection
+    /// at any suspension point aborts fetcher/workers, cleans up child resources without leaking,
+    /// zeroes `stmt_tracker`, and preserves an in-flight `SqlKiller` signal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn parallel_projection_drop_at_every_await_zeroes_memory_and_preserves_killer() {
+        let col = Arc::new(Column {
+            unique_id: 1,
+            index: 0,
+            ret_type: Arc::new(new_field_type(TypeLonglong)),
+            ..Column::default()
+        });
+        let schema = new_schema(vec![Arc::clone(&col)]);
+        let mut vars = SessionVars::new(Box::new(NoGlobals));
+        vars.init_chunk_size = 32;
+        vars.max_chunk_size = 32;
+
+        let mut completed = false;
+        for max_polls in 1..=256 {
+            let killer = SqlKiller::new();
+            let sess_tracker = new_tracker(LabelForSQLText, -1);
+            let stmt_tracker = new_tracker(LabelForSQLText, -1);
+            stmt_tracker.attach_to(&sess_tracker).unwrap();
+            let mut stmt = new_stmt_ctx();
+            stmt.mem_tracker = Some(Arc::clone(&stmt_tracker));
+            let cancel = tidb_runtime::cancel::KillCancel::new(killer.signal_handle());
+            let ctx = ExecCtx::with_killer(Arc::new(stmt), Arc::clone(&killer), cancel);
+
+            let alive = Arc::new(());
+            let child_closed = Arc::new(AtomicBool::new(false));
+            let child = Box::new(YieldingSource {
+                base: new_base_executor_v2(&vars, &killer, Some(schema.clone()), 1, Vec::new()),
+                total: 1024,
+                sent: 0,
+                _alive: Arc::clone(&alive),
+                yield_on_next: true,
+                closed: Arc::clone(&child_closed),
+            });
+
+            let suite = new_evaluator_suite(&[Expr::Column((*col).clone()).into_ref()], true);
+            let proj_ctx = ProjectionExecutorContext {
+                stmt_mem_tracker: Some(Arc::clone(&stmt_tracker)),
+                stmt_runtime_stats_coll: None,
+                eval_ctx: tidb_sessionctx::exprstatic::new_expr_context(Vec::new()).get_eval_ctx(),
+                enable_vectorized_expression: true,
+            };
+            let mut exe = ProjectionExec::new(
+                proj_ctx,
+                new_base_executor_v2(&vars, &killer, Some(schema.clone()), 2, vec![child]),
+                4,
+                suite,
+                false,
+            );
+
+            let killer_ref = Arc::clone(&killer);
+            let ctx_ref = ctx.clone();
+            let fut = Box::pin(async move {
+                exe.open(&ctx_ref).await?;
+                let mut chk = new_first_chunk(&exe);
+                let mut rows = 0usize;
+                loop {
+                    if rows > 0 {
+                        killer_ref.send_kill_signal(QueryInterrupted);
+                    }
+                    exe.next(&ctx_ref, &mut chk).await?;
+                    if chk.num_rows() == 0 {
+                        break;
+                    }
+                    rows += chk.num_rows();
+                }
+                exe.close().await
+            });
+
+            let finished = poll_until_suspension(fut, max_polls).await;
+            for _ in 0..1000 {
+                if Arc::strong_count(&alive) == 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            assert_eq!(
+                Arc::strong_count(&alive),
+                1,
+                "projection worker/fetcher leaked child at max_polls={max_polls}"
+            );
+            assert_eq!(
+                stmt_tracker.bytes_consumed(),
+                0,
+                "projection memory leaked at max_polls={max_polls}"
+            );
+            if max_polls > 2 && killer.get_kill_signal() != 0 {
+                assert_eq!(killer.get_kill_signal(), QueryInterrupted);
+            }
+            if let Some(res) = finished {
+                assert!(
+                    res.is_ok()
+                        || tidb_base::dbterror::exeerrors::ErrQueryInterrupted
+                            .equal(res.as_ref().unwrap_err())
+                );
+                completed = true;
+                break;
+            }
+        }
+        assert!(
+            completed,
+            "expected projection future to finish within 256 suspensions"
+        );
     }
 }

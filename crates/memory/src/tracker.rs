@@ -401,9 +401,22 @@ impl Tracker {
         parent.consume(self.bytes_consumed())
     }
 
-    /// Detaches the tracker from its parent.
+    /// Detaches the tracker from its parent and resets the session root's `SqlKiller`.
     // go: Tracker.Detach L1
     pub fn detach(self: &Arc<Self>) -> Result<(), Error> {
+        self.detach_inner(true)
+    }
+
+    /// Detaches the tracker from its parent and clears any bound actions without resetting
+    /// the session root's `SqlKiller` (used when rolling back a statement checkpoint to a
+    /// fallback path so an in-flight KILL signal is preserved).
+    // glue: detach without resetting in-flight SqlKiller (Router fallback checkpoint restore)
+    pub fn detach_without_resetting_killer(self: &Arc<Self>) -> Result<(), Error> {
+        self.detach_inner(false)
+    }
+
+    // go-part: Tracker.Detach (shared inner body; reset_killer=false skips killer.reset())
+    fn detach_inner(self: &Arc<Self>, reset_killer: bool) -> Result<(), Error> {
         let Some(parent) = self.get_parent() else {
             return Ok(());
         };
@@ -413,11 +426,13 @@ impl Tracker {
         if parent.is_root_tracker_of_sess.load(SeqCst) && self.label() != LabelForMemDB {
             *parent.action_mu_for_hard_limit.lock() = None;
             *parent.action_mu_for_soft_limit.lock() = None;
-            parent
-                .killer()
-                .as_ref()
-                .expect("runtime error: invalid memory address or nil pointer dereference")
-                .reset();
+            if reset_killer {
+                parent
+                    .killer()
+                    .as_ref()
+                    .expect("runtime error: invalid memory address or nil pointer dereference")
+                    .reset();
+            }
         }
         parent.remove(self)?;
         let _children = self.children.lock();
@@ -1137,5 +1152,41 @@ mod limit_tests {
         assert!(t.check_bytes_limit(-1));
         t.set_bytes_limit(DefMemQuotaQuery);
         assert_eq!(t.get_bytes_limit(), DefMemQuotaQuery);
+    }
+
+    #[test]
+    fn detach_without_resetting_killer_preserves_inflight_signal() {
+        let killer = crate::sqlkiller::SqlKiller::new();
+        killer.send_kill_signal(crate::sqlkiller::QueryInterrupted);
+
+        let root = new_tracker(LabelForSession, 1024);
+        root.is_root_tracker_of_sess.store(true, SeqCst);
+        root.set_killer(Some(Arc::clone(&killer)));
+        root.set_action_on_exceed(Some(crate::action::PanicOnExceed::new(
+            Some(Arc::clone(&killer)),
+            0,
+        )));
+
+        let stmt = new_tracker(LabelForSQLText, -1);
+        stmt.attach_to(&root).expect("attach");
+        assert!(stmt.get_parent().is_some());
+
+        stmt.detach_without_resetting_killer().expect("detach");
+        assert!(stmt.get_parent().is_none());
+        assert_eq!(
+            killer.get_kill_signal(),
+            crate::sqlkiller::QueryInterrupted,
+            "detach_without_resetting_killer must preserve in-flight kill signal"
+        );
+        assert!(root.get_children_for_test().is_empty());
+
+        // Normal detach resets the signal.
+        let stmt2 = new_tracker(LabelForSQLText, -1);
+        stmt2.attach_to(&root).unwrap();
+        stmt2.detach().unwrap();
+        assert_eq!(
+            killer.get_kill_signal(),
+            crate::sqlkiller::UnspecifiedKillSignal
+        );
     }
 }

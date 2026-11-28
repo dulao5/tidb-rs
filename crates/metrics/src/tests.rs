@@ -29,6 +29,7 @@ fn exposition_matches_go_definitions() {
     distsql_query_with_labels("dag", "internal", false, Duration::from_millis(3));
     distsql_partial_num(4.0);
     multi_query(2);
+    server_event_kill();
     command_finished(0x17, StmtType::Select, Duration::from_millis(1), None);
     token_released();
     command_finished(
@@ -45,6 +46,7 @@ fn exposition_matches_go_definitions() {
         r#"tidb_server_query_total{resource_group="default",result="OK",type="StmtExecute"} 1"#,
         r#"tidb_server_query_total{resource_group="default",result="Error",type="Query"} 1"#,
         r#"tidb_server_execute_error_total{db="",resource_group="default",type="planner:1146"} 1"#,
+        r#"tidb_server_event_total{type="kill"} 1"#,
         r#"tidb_executor_statement_total{db="",resource_group="default",type="Select"} 1"#,
         r#"tidb_session_transaction_duration_seconds_count{scope="general",txn_mode="optimistic",type="commit"} 1"#,
         r#"tidb_distsql_handle_query_duration_seconds_count{copr_type="paging",sql_type="general",type="dag"} 1"#,

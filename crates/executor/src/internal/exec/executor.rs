@@ -633,6 +633,7 @@ pub async fn next(ctx: &ExecCtx, e: &mut dyn Executor, req: &mut Chunk) -> Resul
 
     let result = async {
         e.handle_sql_killer_signal()?;
+        ctx.checkpoint().await?;
 
         e.register_sql_and_plan_in_exec_for_top_sql();
         e.next(ctx, req).await?;

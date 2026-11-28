@@ -21,8 +21,8 @@ use tidb_base::dbterror::plannererrors::{ErrInternal, ErrKeyDoesNotExist};
 use tidb_base::{go_args, kv, mysql};
 use tidb_model::{StatePublic, TableInfo};
 use tidb_parser::ast::{
-    ColumnName, ExecuteStmt, Expr, IndexHint, IndexHintScope, IndexHintType, Op, SelectLockInfo,
-    SelectLockType, SelectStmt, Stmt,
+    ColumnName, ExecuteStmt, Expr, IndexHint, IndexHintScope, IndexHintType, KillStmt, Op,
+    SelectLockInfo, SelectLockType, SelectStmt, Stmt,
 };
 use tidb_parser::model::CIStr;
 use tidb_sessionctx::variable::names::TiDBIsolationReadEngines;
@@ -30,7 +30,7 @@ use tidb_types::datum::Datum;
 use tidb_types::field_name::NameSlice;
 
 use crate::arena::PlanId;
-use crate::core::common_plans::Execute;
+use crate::core::common_plans::{Execute, Simple};
 use crate::core::plan_cache_utils::get_prepared_stmt;
 use crate::core::preprocess::InfoSchemaHandle;
 use crate::core::rule::logical_rules::FlagPruneColumns;
@@ -371,6 +371,29 @@ impl<'ast> PlanBuilder<'ast> {
             }
             _ => Err(blocked("D12.12", "the plan of this statement")),
         }
+    }
+
+    /// Privilege-checked `KILL` builder (Go `PlanBuilder.Build` `*ast.KillStmt` arm).
+    // go-part: PlanBuilder.Build (KillStmt; auto-analyze & SEM checks omitted until ported)
+    pub fn build_kill(&mut self, ctx: &PlanCtx<'_>, raw: &KillStmt) -> Simple {
+        if let Some(sm) = ctx.session_manager.as_deref()
+            && raw.expr.is_none()
+            && let Some(pi) = sm.get_process_info(raw.connection_id)
+            && let Some(login_user) = &ctx.vars.user
+            && pi.user != login_user.username
+        {
+            let err = tidb_base::dbterror::plannererrors::ErrSpecificAccessDenied
+                .gen_with_stack_by_args(tidb_base::go_args!["SUPER or CONNECTION_ADMIN"]);
+            crate::core::logical_plan_builder::append_dynamic_visit_info(
+                &mut self.visit_info,
+                vec!["CONNECTION_ADMIN".to_owned()],
+                false,
+                Some(err),
+            );
+        }
+        let mut simple = Simple::from_kill(ctx, raw);
+        simple.resolve_ctx = self.resolve_ctx.as_ref().map(Arc::clone);
+        simple
     }
 
     /// buildExecute: the `Execute` plan of an `EXECUTE` statement. `Build` returns no plan

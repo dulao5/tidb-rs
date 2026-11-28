@@ -16,6 +16,8 @@ tidb-types = { workspace = true }
 tidb-codec = { workspace = true }
 # memory.Tracker (Request.MemTracker, ClientSendOption.SessionMemTracker).
 tidb-memory = { workspace = true }
+# KillCancel (N3 §3.3).
+tidb-runtime = { workspace = true }
 # CopRuntimeStats (D07.3 spec §4.3: M-IFACE stats methods on ResultSubset / Response).
 tidb-execdetails = { workspace = true }
 # ResourceGroupTagBuilder encodes tipb::ResourceGroupTag (D07.0 T8, D07.3 #416).

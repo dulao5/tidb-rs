@@ -80,10 +80,12 @@ use crate::internal::exec::executor::{
 use crate::internal::exec::indexusage::IndexUsageReporter;
 use crate::projection::{ProjectionExec, new_projection_executor_context};
 use crate::select::{LimitExec, SelectionExec, TableDualExec, new_selection_executor_context};
+use crate::simple::SimpleExec;
 use crate::table_reader::{
     KvRangeBuilder, SelectResultHook, TableReaderExecutor, TableResultHandler,
     new_table_reader_executor_context, table_reader_schema,
 };
+use tidb_planner::core::common_plans::Simple;
 use tidb_planner::core::physical_plans::{PhysicalSort, PhysicalTopN};
 use tidb_planner::core::point_get_plan::PointGetPlan;
 use tidb_planner::util::byitem::ByItems;
@@ -275,6 +277,11 @@ impl ExecutorBuilder {
                     return self.build_table_dual(sctx, v);
                 }
             }
+            PhysicalKind::Simple => {
+                if let Some(v) = v.as_any().downcast_ref::<Simple>() {
+                    return self.build_simple(sctx, v);
+                }
+            }
             _ => {}
         }
         // glue: stub, blocked-by:D12.1, D12.0 (the buildXxx of each executor)
@@ -285,7 +292,8 @@ impl ExecutorBuilder {
             PhysicalKind::Limit
             | PhysicalKind::Selection
             | PhysicalKind::Projection
-            | PhysicalKind::TableDual => {
+            | PhysicalKind::TableDual
+            | PhysicalKind::Simple => {
                 self.err = Some(Error::plain(format!(
                     "a {:?} plan of another plan type",
                     v.kind()
@@ -354,6 +362,27 @@ impl ExecutorBuilder {
     ) -> Option<Box<dyn Executor>> {
         let child = v.children().first().cloned();
         Box::pin(self.build(sctx, child.as_ref())).await
+    }
+
+    // go: executorBuilder.buildSimple L2 (constructs SimpleExec for KILL; remaining Simple plans stay on their paths)
+    fn build_simple(&mut self, sctx: &dyn SessionContext, v: &Simple) -> Option<Box<dyn Executor>> {
+        let vars = sctx.get_session_vars();
+        let base = new_base_executor(
+            vars,
+            &sctx.sql_killer(),
+            Some(v.schema().clone()),
+            v.id() as isize,
+            Vec::new(),
+        );
+        let source_addr = String::new();
+        Some(Box::new(SimpleExec::new(
+            base,
+            v.stmt.clone(),
+            v.is_from_remote,
+            sctx.session_manager(),
+            vars.connection_id,
+            source_addr,
+        )))
     }
 
     // go: executorBuilder.buildLimit L1 [M-INT]

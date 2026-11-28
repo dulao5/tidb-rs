@@ -72,6 +72,7 @@ pub struct SqlKiller {
     /// Go `IsConnectionAlive`.
     pub is_connection_alive: ArcSwapOption<AliveFn>,
     on_kill: ArcSwapOption<FinishFn>,
+    on_reset: ArcSwapOption<FinishFn>,
 }
 
 /// An `atomic.Pointer[time.Time]` that is nil or holds a monotonic time: nanoseconds since
@@ -176,6 +177,13 @@ impl SqlKiller {
         self.on_kill.store(f.map(Arc::new));
     }
 
+    /// Runs `f` after `Reset` swaps the kill signal back to `0` so the paired `KillCancel`
+    /// stays synchronized with `signal == 0`.
+    // glue: reset hook of N3 3.3 item 2
+    pub fn set_on_reset(&self, f: Option<FinishFn>) {
+        self.on_reset.store(f.map(Arc::new));
+    }
+
     // go: SQLKiller.SendKillSignal L1
     // go-fix: pingcap/tidb@05c7dd7b96 #70776
     pub fn send_kill_signal(&self, reason: KillSignal) {
@@ -208,20 +216,19 @@ impl SqlKiller {
         self.signal.load(SeqCst)
     }
 
-    // go: SQLKiller.getKillError L1
-    fn get_kill_error(&self, status: KillSignal) -> Option<Error> {
+    /// Maps `status` and `conn_id` to Go's corresponding kill / OOM / runaway error (`None` for 0).
+    // go-part: SQLKiller.getKillError
+    pub fn error_for_signal(status: KillSignal, conn_id: u64) -> Option<Error> {
         match status {
             QueryInterrupted => Some(exeerrors::ErrQueryInterrupted.gen_with_stack_by_args(vec![])),
             MaxExecTimeExceeded => {
                 Some(exeerrors::ErrMaxExecTimeExceeded.gen_with_stack_by_args(vec![]))
             }
-            QueryMemoryExceeded => Some(
-                exeerrors::ErrMemoryExceedForQuery
-                    .gen_with_stack_by_args(go_args![self.conn_id.load(SeqCst)]),
-            ),
+            QueryMemoryExceeded => {
+                Some(exeerrors::ErrMemoryExceedForQuery.gen_with_stack_by_args(go_args![conn_id]))
+            }
             ServerMemoryExceeded => Some(
-                exeerrors::ErrMemoryExceedForInstance
-                    .gen_with_stack_by_args(go_args![self.conn_id.load(SeqCst)]),
+                exeerrors::ErrMemoryExceedForInstance.gen_with_stack_by_args(go_args![conn_id]),
             ),
             RunawayQueryExceeded => Some(
                 exeerrors::ErrResourceGroupQueryRunawayInterrupted
@@ -229,6 +236,18 @@ impl SqlKiller {
             ),
             _ => None,
         }
+    }
+
+    /// Maps a non-zero kill signal to its error, falling back to `ErrQueryInterrupted` if `0`.
+    // glue: signal error fallback for async cancellation branches
+    pub fn signal_to_error(status: KillSignal, conn_id: u64) -> Error {
+        Self::error_for_signal(status, conn_id)
+            .unwrap_or_else(|| exeerrors::ErrQueryInterrupted.gen_with_stack_by_args(vec![]))
+    }
+
+    // go: SQLKiller.getKillError L1
+    fn get_kill_error(&self, status: KillSignal) -> Option<Error> {
+        Self::error_for_signal(status, self.conn_id.load(SeqCst))
     }
 
     // go: SQLKiller.FinishResultSet L1
@@ -307,7 +326,22 @@ impl SqlKiller {
             tidb_base::log_warn!("kill finished", "conn" => self.conn_id.load(SeqCst));
         }
         self.last_check_time.store(None);
+        if let Some(f) = self.on_reset.load().as_ref() {
+            f();
+        }
     }
+}
+
+/// Returns whether `err` is one of the 5 runtime kill / timeout / OOM / runaway errors
+/// (`1317`, `3024`, `8175`, `8176`, `8253`) that Go propagates via `panic` at statement
+/// boundaries and never trigger Router fallback.
+// glue: runtime kill/OOM/runaway classification shared across executor, server, and session
+pub fn is_runtime_kill_or_oom_error(err: &Error) -> bool {
+    exeerrors::ErrQueryInterrupted.equal(err)
+        || exeerrors::ErrMaxExecTimeExceeded.equal(err)
+        || exeerrors::ErrMemoryExceedForQuery.equal(err)
+        || exeerrors::ErrMemoryExceedForInstance.equal(err)
+        || exeerrors::ErrResourceGroupQueryRunawayInterrupted.equal(err)
 }
 
 #[cfg(test)]
@@ -407,5 +441,26 @@ mod tests {
         assert!(hit.load(SeqCst));
         k.clear_finish_func();
         k.finish_result_set();
+    }
+
+    #[test]
+    fn on_kill_and_on_reset_hooks_fire_in_order() {
+        let k = SqlKiller::new();
+        let killed_hits = Arc::new(AtomicU32::new(0));
+        let reset_hits = Arc::new(AtomicU32::new(0));
+        let kh = killed_hits.clone();
+        let rh = reset_hits.clone();
+        k.set_on_kill(Some(Box::new(move || {
+            kh.fetch_add(1, SeqCst);
+        })));
+        k.set_on_reset(Some(Box::new(move || {
+            rh.fetch_add(1, SeqCst);
+        })));
+        k.send_kill_signal(QueryInterrupted);
+        assert_eq!(killed_hits.load(SeqCst), 1);
+        assert_eq!(reset_hits.load(SeqCst), 0);
+        k.reset();
+        assert_eq!(k.get_kill_signal(), UnspecifiedKillSignal);
+        assert_eq!(reset_hits.load(SeqCst), 1);
     }
 }

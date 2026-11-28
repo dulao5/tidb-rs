@@ -26,6 +26,7 @@ tokio = { workspace = true }
 tidb-systable = { workspace = true }
 tidb-base = { workspace = true }
 tidb-model = { workspace = true }
+tidb-sessionctx = { workspace = true }
 # D04.1 Part 5: cluster mysql.* privilege table loading and etcd /tidb/privilege reload.
 tidb-parser = { workspace = true }
 tidb-privilege = { workspace = true }

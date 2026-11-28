@@ -10,6 +10,8 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
+use tidb_runtime::KillCancel;
+
 /// `tikv.Variables`: the per-session values the client reads.
 #[derive(Clone, Debug)]
 pub struct Variables {
@@ -17,6 +19,8 @@ pub struct Variables {
     pub backoff_weight: i64,
     /// `Killed`: non-zero once the statement is killed.
     pub killed: Option<Arc<AtomicU32>>,
+    /// Session-level wakeup handle paired with `killed`.
+    pub kill_cancel: Option<KillCancel>,
 }
 
 impl Default for Variables {
@@ -25,6 +29,7 @@ impl Default for Variables {
         Variables {
             backoff_weight: 2,
             killed: None,
+            kill_cancel: None,
         }
     }
 }

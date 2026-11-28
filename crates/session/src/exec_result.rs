@@ -270,6 +270,7 @@ pub(crate) async fn close_running(se: &mut Session, rs: &mut RecordSet) -> Resul
         Some(run) => rs.close(&mut run.stmt, core).await,
         None => Ok(()),
     };
+    core.sctx.vars.stmt_ctx().detach_without_resetting_killer();
     se.running = None;
     err1?;
     err2

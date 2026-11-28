@@ -20,7 +20,10 @@ tidb-metrics = { workspace = true }
 tidb-parser = { workspace = true }
 # N3 runtime: statement admission (Q1) and the ExecPool connections run on.
 tidb-runtime = { workspace = true }
+tidb-memory = { workspace = true }
+tidb-server = { workspace = true }
 tidb-sessionctx = { workspace = true }
+arc-swap = "1"
 time = "0.3"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }

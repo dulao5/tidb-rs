@@ -16,11 +16,16 @@ pub mod code {
     pub const ER_NOT_SUPPORTED_YET: u16 = 1235;
     pub const ER_UNKNOWN_STMT_HANDLER: u16 = 1243;
     pub const ER_NOT_SUPPORTED_AUTH_MODE: u16 = 1251;
+    pub const ER_QUERY_INTERRUPTED: u16 = 1317;
     pub const ER_MUST_CHANGE_PASSWORD_LOGIN: u16 = 1862;
+    pub const ER_MAX_EXECUTION_TIME_EXCEEDED: u16 = 3024;
     pub const ER_ACCOUNT_HAS_BEEN_LOCKED: u16 = 3118;
     pub const ER_INVALID_SEQUENCE: u16 = 8052;
     pub const ER_UNKNOWN_FIELD_TYPE: u16 = 8051;
     pub const ER_INVALID_TYPE: u16 = 8057;
+    pub const ER_MEMORY_EXCEED_FOR_QUERY: u16 = 8175;
+    pub const ER_MEMORY_EXCEED_FOR_INSTANCE: u16 = 8176;
+    pub const ER_RESOURCE_GROUP_QUERY_RUNAWAY_INTERRUPTED: u16 = 8253;
 }
 
 /// An error reported to the client as an ERR packet: MySQL error code, SQLSTATE and message.
@@ -61,6 +66,14 @@ impl SqlError {
     pub fn with_source_err(mut self, err: tidb_base::Error) -> Self {
         self.source_err = Some(err);
         self
+    }
+
+    /// Converts a structured [`tidb_base::Error`] into a wire [`SqlError`] preserving MySQL
+    /// code, SQLSTATE, message, and RFC `source_err`.
+    pub fn from_tidb_error(err: &tidb_base::Error) -> Self {
+        let sqle = tidb_base::terror::to_sql_error(err);
+        let msg = String::from_utf8_lossy(&sqle.message).into_owned();
+        Self::new(sqle.code, msg).with_source_err(err.clone())
     }
 
     /// Error 1105, used for errors without a specific code (e.g. TiDB's `ErrMalformPacket`).

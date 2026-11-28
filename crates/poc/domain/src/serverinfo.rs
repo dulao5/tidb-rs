@@ -83,6 +83,31 @@ impl ServerInfo {
         self
     }
 
+    /// Override `server_id` advertised in `/tidb/server/info/<ddl_id>`.
+    pub fn with_server_id(mut self, server_id: u64) -> Self {
+        self.server_id = server_id;
+        self
+    }
+
+    /// Control `disable_rpc` (`false` when the status-port gRPC service is active).
+    pub fn with_disable_rpc(mut self, disable_rpc: bool) -> Self {
+        self.disable_rpc = disable_rpc;
+        self
+    }
+
+    /// Returns the HTTP/2 status-port base URL (`http://ip:status_port`) when RPC is enabled.
+    pub fn rpc_base_url(&self) -> Option<String> {
+        if self.disable_rpc || self.status_port == 0 || self.ip.is_empty() {
+            return None;
+        }
+        let host = self.ip.trim_matches(|c| c == '[' || c == ']');
+        if host.contains(':') {
+            Some(format!("http://[{host}]:{}", self.status_port))
+        } else {
+            Some(format!("http://{host}:{}", self.status_port))
+        }
+    }
+
     /// The etcd key (`/tidb/server/info/<ddl_id>`).
     pub fn key(&self) -> String {
         format!("{}{}", crate::keys::SERVER_INFO_PREFIX, self.ddl_id)

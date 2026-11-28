@@ -11,12 +11,17 @@ pub mod dag;
 pub mod decode;
 pub mod ranges;
 
+use std::sync::Arc;
+
 use poc_kv::CopRequest;
 use poc_kv::KvSnapshot;
 use poc_kv::REQ_TYPE_DAG;
+use tidb_memory::sqlkiller::{SqlKiller, is_runtime_kill_or_oom_error};
 use tidb_meta::model::ColumnInfo;
 use tidb_meta::model::TableInfo;
 pub use tidb_query_datatype::codec::datum::Datum;
+use tidb_runtime::CheckpointHook;
+use tidb_runtime::cancel::KillCancel;
 
 pub use crate::dag::AggFunc;
 pub use crate::dag::DagContext;
@@ -45,6 +50,21 @@ pub enum Error {
     Coprocessor { code: i32, msg: String },
     #[error("codec error: {0}")]
     Codec(String),
+    /// Statement killed, timed out, OOM-cancelled, or flagged as runaway.
+    #[error("{0}")]
+    Killed(tidb_base::Error),
+}
+
+struct DistSqlKillHook<'a> {
+    killer: &'a SqlKiller,
+}
+
+impl CheckpointHook for DistSqlKillHook<'_> {
+    type Error = tidb_base::Error;
+
+    fn check(&self) -> std::result::Result<(), Self::Error> {
+        self.killer.handle_signal()
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -84,6 +104,24 @@ pub async fn select(
     ranges: Vec<poc_kv::KeyRange>,
     options: SelectOptions,
 ) -> Result<SelectRows> {
+    select_with_killer(snapshot, plan, ranges, options, None, None).await
+}
+
+/// Variant of [`select`] checking `killer` + `kill_cancel` across coprocessor requests and
+/// response-decoding checkpoints.
+pub async fn select_with_killer(
+    snapshot: &mut KvSnapshot,
+    plan: &DagPlan<'_>,
+    ranges: Vec<poc_kv::KeyRange>,
+    options: SelectOptions,
+    killer: Option<Arc<SqlKiller>>,
+    kill_cancel: Option<KillCancel>,
+) -> Result<SelectRows> {
+    if let Some(k) = &killer
+        && let Err(e) = k.handle_signal()
+    {
+        return Err(Error::Killed(e));
+    }
     let desc = plan
         .request
         .get_executors()
@@ -128,16 +166,27 @@ pub async fn select(
     }
     let paging = options.paging.is_some();
     let start = std::time::Instant::now();
-    let responses = snapshot.coprocessor(req, None).await?;
+    let killed_signal = killer.as_ref().map(|k| k.signal_handle());
+    let responses = snapshot
+        .coprocessor_with_cancel(req, killed_signal, kill_cancel)
+        .await
+        .map_err(|e| match e {
+            poc_kv::Error::Copr(err) if is_runtime_kill_or_oom_error(&err) => Error::Killed(err),
+            other => Error::Kv(other),
+        })?;
     // Go `selectResult.fetchResp`: the time spent waiting for coprocessor responses, recorded
     // once the last one arrived.
     tidb_metrics::distsql_query(start.elapsed(), paging);
     let mut out = SelectRows::default();
     for resp in responses {
-        // N3 checkpoint (M-KILL) per decoded response, the PoC's counterpart of Go's
-        // per-`Next` check: yields once this poll has used its time slice, so decoding a
-        // large result does not hold the worker. No KILL hook yet in the PoC.
-        let Ok(()) = tidb_runtime::checkpoint(&()).await;
+        if let Some(k) = &killer {
+            let hook = DistSqlKillHook { killer: k.as_ref() };
+            if let Err(err) = tidb_runtime::checkpoint(&hook).await {
+                return Err(Error::Killed(err));
+            }
+        } else {
+            let Ok(()) = tidb_runtime::checkpoint(&()).await;
+        }
         let part = decode_select_response(&resp, &plan.output_types)?;
         out.rows.extend(part.rows);
         out.warnings.extend(part.warnings);

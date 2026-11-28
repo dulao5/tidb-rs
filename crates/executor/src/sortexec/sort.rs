@@ -583,7 +583,7 @@ impl SortExec {
                 Arc::clone(&self.parallel.sorted_rows_iters[i]),
                 max_chunk_size,
                 Arc::clone(&spill_helper),
-                Some(self.base.base.killer.clone()),
+                ctx.clone(),
             );
             let handle = spawner.run_in(&workers_waiter, "parallel sort worker", async move {
                 worker.run().await;
@@ -615,6 +615,7 @@ impl SortExec {
             merger.multi_way_merge.less_row_function = less_row.clone();
         }
         let generator = ResultGenerator {
+            ctx: ctx.clone(),
             less_row: self.sort_keys(),
             merger,
             sorted_rows_iters: self.parallel.sorted_rows_iters.clone(),
@@ -896,6 +897,11 @@ impl Executor for SortExec {
 
         if let Some(mem_tracker) = &self.mem_tracker {
             mem_tracker.replace_bytes_used(0)?;
+            mem_tracker.detach_without_resetting_killer()?;
+        }
+        if let Some(disk_tracker) = &self.disk_tracker {
+            disk_tracker.replace_bytes_used(0)?;
+            disk_tracker.detach_without_resetting_killer()?;
         }
 
         // A task that did not complete (join_err) may have taken the child with it; the
@@ -908,6 +914,38 @@ impl Executor for SortExec {
         match join_err {
             Some(err) => Err(err),
             None => closed,
+        }
+    }
+}
+
+/// Aborts in-flight parallel tasks and zeroes/detaches memory trackers without resetting `SqlKiller`
+/// when `SortExec` is dropped without `close` (e.g. a statement future cancelled mid-`.await`).
+impl Drop for SortExec {
+    // glue: N3 §3.1/§3.5 & A1 (drop-safety guard preserves in-flight SqlKiller signal)
+    fn drop(&mut self) {
+        if let Some(finish_ch) = &self.finish_ch {
+            finish_ch.send_replace(true);
+        }
+        if let Some(spill_action) = &self.unparallel.spill_action {
+            spill_action.set_finished();
+        }
+        self.parallel.tasks.abort_all();
+        self.unparallel.sort_partitions.clear();
+        self.cur_partition = None;
+        self.parallel.workers.clear();
+        self.parallel.sorted_rows_iters.clear();
+        self.parallel.merger = None;
+        self.parallel.chunk_channel = None;
+        self.parallel.chunk_channel_tx = None;
+        self.parallel.result_channel = None;
+        self.parallel.result_channel_tx = None;
+        if let Some(mem_tracker) = &self.mem_tracker {
+            let _ = mem_tracker.replace_bytes_used(0);
+            let _ = mem_tracker.detach_without_resetting_killer();
+        }
+        if let Some(disk_tracker) = &self.disk_tracker {
+            let _ = disk_tracker.replace_bytes_used(0);
+            let _ = disk_tracker.detach_without_resetting_killer();
         }
     }
 }
@@ -1195,6 +1233,7 @@ impl ChunkFetcher {
 /// The state of the result generator's task (Go's goroutine reads `e.Parallel` and
 /// `e.finishCh`).
 struct ResultGenerator {
+    ctx: ExecCtx,
     merger: Option<MultiWayMerger<MemorySource>>,
     sorted_rows_iters: Vec<SharedSortedRowsIter>,
     /// `None` once closed.
@@ -1294,9 +1333,8 @@ impl ResultGenerator {
         loop {
             res_buf.clear();
             for _ in 0..max_chunk_size {
-                // glue: N3-A1 §3.1 item 5 (a time slice in a per-row loop; a send with room in
-                // the channel does not yield)
-                let Ok(()) = stride.checkpoint(&()).await;
+                // glue: N3-A1 §3.1 item 5 (a time slice + kill check via ExecCtx CheckpointHook)
+                stride.checkpoint(&self.ctx).await?;
                 // It's impossible to return error here as rows are in memory
                 let row = merger.next().unwrap_or_default();
                 let Some(row) = row else {
@@ -1432,6 +1470,7 @@ mod generator_tests {
         let (result_tx, mut result_rx) = mpsc::channel(320_001);
         let (_finish_tx, finish_ch) = new_finish_ch();
         let mut generator = ResultGenerator {
+            ctx: ExecCtx::new(Arc::new(tidb_sessionctx::stmtctx::new_stmt_ctx())),
             merger: Some(new_multi_way_merger(
                 MemorySource {
                     sorted_rows_iters: runs.clone(),

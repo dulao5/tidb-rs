@@ -96,6 +96,8 @@ pub enum PhysicalKind {
     TableDual,
     /// `*NominalSort`.
     NominalSort,
+    /// `*Simple`.
+    Simple,
 }
 
 /// The map of `ReplaceExprColumns` / projection elimination: `string(col.HashCode())` →

@@ -4,11 +4,14 @@
 //! `Execute` plan of a prepared statement's execution (D13.1); the other common plans (SET,
 //! SIMPLE, EXPLAIN, ...) come with their blocks.
 
-use tidb_base::Error;
-use tidb_infoschema::tables::find_primary_index;
-use tidb_sessionctx::variable::session::SessionVars;
+use std::sync::Arc;
 
+use tidb_base::Error;
+use tidb_expression::{Schema, new_schema};
+use tidb_infoschema::tables::find_primary_index;
 use tidb_model::TableCacheStatusDisable;
+use tidb_parser::ast::{self, KillStmt};
+use tidb_sessionctx::variable::session::SessionVars;
 
 use tidb_types::datum::Datum;
 use tidb_types::field_name::NameSlice;
@@ -21,6 +24,100 @@ use crate::core::physical_plans::{
 };
 use crate::core::plan_cache_utils::PlanCacheStmtRef;
 use crate::core::point_get_plan::PointGetPlan;
+use crate::core::resolve::ContextRef;
+use crate::physicalop::{BasePhysicalPlan, new_base_physical_plan};
+use crate::planctx::PlanCtx;
+
+/// Lowered fields of `ast.KillStmt` carried by [`Simple`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SimpleKillStmt {
+    pub query: bool,
+    pub connection_id: u64,
+    pub tidb_extension: bool,
+    /// `Some(lower_name)` when a zero-arg function expression (`CONNECTION_ID()`, etc.) was supplied.
+    pub expr_func_name: Option<String>,
+    /// True when the `KILL` expression was not a zero-arg function call.
+    pub expr_invalid: bool,
+}
+
+/// Statements handled directly by `SimpleExec`.
+#[derive(Clone, Debug)]
+pub enum SimpleStmt {
+    Kill(SimpleKillStmt),
+}
+
+/// `plannercore.Simple`: non-relational utility statement plan (e.g. `KILL`).
+// go: plannercore.Simple L2 (covers KILL; USE/BEGIN/COMMIT/ROLLBACK/SET remain on their paths)
+#[derive(Clone)]
+pub struct Simple {
+    pub base: BasePhysicalPlan,
+    pub schema: Schema,
+    pub output_names: NameSlice,
+    pub stmt: SimpleStmt,
+    pub stale_txn_start_ts: u64,
+    pub is_from_remote: bool,
+    pub is_refreshed: bool,
+    pub resolve_ctx: Option<ContextRef>,
+}
+
+impl Simple {
+    /// Constructs a [`Simple`] plan from an `ast::KillStmt`.
+    // go: PlanBuilder.buildSimple / Simple L2
+    pub fn from_kill(ctx: &PlanCtx<'_>, raw: &KillStmt) -> Simple {
+        let (expr_func_name, expr_invalid) = match &raw.expr {
+            None => (None, false),
+            Some(ast::Expr::FuncCall(fc)) if fc.args.is_empty() && fc.schema.o.is_empty() => {
+                (Some(fc.fn_name.l()), false)
+            }
+            Some(_) => (None, true),
+        };
+        Simple {
+            base: new_base_physical_plan(ctx, "Simple", 0),
+            schema: new_schema(Vec::new()),
+            output_names: NameSlice::new(),
+            stmt: SimpleStmt::Kill(SimpleKillStmt {
+                query: raw.query,
+                connection_id: raw.connection_id,
+                tidb_extension: raw.tidb_extension,
+                expr_func_name,
+                expr_invalid,
+            }),
+            stale_txn_start_ts: 0,
+            is_from_remote: false,
+            is_refreshed: false,
+            resolve_ctx: None,
+        }
+    }
+}
+
+impl PhysicalPlan for Simple {
+    crate::physical_plan_boilerplate!(Simple);
+
+    // go: baseimpl.Plan.Schema L1
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    // glue: accessor for schema mutation
+    fn set_schema(&mut self, schema: Schema) {
+        self.schema = schema;
+    }
+
+    // go: baseimpl.Plan.OutputNames L1
+    fn output_names(&self) -> NameSlice {
+        self.output_names.clone()
+    }
+
+    // go: baseimpl.Plan.SetOutputNames L1
+    fn set_output_names(&mut self, names: NameSlice) {
+        self.output_names = names;
+    }
+
+    // go: BasePhysicalPlan.Clone L1
+    fn clone_plan(&self) -> Result<PhysicalPlanRef, Error> {
+        Ok(Arc::new(self.clone()))
+    }
+}
 
 /// Execute represents prepare plan.
 ///

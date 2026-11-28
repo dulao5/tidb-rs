@@ -104,6 +104,8 @@ impl Session {
         self.core.sctx.txn.change_to_invalid();
         self.core.txn_manager = crate::txnmanager::new_txn_manager();
         let vars = self.vars_mut();
+        // Detach any aborted new-stack tracker without wiping an in-flight SqlKiller signal.
+        vars.stmt_ctx().detach_without_resetting_killer();
         cp.stmt_ctx.set_warnings(cp.warnings);
         cp.stmt_ctx.set_extra_warnings(cp.extra_warnings);
         vars.set_stmt_ctx(cp.stmt_ctx);

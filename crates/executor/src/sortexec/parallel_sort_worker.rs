@@ -36,7 +36,7 @@ use super::sort_util::{
     ChunkWithMemoryUsage, DoneGuard, FinishCh, RowWithError, SharedSortedRowsIter, WaitGroup,
     inject_parallel_sort_random_fail, new_sorted_rows_iter, process_panic_and_log,
 };
-use crate::internal::exec::executor::ExecutorKillerHandler;
+use crate::exec::ExecCtx;
 
 /// SignalCheckpointForSort indicates the times of row comparation that a signal detection
 /// will be triggered.
@@ -86,7 +86,7 @@ pub struct ParallelSortWorker {
     row_num_in_chunk_iters: usize,
     merger: Option<MultiWayMerger<MemorySource>>,
 
-    sql_killer: Option<ExecutorKillerHandler>,
+    exec_ctx: ExecCtx,
 }
 
 /// The most rows one batch sort (`sortBatchRows`) takes, whatever the max chunk size. Go
@@ -112,7 +112,7 @@ pub fn new_parallel_sort_worker(
     sorted_rows_iter: SharedSortedRowsIter,
     max_chunk_size: usize,
     spill_helper: Arc<ParallelSortSpillHelper>,
-    sql_killer: Option<ExecutorKillerHandler>,
+    exec_ctx: ExecCtx,
 ) -> ParallelSortWorker {
     ParallelSortWorker {
         worker_id_for_test,
@@ -131,7 +131,7 @@ pub fn new_parallel_sort_worker(
         chunk_iters: Vec::new(),
         row_num_in_chunk_iters: 0,
         merger: None,
-        sql_killer,
+        exec_ctx,
     }
 }
 
@@ -181,19 +181,11 @@ impl ParallelSortWorker {
             .insert(new_multi_way_merger(source, self.less_row_func.clone()));
         merger.init()?;
 
-        let mut loop_cnt: u64 = 0;
         let mut stride = CheckpointStride::new(MERGE_CHECKPOINT_STRIDE);
 
         loop {
-            if loop_cnt.is_multiple_of(100)
-                && let Some(sql_killer) = &self.sql_killer
-            {
-                sql_killer.handle_sql_killer_signal()?;
-            }
-            // glue: N3-A1 §3.1 item 5 (a time slice in a per-row loop, beside Go's kill check)
-            let Ok(()) = stride.checkpoint(&()).await;
-
-            loop_cnt += 1;
+            // glue: N3-A1 §3.1 item 5 (a time slice + kill check via ExecCtx CheckpointHook)
+            stride.checkpoint(&self.exec_ctx).await?;
 
             // It's impossible to return error here as rows are in memory
             let row = merger.next().unwrap_or_default();
@@ -318,9 +310,8 @@ impl ParallelSortWorker {
 
         if self.row_num_in_chunk_iters >= self.max_sorted_rows_limit {
             self.sort_batch_rows()?;
-            // glue: N3-A1 §3.1 item 5 (a time slice after each batch sort: with chunks already
-            // queued, `recv` returns at once and the next batch would follow in the same poll)
-            let Ok(()) = tidb_runtime::slice::checkpoint(&()).await;
+            // glue: N3-A1 §3.1 item 5 (a time slice + kill check after each batch sort, #371)
+            self.exec_ctx.checkpoint().await?;
         }
 
         self.inject_fail_point_for_parallel_sort_worker(3);
@@ -330,10 +321,9 @@ impl ParallelSortWorker {
     /// Returns the comparison of the two rows, or the kill error Go panics with.
     // go: parallelSortWorker.keyColumnsLess L2 (the kill error is returned; failpoint SignalCheckpointForSort not ported: no failpoints [M-PANIC])
     fn key_columns_less(&mut self, i: &RowHandle, j: &RowHandle) -> Result<isize, Error> {
-        if self.times_of_row_compare >= SignalCheckpointForSort
-            && let Some(sql_killer) = &self.sql_killer
-        {
-            sql_killer.handle_sql_killer_signal()?;
+        if self.times_of_row_compare >= SignalCheckpointForSort {
+            use tidb_runtime::CheckpointHook;
+            self.exec_ctx.check()?;
 
             self.times_of_row_compare = 0;
         }
@@ -400,7 +390,7 @@ mod tests {
             Arc::new(parking_lot::Mutex::new(new_sorted_rows_iter(Vec::new()))),
             32,
             Arc::new(new_parallel_sort_spill_helper()),
-            None,
+            ExecCtx::new(Arc::new(tidb_sessionctx::stmtctx::new_stmt_ctx())),
         );
         worker.local_sorted_rows = sorted_runs(8, 40_000);
         let polls = Arc::new(AtomicUsize::new(0));
@@ -473,7 +463,7 @@ mod tests {
             Arc::new(parking_lot::Mutex::new(new_sorted_rows_iter(Vec::new()))),
             max_chunk_size,
             Arc::new(new_parallel_sort_spill_helper()),
-            None,
+            ExecCtx::new(Arc::new(tidb_sessionctx::stmtctx::new_stmt_ctx())),
         );
         let polls = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&polls);
@@ -590,7 +580,7 @@ mod tests {
                 Arc::new(parking_lot::Mutex::new(new_sorted_rows_iter(Vec::new()))),
                 max_chunk_size,
                 Arc::new(new_parallel_sort_spill_helper()),
-                None,
+                ExecCtx::new(Arc::new(tidb_sessionctx::stmtctx::new_stmt_ctx())),
             );
             // Measures Go's batch of 30 chunks, above the cap of `MAX_SORTED_ROWS_PER_BATCH`.
             worker.max_sorted_rows_limit = max_chunk_size * 30;
@@ -655,7 +645,7 @@ mod tests {
             Arc::new(parking_lot::Mutex::new(new_sorted_rows_iter(Vec::new()))),
             1,
             Arc::new(new_parallel_sort_spill_helper()),
-            None,
+            ExecCtx::new(Arc::new(tidb_sessionctx::stmtctx::new_stmt_ctx())),
         );
         let task = tokio::spawn(async move {
             worker.run().await;

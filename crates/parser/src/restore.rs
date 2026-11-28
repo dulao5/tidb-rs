@@ -757,8 +757,29 @@ impl Stmt {
             }
             Stmt::Show(s) => s.restore(out),
             Stmt::Execute(e) => e.restore(out),
+            Stmt::Kill(k) => k.restore(out),
             Stmt::Unported(n) => Err(format!("unported stmt {}", n.kind)),
         }
+    }
+}
+
+impl KillStmt {
+    fn restore(&self, out: &mut String) -> R {
+        out.push_str("KILL");
+        if self.tidb_extension {
+            out.push_str(" TIDB");
+        }
+        if self.query {
+            out.push_str(" QUERY");
+        }
+        if let Some(expr) = &self.expr {
+            out.push(' ');
+            expr.restore(out)?;
+        } else {
+            use std::fmt::Write;
+            let _ = write!(out, " {}", self.connection_id);
+        }
+        Ok(())
     }
 }
 

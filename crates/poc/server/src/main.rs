@@ -28,6 +28,7 @@ use tidb_meta::SchemaCache;
 use tidb_mysql_protocol::constants::auth_plugin;
 use tidb_mysql_protocol::tls::{self, TlsConfig};
 use tidb_mysql_protocol::{Credential, Server, ServerConfig};
+use tidb_sessionctx::session_mgr::SessionManager;
 
 // Process-wide allocator: jemalloc (A1 / P0 decision D7), the same one the benchmarks use.
 #[global_allocator]
@@ -460,14 +461,17 @@ fn main() {
             new_collation_enabled: new_collation,
             ..DagContext::select_utc()
         };
-        let sync = if args.schema_sync {
+        let has_status_server = status_listener.is_some();
+        let (session_mgr, sync) = if args.schema_sync {
+            let mgr = tidb_server::session_mgr::ServerSessionManager::new_with_server_id(0, false);
             let ip = advertise_ip(&args, &effective_host);
             let info = ServerInfo::new(
                 ip.to_string(),
                 u32::from(effective_port),
                 u32::from(advertised_status_port),
             )
-            .with_version(config.server_version.clone());
+            .with_version(config.server_version.clone())
+            .with_disable_rpc(!has_status_server);
             let mut cfg = SyncConfig::new(args.pd.clone(), info, dag.clone());
             cfg.limits.schema_lease = args.lease;
             cfg.limits.max_staleness = args
@@ -476,15 +480,42 @@ fn main() {
             cfg.stall_file = args.schema_sync_stall_file.clone();
             // The new stack's InfoSchema (the ported domain) only when the new stack is on.
             cfg.ported_domain = new_stack.uses_ported_domain();
+            cfg.acquire_server_id = tidb_cfg.enable_global_kill;
+            cfg.enable_32bits_conn_id = tidb_cfg.enable_32bits_connection_id;
+            let mgr_for_sid = std::sync::Arc::clone(&mgr);
+            cfg.on_server_id_change = Some(std::sync::Arc::new(move |id, valid| {
+                mgr_for_sid.set_server_id(id, valid);
+            }));
+            let mgr_for_kill_all = std::sync::Arc::clone(&mgr);
+            cfg.kill_all_connections = Some(std::sync::Arc::new(move || {
+                mgr_for_kill_all.kill_all_connections();
+            }));
             let sync = SchemaSync::start(kv.clone(), cfg)
                 .await
                 .map_err(|e| std::io::Error::other(format!("start schema sync: {e}")))?;
-            Some(sync)
+            if tidb_cfg.enable_global_kill {
+                let sid = sync.server_id();
+                mgr.set_server_id(sid, sid != 0);
+            } else {
+                // Global kill disabled: fall back to local ID allocation cleanly.
+                mgr.set_server_id(1, true);
+            }
+            let sync_for_kill = sync.clone();
+            mgr.set_remote_kill_hook(std::sync::Arc::new(move |target_sid, conn_id, query| {
+                let sync = sync_for_kill.clone();
+                Box::pin(
+                    async move { rpc::send_remote_kill(&sync, target_sid, conn_id, query).await },
+                )
+            }));
+            (mgr, Some(sync))
         } else {
             tidb_base::log_info!(
                 "schema sync is off: every statement checks the schema version (ADR 0003)",
             );
-            None
+            (
+                tidb_server::session_mgr::ServerSessionManager::new_standalone(),
+                None,
+            )
         };
         let priv_sync = poc_domain::PrivilegeSync::start(kv.clone(), args.pd.clone())
             .await
@@ -507,8 +538,9 @@ fn main() {
             tls_enabled: config.tls.is_some(),
         })
         .with_new_stack(new_stack)
-        .map_err(std::io::Error::other)?;
-        let factory = factory.with_sys_var_cache(std::sync::Arc::clone(sys_vars.cache()));
+        .map_err(std::io::Error::other)?
+        .with_sys_var_cache(std::sync::Arc::clone(sys_vars.cache()))
+        .with_session_manager(std::sync::Arc::clone(&session_mgr));
         if new_stack != poc_session::router::NewStackMode::Off {
             let mode_str = format!("{new_stack:?}");
             tidb_base::log_info!(
@@ -536,12 +568,12 @@ fn main() {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let (stop_status, status_stopped) = tokio::sync::oneshot::channel::<()>();
         let (status_done_tx, status_done_rx) = tokio::sync::oneshot::channel::<()>();
-        let has_status_server = status_listener.is_some();
         if let Some(status_listener) = status_listener {
             let info = status::StatusInfo {
                 version: config.server_version.clone(),
                 git_hash: tidb_log::TIDB_GIT_HASH.to_owned(),
                 listen_host: effective_status_host.clone(),
+                session_mgr: Some(std::sync::Arc::clone(&session_mgr)),
             };
             pool.spawn("status-server", async move {
                 status::serve(status_listener, info, async move {

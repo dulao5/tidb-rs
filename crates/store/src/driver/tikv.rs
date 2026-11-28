@@ -34,6 +34,7 @@ use tidb_kv::Context;
 use tidb_kv::context::RequestSource;
 use tidb_kv::kv::{BatchGetOption, GetOption, ValueEntry};
 use tidb_kv::option::ReplicaReadType;
+use tidb_memory::sqlkiller::SqlKiller;
 use tikv_client::proto::metapb;
 use tikv_client::{
     Backoff, RetryOptions, Timestamp, TimestampExt, TransactionClient, TransactionOptions,
@@ -466,15 +467,29 @@ impl KVSnapshot {
     // go-l3: ADR-0008 client-go txnkv/txnsnapshot KVSnapshot.Get
     pub async fn get(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         k: &[u8],
         options: &[GetOption],
     ) -> Result<ValueEntry, TiKVError> {
         let return_commit_ts = options.contains(&GetOption::ReturnCommitTS);
         self.check_supported()?;
-        let value = {
-            let mut inner = self.inner.lock().await;
-            self.client_snapshot(&mut inner).get(k.to_vec()).await?
+        let value = match ctx.kill_cancel() {
+            Some(kc) => {
+                tokio::select! {
+                    biased;
+                    _ = kc.cancelled() => {
+                        return Err(TiKVError::Plain(SqlKiller::signal_to_error(kc.signal(), 0)));
+                    }
+                    res = async {
+                        let mut inner = self.inner.lock().await;
+                        self.client_snapshot(&mut inner).get(k.to_vec()).await
+                    } => res?,
+                }
+            }
+            None => {
+                let mut inner = self.inner.lock().await;
+                self.client_snapshot(&mut inner).get(k.to_vec()).await?
+            }
         };
         let entry = match value {
             Some(v) if !v.is_empty() => tidb_kv::kv::new_value_entry(v, 0),
@@ -488,7 +503,7 @@ impl KVSnapshot {
     // go-l3: ADR-0008 client-go txnkv/txnsnapshot KVSnapshot.BatchGet
     pub async fn batch_get(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         keys: &[Vec<u8>],
         options: &[BatchGetOption],
     ) -> Result<std::collections::HashMap<Vec<u8>, ValueEntry>, TiKVError> {
@@ -498,12 +513,26 @@ impl KVSnapshot {
             return Ok(m);
         }
         self.check_supported()?;
-        let pairs: Vec<tikv_client::KvPair> = {
-            let mut inner = self.inner.lock().await;
-            self.client_snapshot(&mut inner)
-                .batch_get(keys.to_vec())
-                .await?
-                .collect()
+        let pairs: Vec<tikv_client::KvPair> = match ctx.kill_cancel() {
+            Some(kc) => {
+                tokio::select! {
+                    biased;
+                    _ = kc.cancelled() => {
+                        return Err(TiKVError::Plain(SqlKiller::signal_to_error(kc.signal(), 0)));
+                    }
+                    res = async {
+                        let mut inner = self.inner.lock().await;
+                        self.client_snapshot(&mut inner).batch_get(keys.to_vec()).await
+                    } => res?.collect(),
+                }
+            }
+            None => {
+                let mut inner = self.inner.lock().await;
+                self.client_snapshot(&mut inner)
+                    .batch_get(keys.to_vec())
+                    .await?
+                    .collect()
+            }
         };
         for pair in pairs {
             let (k, v) = (Vec::<u8>::from(pair.0), pair.1);

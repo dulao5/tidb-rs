@@ -1447,6 +1447,18 @@ impl StatementContext {
         }
     }
 
+    /// Detaches memory and disk trackers from the session tracker without resetting the
+    /// session root's `SqlKiller` (used by `StmtCheckpoint::restore` on fallback).
+    // glue: DetachMemDiskTracker variant preserving in-flight KILL on fallback restore
+    pub fn detach_without_resetting_killer(&self) {
+        if let Some(t) = &self.mem_tracker {
+            let _ = t.detach_without_resetting_killer();
+        }
+        if let Some(t) = &self.disk_tracker {
+            let _ = t.detach_without_resetting_killer();
+        }
+    }
+
     /// The normalized plan of `SetPlanDigest` (the digest itself waits for `parser.Digest`).
     // glue: planNormalized of GetPlanDigest without the digest
     pub fn plan_normalized(&self) -> &str {

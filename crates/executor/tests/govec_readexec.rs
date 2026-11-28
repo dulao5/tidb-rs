@@ -495,6 +495,7 @@ impl SessionContext for ReplaySession {
             domain_info_schema: None,
             instance_plan_cache: None,
             privilege_manager: None,
+            session_manager: None,
         }
     }
 }

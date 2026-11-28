@@ -9,6 +9,8 @@ pub mod compare;
 pub mod convert;
 
 use std::cmp::Ordering;
+use std::future::Future;
+use std::sync::Arc;
 
 use poc_kv::KvSnapshot;
 use tidb_distsql::DagContext;
@@ -16,8 +18,11 @@ use tidb_distsql::DagSpec;
 use tidb_distsql::Datum;
 use tidb_distsql::SelectOptions;
 use tidb_distsql::split_ranges_across_int64_boundary;
+use tidb_memory::sqlkiller::SqlKiller;
 use tidb_mysql_protocol::SqlError;
 use tidb_mysql_protocol::Value;
+use tidb_runtime::CheckpointHook;
+use tidb_runtime::cancel::KillCancel;
 use tidb_sql::Plan;
 use tidb_sql::plan::Source;
 
@@ -29,12 +34,64 @@ pub struct ExecContext {
     pub dag: DagContext,
     /// Schema version the plan was built against (sent with coprocessor requests).
     pub schema_version: i64,
+    /// Optional kill signal checked across `poc-executor` checkpoints and KV reads.
+    pub killer: Option<Arc<SqlKiller>>,
+    /// Resettable session cancellation notifier paired with [`Self::killer`].
+    pub kill_cancel: Option<KillCancel>,
+}
+
+struct PocKillHook<'a>(&'a SqlKiller);
+
+impl CheckpointHook for PocKillHook<'_> {
+    type Error = tidb_base::Error;
+
+    fn check(&self) -> Result<(), Self::Error> {
+        self.0.handle_signal()
+    }
+}
+
+async fn check_killed(cx: &ExecContext) -> Result<(), SqlError> {
+    if let Some(killer) = &cx.killer {
+        if let Err(err) = tidb_runtime::checkpoint(&PocKillHook(killer.as_ref())).await {
+            return Err(SqlError::from_tidb_error(&err));
+        }
+    } else {
+        let Ok(()) = tidb_runtime::checkpoint(&()).await;
+    }
+    Ok(())
+}
+
+async fn cancel_select<T>(
+    cx: &ExecContext,
+    fut: impl Future<Output = Result<T, SqlError>>,
+) -> Result<T, SqlError> {
+    check_killed(cx).await?;
+    let Some(cancel) = &cx.kill_cancel else {
+        return fut.await;
+    };
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
+            if let Some(killer) = &cx.killer
+                && let Err(err) = killer.handle_signal()
+            {
+                return Err(SqlError::from_tidb_error(&err));
+            }
+            Err(SqlError::new(
+                tidb_base::errno::ErrQueryInterrupted,
+                "Query execution was interrupted",
+            ))
+        }
+        res = fut => res,
+    }
 }
 
 /// Maps a read-path error to a client error.
 pub fn distsql_error(e: tidb_distsql::Error) -> SqlError {
     match e {
         tidb_distsql::Error::Unsupported(s) => SqlError::not_supported(s),
+        tidb_distsql::Error::Killed(err) => SqlError::from_tidb_error(&err),
+        tidb_distsql::Error::Kv(poc_kv::Error::Copr(err)) => SqlError::from_tidb_error(&err),
         other => SqlError::unknown(other.to_string()),
     }
 }
@@ -49,10 +106,14 @@ pub async fn read_source(
     match &plan.source {
         Source::Dual => Ok(Vec::new()),
         Source::PointGet { handle } => {
-            let row = tidb_distsql::point_get(snapshot, &plan.table, *handle, &columns, &cx.dag)
-                .await
-                .map_err(distsql_error)?;
-            Ok(row.into_iter().collect())
+            cancel_select(cx, async {
+                let row =
+                    tidb_distsql::point_get(snapshot, &plan.table, *handle, &columns, &cx.dag)
+                        .await
+                        .map_err(distsql_error)?;
+                Ok(row.into_iter().collect())
+            })
+            .await
         }
         Source::TableReader {
             range,
@@ -84,6 +145,7 @@ pub async fn read_source(
             let (first, second) = split_ranges_across_int64_boundary(&[*range], *keep_order, *desc);
             let mut rows = Vec::new();
             for part in [first, second] {
+                check_killed(cx).await?;
                 // go: distsql.tableRangesToKVRangesWithoutSplit: one key range per handle
                 // range, in the given order.
                 let key_ranges: Vec<_> = part
@@ -93,9 +155,19 @@ pub async fn read_source(
                 if key_ranges.is_empty() {
                     continue;
                 }
-                let part_rows = tidb_distsql::select(snapshot, &dag, key_ranges, options)
+                let part_rows = cancel_select(cx, async {
+                    tidb_distsql::select_with_killer(
+                        snapshot,
+                        &dag,
+                        key_ranges,
+                        options,
+                        cx.killer.clone(),
+                        cx.kill_cancel.clone(),
+                    )
                     .await
-                    .map_err(distsql_error)?;
+                    .map_err(distsql_error)
+                })
+                .await?;
                 rows.extend(part_rows.rows);
             }
             Ok(rows)
@@ -163,6 +235,6 @@ pub async fn execute(
     let rows = read_source(plan, snapshot, cx).await?;
     // N3 checkpoint between reading and the root operators (aggregation, sort), which run
     // without yielding in the PoC.
-    let Ok(()) = tidb_runtime::checkpoint(&()).await;
+    check_killed(cx).await?;
     finish(plan, rows, cx.dag.new_collation_enabled)
 }

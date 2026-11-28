@@ -5,16 +5,17 @@
 
 use std::sync::Arc;
 
+use tidb_base::Error;
+use tidb_memory::sqlkiller::SqlKiller;
+use tidb_memory::tracker::Tracker;
+use tidb_runtime::cancel::KillCancel;
 use tidb_runtime::pool::ExecPool;
+use tidb_runtime::slice::CpuRecorder;
+use tidb_runtime::{CheckpointHook, StoreWindows};
 use tidb_sessionctx::stmtctx::StatementContext;
 
 /// What an executor (and any worker task it spawns) may use while the statement runs (N3
 /// §3.1, N2): cheap to clone, `Send + Sync`, no `SessionVars`.
-///
-/// The other fields of foundation-interfaces §2 (cancellation token, statement `MemTracker`,
-/// resource group, CPU recorder, store windows) and `checkpoint()` arrive with the first
-/// executors that use them, wired to `tidb-runtime`. The SQL killer is in the base executor
-/// (`executorKillerHandler`), as in Go.
 #[derive(Clone)]
 pub struct ExecCtx {
     /// The statement context, frozen for the execution (N2 `Arc<StmtCtx>`).
@@ -25,13 +26,82 @@ pub struct ExecCtx {
     /// detected (N3-A1 §3.1 item 5, §3.6). `None` spawns them on the current tokio runtime, as
     /// the coprocessor client does without a pool: contexts that are not a session, and tests.
     pub pool: Option<ExecPool>,
+    /// Per-session SQL killer carrying kill / OOM / timeout signals and 1s connection-alive probes.
+    pub killer: Arc<SqlKiller>,
+    /// Resettable session-level cancellation notifier paired with [`Self::killer`].
+    pub cancel: KillCancel,
+    /// Optional per-statement CPU time recorder.
+    pub cpu: Option<CpuRecorder>,
+    /// Optional per-store latency/concurrency windows.
+    pub store_windows: Option<Arc<StoreWindows>>,
 }
 
 impl ExecCtx {
-    /// A context for the statement `stmt`.
+    /// A context for the statement `stmt` with an isolated [`SqlKiller`] and [`KillCancel`].
     // glue: N3
     pub fn new(stmt: Arc<StatementContext>) -> ExecCtx {
-        ExecCtx { stmt, pool: None }
+        let killer = SqlKiller::new();
+        let cancel = KillCancel::new(killer.signal_handle());
+        ExecCtx {
+            stmt,
+            pool: None,
+            killer,
+            cancel,
+            cpu: None,
+            store_windows: None,
+        }
+    }
+
+    /// A context for `stmt` wired to an existing [`SqlKiller`] and [`KillCancel`].
+    // glue: N3
+    pub fn with_killer(
+        stmt: Arc<StatementContext>,
+        killer: Arc<SqlKiller>,
+        cancel: KillCancel,
+    ) -> ExecCtx {
+        ExecCtx {
+            stmt,
+            pool: None,
+            killer,
+            cancel,
+            cpu: None,
+            store_windows: None,
+        }
+    }
+
+    /// Yields cleanly at a checkpoint and checks the statement's kill / OOM signal.
+    // glue: N3 §3.1 cooperative checkpoint
+    #[inline]
+    pub async fn checkpoint(&self) -> Result<(), Error> {
+        tidb_runtime::checkpoint(self).await
+    }
+}
+
+impl CheckpointHook for ExecCtx {
+    type Error = Error;
+
+    // Invariant (A1 §3.3): never call `stmt.mem_tracker.checkpoint()` here; only leaf
+    // operators owning allocations flush & checkpoint their own tracker.
+    #[inline]
+    fn check(&self) -> Result<(), Error> {
+        self.killer.handle_signal()
+    }
+}
+
+/// Combined leaf-memory and kill checkpoint hook for tight operator loops that both allocate
+/// via `TrackedAlloc` and check kill signals.
+pub struct OpCheckpoint<'a> {
+    pub ctx: &'a ExecCtx,
+    pub mem: &'a Arc<Tracker>,
+}
+
+impl CheckpointHook for OpCheckpoint<'_> {
+    type Error = Error;
+
+    #[inline]
+    fn check(&self) -> Result<(), Error> {
+        self.mem.checkpoint()?;
+        self.ctx.check()
     }
 }
 

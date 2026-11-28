@@ -1699,14 +1699,6 @@ async fn hash_agg_reopen_asymmetric_concurrency_nil_and_kill() {
     {
         let sctx = parallel_ctx(2, 2);
         let killer = sctx.sql_killer();
-        let base_killer = new_base_executor_v2(
-            sctx.get_session_vars(),
-            &killer,
-            Some(schema_of(&tps)),
-            99,
-            Vec::new(),
-        )
-        .killer;
         let tracker = new_tracker(99, -1);
         let alloc = TrackedAlloc::new(Arc::clone(&tracker));
         let (_finish_tx, finish_rx) = watch::channel(false);
@@ -1767,7 +1759,11 @@ async fn hash_agg_reopen_asymmetric_concurrency_nil_and_kill() {
             final_result_holder_tx: holder_tx,
             spill_helper,
             eval_ctx: sctx.get_expr_ctx().get_eval_ctx(),
-            sql_killer: base_killer,
+            exec_ctx: ExecCtx::with_killer(
+                sctx.vars.stmt_ctx_arc(),
+                Arc::clone(&killer),
+                tidb_runtime::cancel::KillCancel::new(killer.signal_handle()),
+            ),
         };
         let pwg = Arc::new(WaitGroup::new());
         let fwg = Arc::new(WaitGroup::new());

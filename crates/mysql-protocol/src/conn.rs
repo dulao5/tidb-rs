@@ -90,6 +90,91 @@ impl ConnStatus {
     }
 }
 
+/// RAII guard unregistering a connection ID from [`tidb_server::session_mgr::ServerSessionManager`]
+/// on exit, panic, or task drop.
+struct UnregisterConnGuard {
+    mgr: Option<Arc<tidb_server::session_mgr::ServerSessionManager>>,
+    conn_id: u64,
+}
+
+impl Drop for UnregisterConnGuard {
+    fn drop(&mut self) {
+        if let Some(mgr) = &self.mgr {
+            mgr.unregister_conn(self.conn_id);
+        }
+    }
+}
+
+/// RAII guard clearing `SqlKiller` connection-alive, finish-func, `InWriteResultSet`, and
+/// `ConnControl.finish_cancel` at statement completion or future drop.
+struct KillCleanupGuard<'a> {
+    ctrl: Option<&'a Arc<tidb_server::session_mgr::ConnControl>>,
+}
+
+impl Drop for KillCleanupGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(ctrl) = self.ctrl {
+            ctrl.killer.is_connection_alive.store(None);
+            ctrl.killer
+                .in_write_result_set
+                .store(false, Ordering::SeqCst);
+            ctrl.killer.clear_finish_func();
+            ctrl.clear_finish_cancel();
+        }
+    }
+}
+
+/// RAII guard resetting `SqlKiller` at `dispatch` exit (matching Go `conn.go:1314`
+/// `defer cc.ctx.GetSessionVars().SQLKiller.Reset()`) so `"kill finished"` is always logged
+/// before `"command dispatched failed"` even when a command future is dropped or errors.
+struct DispatchResetGuard<'a> {
+    ctrl: Option<&'a Arc<tidb_server::session_mgr::ConnControl>>,
+}
+
+impl Drop for DispatchResetGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(ctrl) = self.ctrl {
+            ctrl.killer.reset();
+        }
+    }
+}
+
+async fn wait_conn_shutdown(ctrl: Option<&tidb_server::session_mgr::ConnControl>) {
+    match ctrl {
+        Some(c) => c.conn_shutdown.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+fn install_connection_alive<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    io: &PacketIo<S>,
+    ctrl: Option<&Arc<tidb_server::session_mgr::ConnControl>>,
+) {
+    if let Some(ctrl) = ctrl {
+        let probe = io.is_connection_alive_probe();
+        ctrl.killer.is_connection_alive.store(Some(Arc::new(probe)));
+    }
+}
+
+fn check_write_kill(
+    ctrl: Option<&Arc<tidb_server::session_mgr::ConnControl>>,
+    finish_cancel: Option<&tidb_runtime::cancel::ChildToken>,
+) -> Result<(), ConnError> {
+    let Some(ctrl) = ctrl else {
+        return Ok(());
+    };
+    if finish_cancel.is_some_and(|fc| fc.is_cancelled()) || ctrl.killer.get_kill_signal() != 0 {
+        if let Err(err) = ctrl.killer.handle_signal() {
+            return Err(ConnError::Sql(SqlError::from_tidb_error(&err)));
+        }
+        return Err(ConnError::Sql(SqlError::new(
+            code::ER_QUERY_INTERRUPTED,
+            "Query execution was interrupted",
+        )));
+    }
+    Ok(())
+}
+
 /// Runs a connection to completion. Errors are logged, never propagated.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run<S, F>(
@@ -102,20 +187,30 @@ pub(crate) async fn run<S, F>(
     admission: Option<tidb_runtime::Admission>,
     status: Arc<ConnStatus>,
 ) where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     F: SessionFactory,
 {
     // Go counts the connection from accept (`newConn`) until it is closed.
     let _gauge = ConnectionGauge::new();
+    let mgr = factory.session_manager();
+    let _unregister_guard = UnregisterConnGuard {
+        mgr: mgr.clone(),
+        conn_id: connection_id,
+    };
     let accepted = Instant::now();
     let io = PacketIo::new(MaybeTls::Plain(stream), config.max_allowed_packet);
     let mut conn = match handshake(io, &peer, connection_id, config, factory).await {
         Ok((mut io, (handler, capability, user))) => {
             io.flush_counts();
+            let ctrl = handler.conn_control();
+            if let (Some(mgr), Some(ctrl_ref)) = (&mgr, &ctrl) {
+                mgr.register_conn(Arc::clone(ctrl_ref));
+            }
             Conn {
                 io,
                 capability,
                 handler,
+                ctrl,
                 peer: peer.clone(),
                 user,
                 last_sql: String::new(),
@@ -344,10 +439,9 @@ where
                         HandshakeError::Other(e.to_string())
                     }
                 })?;
-            let mut io = PacketIo::new(
-                MaybeTls::Tls(Box::new(tls_stream)),
-                config.max_allowed_packet,
-            );
+            let maybe_tls = MaybeTls::Tls(Box::new(tls_stream));
+            let cipher = maybe_tls.cipher();
+            let mut io = PacketIo::new(maybe_tls, config.max_allowed_packet);
             io.set_sequence(seq);
             let data = io.read_packet().await.map_err(|e| {
                 // Go pkg/server/conn.go:613-616: WARN for any read error after TLS upgrade.
@@ -359,8 +453,17 @@ where
                 );
                 HandshakeError::from(e)
             })?;
-            let accepted =
-                authenticate(&mut io, &data, &salt, peer, connection_id, config, factory).await?;
+            let accepted = authenticate(
+                &mut io,
+                &data,
+                &salt,
+                peer,
+                connection_id,
+                config,
+                factory,
+                cipher,
+            )
+            .await?;
             Ok((io, accepted))
         }
     }
@@ -453,12 +556,13 @@ where
         write_handshake_err(io, CLIENT_PROTOCOL_41, connection_id, &e).await;
         return Err(HandshakeError::Other("malform packet error".into()));
     }
-    authenticate(io, &data, &salt, peer, connection_id, config, factory)
+    authenticate(io, &data, &salt, peer, connection_id, config, factory, None)
         .await
         .map(Outcome::Done)
 }
 
 /// Parses the handshake response, authenticates and opens the session.
+#[allow(clippy::too_many_arguments)]
 async fn authenticate<S, F>(
     io: &mut PacketIo<MaybeTls<S>>,
     data: &[u8],
@@ -467,6 +571,7 @@ async fn authenticate<S, F>(
     connection_id: u64,
     config: &ServerConfig,
     factory: &F,
+    tls_cipher: Option<String>,
 ) -> Result<Accepted<F>, HandshakeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -635,7 +740,7 @@ where
                         );
                         HandshakeError::from(e)
                     })?;
-                    if io.get_ref().cipher().is_none() {
+                    if tls_cipher.is_none() {
                         // Never accept cleartext passwords or RSA pubkey requests (0x02) over
                         // plain TCP (Go TiDB v8.5.8 also rejects 0x02 with 1045).
                         (false, true)
@@ -704,7 +809,7 @@ where
         database: resp.database.clone(),
         collation: resp.collation,
         capability,
-        tls_cipher: io.get_ref().cipher(),
+        tls_cipher,
     };
     let mut handler = match factory.open_session(&info) {
         Ok(h) => h,
@@ -999,6 +1104,7 @@ struct Conn<S, H> {
     io: PacketIo<S>,
     capability: u32,
     handler: H,
+    ctrl: Option<Arc<tidb_server::session_mgr::ConnControl>>,
     peer: String,
     user: String,
     last_sql: String,
@@ -1018,13 +1124,33 @@ struct Conn<S, H> {
     status: Arc<ConnStatus>,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static, H: SessionHandler> Conn<S, H> {
     async fn command_loop(&mut self, connection_id: u64) {
         loop {
+            if self
+                .ctrl
+                .as_deref()
+                .is_some_and(tidb_server::session_mgr::ConnControl::is_wait_shutdown)
+            {
+                tidb_metrics::disconnected(tidb_metrics::Disconnect::Ok);
+                return;
+            }
             self.io.reset_sequence();
             let in_txn = (self.handler.status_flags() & crate::constants::status::IN_TRANS) != 0;
             self.status.set_reading(true, in_txn);
-            let data = match self.io.read_packet().await {
+            let read_res = {
+                let ctrl_ref = self.ctrl.as_deref();
+                tokio::select! {
+                    biased;
+                    _ = wait_conn_shutdown(ctrl_ref) => {
+                        self.status.set_reading(false, in_txn);
+                        tidb_metrics::disconnected(tidb_metrics::Disconnect::Ok);
+                        return;
+                    }
+                    r = self.io.read_packet() => r,
+                }
+            };
+            let data = match read_res {
                 Ok(d) => {
                     self.status.set_reading(false, in_txn);
                     d
@@ -1079,9 +1205,37 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                     // (`tidb_server_panic_total{type="session"}`), and the connection is
                     // closed. The session is dropped with the connection, so no state of the
                     // half-run command survives.
-                    match tidb_base::panic_guard::catch_unwind_future(self.dispatch(cmd, body))
-                        .await
-                    {
+                    if let Some(ctrl) = &self.ctrl {
+                        if ctrl.is_wait_shutdown() {
+                            self.command_metrics(cmd, start, Some("query interrupted"));
+                            tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
+                            return;
+                        }
+                        // Go conn.go:1384: reset killed for each request after acquiring token.
+                        ctrl.killer.reset();
+                    }
+                    let ctrl_clone = self.ctrl.clone();
+                    let dispatch_res = {
+                        let _reset_guard = DispatchResetGuard {
+                            ctrl: ctrl_clone.as_ref(),
+                        };
+                        let mut fut = std::pin::pin!(tidb_base::panic_guard::catch_unwind_future(
+                            self.dispatch(cmd, body)
+                        ));
+                        tokio::select! {
+                            biased;
+                            _ = wait_conn_shutdown(ctrl_clone.as_deref()) => {
+                                None
+                            }
+                            r = &mut fut => Some(r),
+                        }
+                    };
+                    let Some(catch_res) = dispatch_res else {
+                        self.command_metrics(cmd, start, Some("query interrupted"));
+                        tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
+                        return;
+                    };
+                    match catch_res {
                         Ok(r) => r,
                         Err((payload, bt)) => {
                             let msg =
@@ -1203,7 +1357,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                 }
             };
             self.command_metrics(cmd.unwrap_or(command::SLEEP), start, error);
-            if !keep_going {
+            self.handler.set_process_info_command("", command::SLEEP);
+            if !keep_going
+                || self
+                    .ctrl
+                    .as_deref()
+                    .is_some_and(tidb_server::session_mgr::ConnControl::is_wait_shutdown)
+            {
                 tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
                 return;
             }
@@ -1227,14 +1387,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
         match cmd {
             command::INIT_DB => {
                 let db = std::str::from_utf8(body).map_err(|_| SqlError::malformed())?;
+                self.handler
+                    .set_process_info_command(&format!("use {db}"), cmd);
                 self.handler.use_db(db).await?;
                 self.write_ok(&OkInfo::default()).await
             }
             command::QUERY => {
                 let sql = sql_text(body)?;
+                self.handler.set_process_info_command(sql, cmd);
                 let start = Instant::now();
+                let ctrl = self.ctrl.clone();
+                let _guard = KillCleanupGuard {
+                    ctrl: ctrl.as_ref(),
+                };
+                let alive_during_exec = self
+                    .handler
+                    .should_install_connection_alive_during_execute();
+                if alive_during_exec {
+                    install_connection_alive(&self.io, ctrl.as_ref());
+                }
                 let resp = self.handler.query(sql).await;
-                self.write_timed(start, resp, false).await
+                self.write_timed(start, resp, false, alive_during_exec)
+                    .await
             }
             command::PING => self.write_ok(&OkInfo::default()).await,
             command::STATISTICS => {
@@ -1245,10 +1419,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                 self.io.write_packet(s.as_bytes()).await?;
                 Ok(self.io.flush().await?)
             }
-            command::STMT_PREPARE => self.stmt_prepare(body).await,
+            command::STMT_PREPARE => {
+                let sql = sql_text(body)?;
+                self.handler.set_process_info_command(sql, cmd);
+                self.stmt_prepare(body).await
+            }
             command::STMT_EXECUTE => self.stmt_execute(body).await,
-            command::STMT_SEND_LONG_DATA => self.stmt_send_long_data(body),
+            command::STMT_SEND_LONG_DATA => {
+                self.handler.set_process_info_command("", cmd);
+                self.stmt_send_long_data(body)
+            }
             command::STMT_CLOSE => {
+                self.handler.set_process_info_command("", cmd);
                 if body.len() >= 4 {
                     let id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
                     if self.stmts.remove(&id).is_some() {
@@ -1258,6 +1440,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                 Ok(())
             }
             command::STMT_RESET => {
+                self.handler.set_process_info_command("", cmd);
                 let id = Reader::new(body).u32()?;
                 let stmt = self
                     .stmts
@@ -1267,17 +1450,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                 stmt.last_params.clear();
                 self.write_ok(&OkInfo::default()).await
             }
-            command::SET_OPTION => match Reader::new(body).u16()? {
-                // MYSQL_OPTION_MULTI_STATEMENTS_ON
-                0 => Err(SqlError::not_supported("multi-statements").into()),
-                // MYSQL_OPTION_MULTI_STATEMENTS_OFF: already off.
-                1 => {
-                    self.write_eof(0).await?;
-                    Ok(self.io.flush().await?)
+            command::SET_OPTION => {
+                self.handler.set_process_info_command("", cmd);
+                match Reader::new(body).u16()? {
+                    // MYSQL_OPTION_MULTI_STATEMENTS_ON
+                    0 => Err(SqlError::not_supported("multi-statements").into()),
+                    // MYSQL_OPTION_MULTI_STATEMENTS_OFF: already off.
+                    1 => {
+                        self.write_eof(0).await?;
+                        Ok(self.io.flush().await?)
+                    }
+                    _ => Err(SqlError::malformed().into()),
                 }
-                _ => Err(SqlError::malformed().into()),
-            },
+            }
             command::RESET_CONNECTION => {
+                self.handler.set_process_info_command("", cmd);
                 for id in std::mem::take(&mut self.stmts).into_keys() {
                     self.handler.close(id);
                 }
@@ -1400,13 +1587,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             Vec::new()
         };
         let stmt_sql = stmt.sql.clone();
+        self.handler
+            .set_process_info_command(&stmt_sql, command::STMT_EXECUTE);
         stmt.last_params = params.clone();
         self.last_sql =
             format_stmt_execute_sql_for_log(&stmt_sql, &params, self.handler.redact_mode());
+        let ctrl = self.ctrl.clone();
+        let _guard = KillCleanupGuard {
+            ctrl: ctrl.as_ref(),
+        };
+        let alive_during_exec = self
+            .handler
+            .should_install_connection_alive_during_execute();
+        if alive_during_exec {
+            install_connection_alive(&self.io, ctrl.as_ref());
+        }
         self.handler.execute_flags(id, flags);
         self.handler.execute_raw_params(id, raw);
         let resp = self.handler.execute(id, params).await;
-        self.write_timed(start, resp, true).await
+        self.write_timed(start, resp, true, alive_during_exec).await
     }
 
     /// Write a statement's response and report the timings to the handler.
@@ -1415,10 +1614,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
         start: Instant,
         resp: Result<Response, SqlError>,
         binary: bool,
+        alive_already_installed: bool,
     ) -> Result<(), ConnError> {
         let written = Instant::now();
         let result = match resp {
-            Ok(resp) => self.write_response(resp, binary).await,
+            Ok(resp) => {
+                let is_result_set = matches!(resp, Response::ResultSet(_) | Response::Encoded(_));
+                let mut finish_cancel = None;
+                if is_result_set {
+                    let ctrl = self.ctrl.clone();
+                    if !alive_already_installed {
+                        install_connection_alive(&self.io, ctrl.as_ref());
+                    }
+                    if let Some(ctrl_ref) = ctrl.as_ref() {
+                        ctrl_ref
+                            .killer
+                            .in_write_result_set
+                            .store(true, Ordering::SeqCst);
+                        finish_cancel = Some(ctrl_ref.install_finish_cancel());
+                    }
+                }
+                self.write_response(resp, binary, finish_cancel).await
+            }
             Err(e) => Err(e.into()),
         };
         let end = Instant::now();
@@ -1449,7 +1666,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
         Ok(())
     }
 
-    async fn write_response(&mut self, resp: Response, binary: bool) -> Result<(), ConnError> {
+    async fn write_response(
+        &mut self,
+        resp: Response,
+        binary: bool,
+        finish_cancel: Option<Arc<tidb_runtime::cancel::ChildToken>>,
+    ) -> Result<(), ConnError> {
         match resp {
             Response::Ok(info) => self.write_ok(&info).await,
             Response::ResultSet(rs) if rs.columns.is_empty() => {
@@ -1459,7 +1681,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                 })
                 .await
             }
-            Response::ResultSet(rs) => self.write_result_set(&rs, binary).await,
+            Response::ResultSet(rs) => {
+                self.write_result_set(&rs, binary, finish_cancel.as_deref())
+                    .await
+            }
             Response::Encoded(rs) if rs.column_packets.is_empty() => {
                 self.write_ok(&OkInfo {
                     warnings: rs.warnings,
@@ -1467,14 +1692,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                 })
                 .await
             }
-            Response::Encoded(rs) => self.write_encoded_result_set(&rs).await,
+            Response::Encoded(rs) => {
+                self.write_encoded_result_set(&rs, finish_cancel.as_deref())
+                    .await
+            }
         }
     }
 
     /// A result set encoded by the caller (Go's `writeChunks`: column count, column
     /// definitions, EOF for old clients, rows, then EOF or the OK packet with the EOF
     /// header).
-    async fn write_encoded_result_set(&mut self, rs: &EncodedResultSet) -> Result<(), ConnError> {
+    ///
+    /// Cancellation (`finish_cancel`) is checked ONLY between complete MySQL packets so an
+    /// active packet frame write or flush is never torn mid-packet.
+    async fn write_encoded_result_set(
+        &mut self,
+        rs: &EncodedResultSet,
+        finish_cancel: Option<&tidb_runtime::cancel::ChildToken>,
+    ) -> Result<(), ConnError> {
+        check_write_kill(self.ctrl.as_ref(), finish_cancel)?;
         let status = self.handler.status_flags();
         let mut b = Vec::with_capacity(16);
         encode_column_count(&mut b, rs.column_packets.len());
@@ -1486,8 +1722,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             self.write_eof(rs.warnings).await?;
         }
         for row in &rs.rows {
+            check_write_kill(self.ctrl.as_ref(), finish_cancel)?;
             self.io.write_packet(row).await?;
         }
+        check_write_kill(self.ctrl.as_ref(), finish_cancel)?;
         if self.capability & CLIENT_DEPRECATE_EOF != 0 {
             self.write_ok_with_header(
                 header::EOF,
@@ -1504,7 +1742,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
         Ok(self.io.flush().await?)
     }
 
-    async fn write_result_set(&mut self, rs: &ResultSet, binary: bool) -> Result<(), ConnError> {
+    async fn write_result_set(
+        &mut self,
+        rs: &ResultSet,
+        binary: bool,
+        finish_cancel: Option<&tidb_runtime::cancel::ChildToken>,
+    ) -> Result<(), ConnError> {
+        check_write_kill(self.ctrl.as_ref(), finish_cancel)?;
         let status = self.handler.status_flags();
         let mut b = Vec::with_capacity(256);
         encode_column_count(&mut b, rs.columns.len());
@@ -1518,6 +1762,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             self.write_eof(rs.warnings).await?;
         }
         for row in &rs.rows {
+            check_write_kill(self.ctrl.as_ref(), finish_cancel)?;
             b.clear();
             if binary {
                 encode_binary_row(&mut b, &rs.columns, row)?;
@@ -1526,6 +1771,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             }
             self.io.write_packet(&b).await?;
         }
+        check_write_kill(self.ctrl.as_ref(), finish_cancel)?;
         if self.capability & CLIENT_DEPRECATE_EOF != 0 {
             // OK packet with the EOF header terminates the rows.
             self.write_ok_with_header(

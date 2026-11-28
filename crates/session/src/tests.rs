@@ -4241,4 +4241,65 @@ fn point_get_executor_reuse_blocked_immediately_after_revoke() {
     s2.drop_prepared_stmt(p_other.stmt_id).unwrap();
 }
 
+/// KillCancel paired with Session's SqlKiller wakes on kill and never spuriously wakes on reset;
+/// Session::restore detaches trackers without clearing an in-flight SqlKiller signal.
+#[test]
+fn kill_cancel_and_restore_preserve_in_flight_signal() {
+    use tidb_memory::sqlkiller::QueryInterrupted;
+    use tidb_memory::tracker::{LabelForSQLText, new_tracker};
+
+    let store = MockStore::new(10);
+    let mut s = session(&store);
+    let cp = s.checkpoint();
+    let cancel = s.kill_cancel();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        let c1 = cancel.clone();
+        // Resetting when signal is 0 must NOT spuriously resolve cancelled().
+        s.sql_killer().reset();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), c1.cancelled())
+                .await
+                .is_err(),
+            "reset must not trigger KillCancel"
+        );
+
+        // Sending a kill signal wakes KillCancel.
+        let killer = s.sql_killer();
+        let wake = tokio::spawn(async move { c1.cancelled().await });
+        tokio::task::yield_now().await;
+        killer.send_kill_signal(QueryInterrupted);
+        tokio::time::timeout(std::time::Duration::from_secs(1), wake)
+            .await
+            .expect("KillCancel should wake")
+            .unwrap();
+    });
+
+    // Attach a parent tracker to a fresh StatementContext and set a kill signal, then restore().
+    let parent = new_tracker(LabelForSQLText, -1);
+    let child = new_tracker(LabelForSQLText, -1);
+    child.attach_to(&parent).unwrap();
+    child.consume(512).unwrap();
+    let mut sc = tidb_sessionctx::stmtctx::new_stmt_ctx();
+    sc.mem_tracker = Some(child);
+    s.vars_mut().set_stmt_ctx(Arc::new(sc));
+    s.sql_killer().send_kill_signal(QueryInterrupted);
+
+    s.restore(cp).unwrap();
+    assert_eq!(
+        s.sql_killer().get_kill_signal(),
+        QueryInterrupted,
+        "restore must NOT clear an in-flight kill signal"
+    );
+    assert_eq!(
+        parent.get_children_for_test().len(),
+        0,
+        "restore must detach aborted tracker from parent"
+    );
+}
+
 mod sbtest_results;

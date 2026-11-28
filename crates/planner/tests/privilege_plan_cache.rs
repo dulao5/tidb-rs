@@ -170,6 +170,7 @@ fn parts_with(
         domain_info_schema: None,
         instance_plan_cache: Some(cache),
         privilege_manager: Some(pm),
+        session_manager: None,
     }
 }
 

@@ -786,7 +786,19 @@ pub enum Stmt {
     Show(Box<ShowStmt>),
     /// `ExecuteStmt` (EXECUTE of a prepared statement).
     Execute(Box<ExecuteStmt>),
+    /// `KillStmt` (`KILL [TIDB] [CONNECTION | QUERY] <id | expr>`).
+    Kill(Box<KillStmt>),
     Unported(Box<Node>),
+}
+
+/// `ast.KillStmt` (`KILL [TIDB] [CONNECTION | QUERY] <id | expr>`).
+// go: ast.KillStmt L1
+#[derive(Debug, Default)]
+pub struct KillStmt {
+    pub query: bool,
+    pub connection_id: u64,
+    pub tidb_extension: bool,
+    pub expr: Option<Expr>,
 }
 
 /// `ast.BeginStmt`.

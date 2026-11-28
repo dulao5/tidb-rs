@@ -608,6 +608,7 @@ const FLAG_PARTITION_PROCESSOR: u64 = 1 << 14;
 fn get_stmt_label(node: &Stmt) -> Result<String, Error> {
     match node {
         Stmt::Select(_) => Ok("Select".to_owned()),
+        Stmt::Kill(_) => Ok("Kill".to_owned()),
         _ => Err(blocked("D12.0", "stmtctx.GetStmtLabel")),
     }
 }

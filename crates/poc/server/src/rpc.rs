@@ -53,8 +53,13 @@ use hyper::Version;
 use hyper::body::Incoming;
 use hyper::header::CONTENT_TYPE;
 use hyper::header::HeaderValue;
+use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::TokioIo;
 use prost::Message as _;
 use protobuf::Message as _;
+use tidb_planner::core::common_plans::SimpleKillStmt;
+use tidb_server::session_mgr::ServerSessionManager;
+use tidb_sessionctx::session_mgr::SessionManager;
 use tipb::DagRequest;
 use tipb::ExecType;
 use tipb::Executor;
@@ -169,7 +174,11 @@ pub(crate) fn is_grpc<B>(req: &Request<B>) -> bool {
 }
 
 // glue: grpc-go's unary/server-streaming dispatch for the three methods served here.
-pub(crate) async fn serve(req: Request<Incoming>) -> Response<Body> {
+pub(crate) async fn serve(
+    req: Request<Incoming>,
+    session_mgr: Option<&ServerSessionManager>,
+    source_addr: &str,
+) -> Response<Body> {
     let path = req.uri().path().to_owned();
     if !matches!(path.as_str(), COPROCESSOR | SERVER_INFO | SEARCH_LOG) {
         if path.starts_with("/tikvpb.Tikv/") {
@@ -219,7 +228,7 @@ pub(crate) async fn serve(req: Request<Incoming>) -> Response<Body> {
     match path.as_str() {
         COPROCESSOR => match CopRequest::decode(msg) {
             Ok(r) => {
-                let resp = coprocessor(&r);
+                let resp = coprocessor_with_mgr(&r, session_mgr, source_addr).await;
                 tidb_base::log_debug!(
                     "status port: coprocessor",
                     "tp" => r.tp,
@@ -266,14 +275,36 @@ fn unknown_method(path: &str) -> String {
 }
 
 // go: rpcServer.Coprocessor L2 (no session and no panic recovery: nothing here can panic)
-// go: rpcServer.handleCopRequest L2 (no session: the executors here read no state)
-// go: CoprocessorDAGHandler.HandleRequest L2 (the executors produce no rows, so the chunk loop
-// ends at once)
-pub(crate) fn coprocessor(req: &CopRequest) -> CopResponse {
+// go: rpcServer.handleCopRequest L2 (executes TypeKill when present; cluster-table executors produce no rows)
+// go: CoprocessorDAGHandler.HandleRequest L2 (executes TypeKill if present; table executors produce no rows)
+pub(crate) async fn coprocessor_with_mgr(
+    req: &CopRequest,
+    session_mgr: Option<&ServerSessionManager>,
+    source_addr: &str,
+) -> CopResponse {
     let dag = match build_dag_executor(req) {
         Ok(dag) => dag,
         Err(e) => return build_error_response(e),
     };
+    let sm_dyn: Option<&dyn SessionManager> = session_mgr.map(|m| m as &dyn SessionManager);
+    for e in dag.get_executors() {
+        if e.get_tp() == ExecType::TypeKill {
+            let kill = e.get_kill();
+            let stmt = SimpleKillStmt {
+                query: kill.get_query(),
+                connection_id: kill.get_conn_id(),
+                tidb_extension: false,
+                expr_func_name: None,
+                expr_invalid: false,
+            };
+            if let Err(err) =
+                tidb_executor::simple::execute_kill_stmt(None, 0, sm_dyn, true, source_addr, &stmt)
+                    .await
+            {
+                return build_error_response(err.to_string());
+            }
+        }
+    }
     build_unary_response(&dag, Vec::new())
 }
 
@@ -289,8 +320,7 @@ fn build_dag_executor(req: &CopRequest) -> Result<DagRequest, String> {
 }
 
 // go: PBPlanBuilder.Build L2 (checks each executor; there is no plan to build)
-// go: PBPlanBuilder.pbToPhysicalPlan L2 (same dispatch; Kill is not supported: Go sends a
-// remote KILL only to the node of the connection's server ID, and tidb-rs registers none)
+// go: PBPlanBuilder.pbToPhysicalPlan L2 (supports table scan ops, BroadcastQuery, and TypeKill)
 fn build(executors: &[Executor]) -> Result<(), String> {
     if executors.is_empty() {
         // glue: Go dereferences the nil plan and answers with its recovered panic.
@@ -310,10 +340,155 @@ fn build(executors: &[Executor]) -> Result<(), String> {
             | ExecType::TypeAggregation
             | ExecType::TypeStreamAgg => {}
             ExecType::TypeBroadcastQuery => pb_to_broadcast_query(e)?,
+            ExecType::TypeKill => pb_to_kill(e)?,
             tp => return Err(format!("this exec type {tp:?} doesn't support yet")),
         }
     }
     Ok(())
+}
+
+// go: PBPlanBuilder.pbToKill L1
+fn pb_to_kill(e: &Executor) -> Result<(), String> {
+    if !e.has_kill() {
+        return Err("missing kill payload in TypeKill executor".to_owned());
+    }
+    Ok(())
+}
+
+/// Sends a remote `KILL` (`ExecType::TypeKill`) RPC to `target_server_id` via its status/gRPC port.
+// go: killRemoteConn L2 (looks up target status_port in etcd and sends /tikvpb.Tikv/Coprocessor over HTTP/2)
+pub(crate) async fn send_remote_kill(
+    sync: &poc_domain::SchemaSync,
+    target_server_id: u64,
+    conn_id: u64,
+    query: bool,
+) -> Result<(), tidb_base::Error> {
+    if target_server_id == 0 {
+        return Err(tidb_base::errors::new(
+            "Unexpected ZERO ServerID. Please file a bug to the TiDB Team".to_owned(),
+        ));
+    }
+    let url = sync
+        .lookup_server_rpc_url(target_server_id)
+        .await
+        .map_err(|e| tidb_base::errors::new(e.to_string()))?
+        .ok_or_else(|| {
+            tidb_base::errors::new(format!(
+                "cannot find RPC endpoint for server_id {target_server_id}"
+            ))
+        })?;
+    let host_port = url.strip_prefix("http://").unwrap_or(&url);
+
+    let mut kill_exec = Executor::default();
+    kill_exec.set_tp(ExecType::TypeKill);
+    kill_exec.mut_kill().set_conn_id(conn_id);
+    kill_exec.mut_kill().set_query(query);
+
+    let mut dag = DagRequest::default();
+    dag.set_start_ts_fallback(u64::MAX);
+    dag.set_executors(vec![kill_exec].into());
+    dag.set_encode_type(tipb::EncodeType::TypeDefault);
+    let dag_bytes = dag
+        .write_to_bytes()
+        .map_err(|e| tidb_base::errors::new(e.to_string()))?;
+
+    let cop_req = CopRequest {
+        tp: REQ_TYPE_DAG,
+        data: dag_bytes,
+    };
+    let msg = cop_req.encode_to_vec();
+    let len_u32 = u32::try_from(msg.len())
+        .map_err(|_| tidb_base::errors::new("kill RPC request too large".to_owned()))?;
+    let mut framed = Vec::with_capacity(5 + msg.len());
+    framed.push(0);
+    framed.extend_from_slice(&len_u32.to_be_bytes());
+    framed.extend_from_slice(&msg);
+
+    let addr = host_port.to_owned();
+    let io_res = tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+        let stream = tokio::net::TcpStream::connect(&addr)
+            .await
+            .map_err(|e| tidb_base::errors::new(e.to_string()))?;
+        let (mut sender, conn) =
+            hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+                .await
+                .map_err(|e| tidb_base::errors::new(e.to_string()))?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let req = Request::post(format!("http://{addr}{COPROCESSOR}"))
+            .version(Version::HTTP_2)
+            .header(CONTENT_TYPE, "application/grpc")
+            .header("te", "trailers")
+            .body(http_body_util::Full::new(Bytes::from(framed)))
+            .map_err(|e| tidb_base::errors::new(e.to_string()))?;
+        let resp = sender
+            .send_request(req)
+            .await
+            .map_err(|e| tidb_base::errors::new(e.to_string()))?;
+        if resp.status() != StatusCode::OK {
+            return Err(tidb_base::errors::new(format!(
+                "remote kill HTTP status {}",
+                resp.status()
+            )));
+        }
+        let header_grpc_status = resp
+            .headers()
+            .get("grpc-status")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let collected = resp
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| tidb_base::errors::new(e.to_string()))?;
+        let grpc_status = collected
+            .trailers()
+            .and_then(|t| t.get("grpc-status"))
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .or(header_grpc_status);
+        if grpc_status.as_deref() != Some("0") {
+            return Err(tidb_base::errors::new(format!(
+                "remote kill grpc-status {grpc_status:?}"
+            )));
+        }
+        let body = collected.to_bytes();
+        if body.len() < 5 {
+            return Err(tidb_base::errors::new(
+                "remote kill missing gRPC response frame".to_owned(),
+            ));
+        }
+        let msg_len = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
+        if body.len() < 5 + msg_len {
+            return Err(tidb_base::errors::new(
+                "remote kill truncated gRPC response".to_owned(),
+            ));
+        }
+        let cop_resp = CopResponse::decode(&body[5..5 + msg_len])
+            .map_err(|e| tidb_base::errors::new(e.to_string()))?;
+        if !cop_resp.other_error.is_empty() {
+            return Err(tidb_base::errors::new(cop_resp.other_error));
+        }
+        Ok::<(), tidb_base::Error>(())
+    })
+    .await;
+
+    match io_res {
+        Ok(Ok(())) => {
+            tidb_base::log_info!(
+                "Killed remote connection",
+                "serverID" => target_server_id,
+                "conn" => conn_id,
+                "query" => query,
+            );
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(tidb_base::errors::new(
+            "remote kill RPC timed out".to_owned(),
+        )),
+    }
 }
 
 // go: PBPlanBuilder.pbToBroadcastQuery L2 (keyword check instead of parser.ParseOneStmt: the
@@ -529,8 +704,8 @@ mod tests {
     use super::testdata::*;
     use super::*;
 
-    fn cop(tp: i64, data: Vec<u8>) -> CopResponse {
-        coprocessor(&CopRequest { tp, data })
+    async fn cop(tp: i64, data: Vec<u8>) -> CopResponse {
+        coprocessor_with_mgr(&CopRequest { tp, data }, None, "").await
     }
 
     fn frame(flag: u8, msg: &[u8]) -> Bytes {
@@ -583,8 +758,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn broadcast_flush_stats_delta_succeeds() {
+    #[tokio::test]
+    async fn broadcast_flush_stats_delta_succeeds() {
         for (query, collect) in [
             ("FLUSH STATS_DELTA `a`.`t` CLUSTER", false),
             ("flush no_write_to_binlog stats_delta CLUSTER", true),
@@ -593,7 +768,8 @@ mod tests {
             let resp = cop(
                 REQ_TYPE_DAG,
                 dag(vec![broadcast(query)], EncodeType::TypeDefault, collect),
-            );
+            )
+            .await;
             assert_eq!(resp.other_error, "", "{query}");
             let sel = select_response(&resp.data);
             assert!(sel.get_chunks().is_empty());
@@ -603,8 +779,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn broadcast_other_statements_fail_like_go() {
+    #[tokio::test]
+    async fn broadcast_other_statements_fail_like_go() {
         let resp = cop(
             REQ_TYPE_DAG,
             dag(
@@ -612,7 +788,8 @@ mod tests {
                 EncodeType::TypeDefault,
                 false,
             ),
-        );
+        )
+        .await;
         assert_eq!(
             resp.other_error,
             "unexpected flush statement FLUSH TABLES in broadcast query"
@@ -620,22 +797,23 @@ mod tests {
         let resp = cop(
             REQ_TYPE_DAG,
             dag(vec![broadcast("SELECT 1")], EncodeType::TypeDefault, false),
-        );
+        )
+        .await;
         assert_eq!(
             resp.other_error,
             "unexpected statement SELECT 1 in broadcast query"
         );
     }
 
-    #[test]
-    fn memtable_scan_is_empty_in_the_requested_encoding() {
+    #[tokio::test]
+    async fn memtable_scan_is_empty_in_the_requested_encoding() {
         for encode in [EncodeType::TypeDefault, EncodeType::TypeChunk] {
             let executors = vec![
                 table_scan(4611686018427387967),
                 of_type(ExecType::TypeSelection),
                 of_type(ExecType::TypeAggregation),
             ];
-            let resp = cop(REQ_TYPE_DAG, dag(executors, encode, true));
+            let resp = cop(REQ_TYPE_DAG, dag(executors, encode, true)).await;
             assert_eq!(resp.other_error, "");
             let sel = select_response(&resp.data);
             assert!(sel.get_chunks().is_empty());
@@ -644,27 +822,67 @@ mod tests {
         }
     }
 
-    #[test]
-    fn everything_else_is_an_other_error() {
+    #[tokio::test]
+    async fn type_kill_executes_against_session_manager() {
+        let mgr = ServerSessionManager::new_with_server_id(2, true);
+        let c1 = mgr.register_new_conn();
+        let mut kill_exec = Executor::default();
+        kill_exec.set_tp(ExecType::TypeKill);
+        kill_exec.mut_kill().set_conn_id(c1.conn_id);
+        kill_exec.mut_kill().set_query(true);
+        let req = CopRequest {
+            tp: REQ_TYPE_DAG,
+            data: dag(vec![kill_exec], EncodeType::TypeDefault, false),
+        };
+        let resp = coprocessor_with_mgr(&req, Some(&mgr), "10.0.0.2").await;
+        assert_eq!(resp.other_error, "");
+        assert!(c1.kill_cancel.is_killed());
+        assert!(!c1.is_wait_shutdown());
+
+        // KILL CONNECTION cancels conn_shutdown too.
+        c1.killer.reset();
+        let mut kill_conn = Executor::default();
+        kill_conn.set_tp(ExecType::TypeKill);
+        kill_conn.mut_kill().set_conn_id(c1.conn_id);
+        kill_conn.mut_kill().set_query(false);
+        let req = CopRequest {
+            tp: REQ_TYPE_DAG,
+            data: dag(vec![kill_conn], EncodeType::TypeDefault, false),
+        };
+        let resp = coprocessor_with_mgr(&req, Some(&mgr), "10.0.0.2").await;
+        assert_eq!(resp.other_error, "");
+        assert!(c1.is_wait_shutdown());
+    }
+
+    #[tokio::test]
+    async fn everything_else_is_an_other_error() {
         assert_eq!(
-            cop(104, Vec::new()).other_error,
+            cop(104, Vec::new()).await.other_error,
             "unsupported request type 104"
         );
-        assert!(!cop(REQ_TYPE_DAG, vec![0xff, 0xff]).other_error.is_empty());
+        assert!(
+            !cop(REQ_TYPE_DAG, vec![0xff, 0xff])
+                .await
+                .other_error
+                .is_empty()
+        );
         assert_eq!(
             cop(
                 REQ_TYPE_DAG,
                 dag(
-                    vec![of_type(ExecType::TypeKill)],
+                    vec![of_type(ExecType::TypeWindow)],
                     EncodeType::TypeDefault,
                     false
                 )
             )
+            .await
             .other_error,
-            "this exec type TypeKill doesn't support yet"
+            "this exec type TypeWindow doesn't support yet"
         );
         assert_eq!(
-            cop(REQ_TYPE_DAG, dag(vec![], EncodeType::TypeDefault, false)).other_error,
+            cop(REQ_TYPE_DAG, dag(vec![], EncodeType::TypeDefault, false))
+                .await
+                .other_error,
             "empty executors in DAG request"
         );
     }

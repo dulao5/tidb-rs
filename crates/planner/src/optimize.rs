@@ -36,6 +36,7 @@ use tidb_sessionctx::variable::tidb_vars::{
 use tidb_sessionctx::variable::variable::get_sys_var;
 use tidb_types::field_name::NameSlice;
 
+use crate::base::PhysicalPlan;
 use crate::core::common_plans::Execute;
 use crate::core::optimizer::{
     check_table_lock, check_table_mode, do_optimize_plan, visit_info4_priv_check,
@@ -471,6 +472,31 @@ fn build_and_optimize_logical_plan_round(
     res
 }
 
+/// Shared privilege, table-lock, and table-mode checks run once for the first build round.
+// go-part: buildAndOptimizeLogicalPlanRound (if !checked) L1
+fn check_build_privileges_and_mode(
+    ctx: &PlanCtx<'_>,
+    node: &NodeW<'_>,
+    is: &dyn InfoSchemaLookup,
+    builder: &PlanBuilder<'_>,
+    checked: &mut bool,
+) -> Result<(), Error> {
+    if !*checked {
+        // Keep privilege and lock checks fail-fast. These depend on visitInfo
+        // produced by the build, but not on the later cost winner.
+        if let Some(pm) = ctx.privilege_manager.as_deref() {
+            let priv_visit_info =
+                visit_info4_priv_check(is, Some(node.node), builder.get_visit_info());
+            crate::core::optimizer::check_privilege(&ctx.vars.active_roles, pm, &priv_visit_info)?;
+        }
+
+        check_table_lock(builder.get_visit_info())?;
+        check_table_mode(node)?;
+        *checked = true;
+    }
+    Ok(())
+}
+
 /// The body of [`build_and_optimize_logical_plan_round`] after `builder.Init`.
 // go-part: buildAndOptimizeLogicalPlanRound (after Init) L2 (see build_and_optimize_logical_plan_round)
 fn build_and_optimize_with_builder<'ast>(
@@ -480,24 +506,23 @@ fn build_and_optimize_with_builder<'ast>(
     builder: &mut PlanBuilder<'ast>,
     checked: &mut bool,
 ) -> Result<(PhysicalPlanRef, NameSlice, f64), Error> {
+    if let Stmt::Kill(ref raw) = *node.node {
+        reset_for_build(ctx.vars);
+        builder.resolve_ctx = Some(node.get_resolve_context());
+        let begin_rewrite = std::time::Instant::now();
+        let simple = builder.build_kill(ctx, raw);
+        ctx.vars.duration_rewrite = begin_rewrite.elapsed().as_nanos() as i64;
+        ctx.vars.stmt_ctx_mut().tables = get_db_table_info(builder.get_visit_info());
+        check_build_privileges_and_mode(ctx, node, is, builder, checked)?;
+        let names = simple.output_names();
+        return Ok((Arc::new(simple) as PhysicalPlanRef, names, 0.0));
+    }
+
     // todo: you can customize each round's special builder (like semi join rewrite or not by signal)
     let p = build_logical_plan(ctx, node, builder)?;
     let names = ctx.arena.get(p).output_names(&ctx.arena).clone();
 
-    if !*checked {
-        // Keep privilege and lock checks fail-fast. These depend on visitInfo
-        // produced by the logical build, but not on the later cost winner.
-        if let Some(pm) = ctx.privilege_manager.as_deref() {
-            let priv_visit_info =
-                visit_info4_priv_check(is, Some(node.node), builder.get_visit_info());
-            crate::core::optimizer::check_privilege(&ctx.vars.active_roles, pm, &priv_visit_info)?;
-        }
-
-        check_table_lock(builder.get_visit_info())?;
-
-        check_table_mode(node)?;
-        *checked = true;
-    }
+    check_build_privileges_and_mode(ctx, node, is, builder, checked)?;
 
     // core.RecheckCTE(logic): CTEs are D09.5 (the builder stops at WITH).
 
@@ -679,3 +704,174 @@ fn hypo_index_checker(db: &CIStr, tbl: &CIStr, col: &CIStr) -> Result<isize, Err
 // Go's `init` stores `Optimize` / `IsReadOnly` into function variables of `core`,
 // `indexadvisor` and `bindinfo` (import cycles); the crate calls them directly.
 // go: init L2 (cross-package function variables; the crate calls the functions directly)
+
+#[cfg(test)]
+mod kill_privilege_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tidb_parser::auth::UserIdentity;
+    use tidb_parser::{ParseOptions, parse};
+    use tidb_privilege::{DynamicPrivRecord, Handle, MySQLPrivilege, UserPrivileges, UserRecord};
+    use tidb_sessionctx::exprstatic as es;
+    use tidb_sessionctx::session_mgr::{ProcessInfo, SessionManager};
+    use tidb_sessionctx::variable::session::GlobalVarAccessor;
+
+    struct DummyAcc;
+    impl GlobalVarAccessor for DummyAcc {
+        fn get_global_sys_var(&self, _: &str) -> Result<String, Error> {
+            Ok(String::new())
+        }
+        fn set_global_sys_var_only(&mut self, _: &str, _: &str, _: bool) -> Result<(), Error> {
+            Ok(())
+        }
+        fn get_tidb_table_value(&self, _: &str) -> Result<String, Error> {
+            Ok(String::new())
+        }
+        fn set_tidb_table_value(&mut self, _: &str, _: &str, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    struct EmptyIs;
+    impl InfoSchemaLookup for EmptyIs {
+        fn table_by_name(
+            &self,
+            schema: &CIStr,
+            table: &CIStr,
+        ) -> Result<Arc<tidb_model::TableInfo>, Error> {
+            Err(
+                tidb_infoschema::error::ErrTableNotExists.fast_gen_by_args(vec![
+                    tidb_base::gofmt::Arg::from(schema.o.clone()),
+                    tidb_base::gofmt::Arg::from(table.o.clone()),
+                ]),
+            )
+        }
+        fn table_by_id(&self, _id: i64) -> Result<Option<Arc<tidb_model::TableInfo>>, Error> {
+            Ok(None)
+        }
+        fn schema_name_by_id(&self, _id: i64) -> Option<CIStr> {
+            None
+        }
+        fn schema_meta_version(&self) -> i64 {
+            1
+        }
+        fn snapshot(&self) -> Arc<dyn InfoSchemaLookup> {
+            Arc::new(EmptyIs)
+        }
+    }
+
+    struct MockSm(HashMap<u64, Arc<ProcessInfo>>);
+    impl SessionManager for MockSm {
+        fn show_process_list(&self) -> HashMap<u64, Arc<ProcessInfo>> {
+            self.0.clone()
+        }
+        fn get_process_info(&self, id: u64) -> Option<Arc<ProcessInfo>> {
+            self.0.get(&id).cloned()
+        }
+        fn kill(&self, _conn_id: u64, _query: bool, _max_exec_time: bool, _runaway: bool) {}
+        fn kill_all_connections(&self) {}
+        fn server_id(&self) -> u64 {
+            1
+        }
+        fn has_valid_server_id(&self) -> bool {
+            true
+        }
+    }
+
+    fn run_kill_plan(
+        sql: &str,
+        login_user: &str,
+        priv_handle: &Arc<Handle>,
+        sm: Arc<dyn SessionManager>,
+    ) -> Result<OptimizedPlan, Error> {
+        let mut stmt = parse(sql, &ParseOptions::default())
+            .unwrap()
+            .stmts
+            .remove(0);
+        let mut vars = SessionVars::new(Box::new(DummyAcc));
+        vars.user = Some(UserIdentity {
+            username: login_user.to_owned(),
+            hostname: "%".to_owned(),
+            ..Default::default()
+        });
+        let ev = es::new_eval_context(vec![]);
+        let expr_ctx = es::new_expr_context(vec![es::with_eval_ctx(ev)]);
+        let mut ctx = PlanCtx::new(&mut vars, expr_ctx);
+        ctx.privilege_manager = Some(Arc::new(UserPrivileges::new(
+            login_user,
+            "%",
+            Arc::clone(priv_handle),
+        )));
+        ctx.session_manager = Some(sm);
+        let mut node = crate::core::resolve::new_node_w(&mut stmt);
+        let (plan, _) = optimize_stmt(&mut ctx, &mut node, &EmptyIs, None)?;
+        Ok(plan)
+    }
+
+    #[test]
+    fn kill_privilege_enforcement_matches_go() {
+        let mut mp = MySQLPrivilege::new();
+        mp.add_user(UserRecord::new(
+            "%",
+            "alice",
+            tidb_base::mysql::PrivilegeType(0),
+        ));
+        mp.add_user(UserRecord::new("%", "super_u", tidb_base::mysql::SuperPriv));
+        mp.add_user(UserRecord::new(
+            "%",
+            "conn_admin",
+            tidb_base::mysql::PrivilegeType(0),
+        ));
+        mp.add_dynamic_priv(DynamicPrivRecord::new(
+            "conn_admin",
+            "%",
+            "CONNECTION_ADMIN",
+            false,
+        ));
+        let handle = Arc::new(Handle::new(mp));
+
+        let mut procs = HashMap::new();
+        procs.insert(
+            100,
+            Arc::new(ProcessInfo {
+                id: 100,
+                user: "bob".to_owned(),
+                host: "127.0.0.1:40000".to_owned(),
+                ..Default::default()
+            }),
+        );
+        procs.insert(
+            101,
+            Arc::new(ProcessInfo {
+                id: 101,
+                user: "alice".to_owned(),
+                host: "127.0.0.1:40001".to_owned(),
+                ..Default::default()
+            }),
+        );
+        let sm: Arc<dyn SessionManager> = Arc::new(MockSm(procs));
+
+        let denied = match run_kill_plan("KILL QUERY 100", "alice", &handle, Arc::clone(&sm)) {
+            Ok(_) => panic!("alice must not kill bob's conn"),
+            Err(e) => e,
+        };
+        assert_eq!(denied.code(), 1227);
+        assert!(
+            denied.to_string().contains("SUPER or CONNECTION_ADMIN"),
+            "{denied}"
+        );
+
+        assert!(matches!(
+            run_kill_plan("KILL 100", "super_u", &handle, Arc::clone(&sm)).unwrap(),
+            OptimizedPlan::Physical(p) if p.kind() == crate::base::PhysicalKind::Simple
+        ));
+        assert!(matches!(
+            run_kill_plan("KILL QUERY 100", "conn_admin", &handle, Arc::clone(&sm)).unwrap(),
+            OptimizedPlan::Physical(p) if p.kind() == crate::base::PhysicalKind::Simple
+        ));
+        // Own connection, CONNECTION_ID(), and unknown ID require no extra privilege.
+        run_kill_plan("KILL QUERY 101", "alice", &handle, Arc::clone(&sm)).unwrap();
+        run_kill_plan("KILL CONNECTION_ID()", "alice", &handle, Arc::clone(&sm)).unwrap();
+        run_kill_plan("KILL 99999", "alice", &handle, sm).unwrap();
+    }
+}

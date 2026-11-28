@@ -21,10 +21,12 @@ use tidb_kv::kv::Snapshot;
 use tidb_memory::sqlkiller::SqlKiller;
 use tidb_parser::model::CIStr;
 use tidb_parser::types::FieldType;
+use tidb_runtime::cancel::KillCancel;
 use tidb_sessionctx::distsql_ctx::DistSQLContext;
 use tidb_sessionctx::exprctx::ExprContextRef;
 use tidb_sessionctx::planctx::BuildPBContext;
 use tidb_sessionctx::ranger::context::RangerContext;
+use tidb_sessionctx::session_mgr::SessionManager;
 use tidb_sessionctx::variable::session::SessionVars;
 use tidb_sessionctx::variable::session_state::PlanReplayerTaskKey;
 
@@ -55,6 +57,16 @@ pub trait SessionContext: Send {
     /// `GetSessionVars().SQLKiller` (the session's shared part, N2 `SessionShared`).
     // glue: SessionVars.SQLKiller (N2 SessionShared)
     fn sql_killer(&self) -> Arc<SqlKiller>;
+    /// Resettable session-level cancellation notifier paired with [`Self::sql_killer`].
+    // glue: N3 §3.3 KillCancel paired with SqlKiller
+    fn kill_cancel(&self) -> KillCancel {
+        KillCancel::new(self.sql_killer().signal_handle())
+    }
+    /// `GetSessionManager()` for `KILL` statement execution (`N0` interface inversion).
+    // glue: SessionManager accessor on SessionContext
+    fn session_manager(&self) -> Option<Arc<dyn SessionManager>> {
+        None
+    }
     /// `sessiontxn.GetTxnManager(sctx).GetStmtReadTS()`. Async: the provider may wait for
     /// the TSO its warm-up requested (`TxnContextProvider::get_stmt_read_ts` of D05.4 returns
     /// a future), which must not block the session's task.

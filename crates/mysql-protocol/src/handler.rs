@@ -6,6 +6,7 @@
 //! parameters, and returns protocol-level [`Response`]s.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use crate::auth::{AccountAuth, Credential};
 use crate::constants::status;
@@ -192,11 +193,32 @@ pub trait SessionHandler: Send + 'static {
     fn collation_name(&self) -> &str {
         "utf8mb4_bin"
     }
+
+    /// Per-connection kill and cancellation control (`ConnControl`), if wired to `ServerSessionManager`.
+    fn conn_control(&self) -> Option<Arc<tidb_server::session_mgr::ConnControl>> {
+        None
+    }
+
+    /// Matches Go `shouldInstallConnectionAliveDuringExecute`: installs client disconnect probe
+    /// during statement execution only for autocommit write statements (otherwise around
+    /// `writeResultSet`).
+    fn should_install_connection_alive_during_execute(&self) -> bool {
+        false
+    }
+
+    /// Updates `ProcessInfo` at command completion (`command::SLEEP`).
+    fn set_process_info_command(&mut self, _sql: &str, _command: u8) {}
 }
 
 /// Creates sessions and looks up accounts. Shared by all connections.
 pub trait SessionFactory: Send + Sync + 'static {
     type Session: SessionHandler;
+
+    /// Returns the server's shared [`ServerSessionManager`], if enabled, for allocating
+    /// connection IDs and shutting down connections cleanly.
+    fn session_manager(&self) -> Option<Arc<tidb_server::session_mgr::ServerSessionManager>> {
+        None
+    }
 
     /// Returns the stored credential of `user` connecting from `host`, or `None` if the account
     /// does not exist (the client then gets `ER_ACCESS_DENIED`).

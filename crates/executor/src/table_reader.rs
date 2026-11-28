@@ -172,7 +172,10 @@ pub fn new_table_reader_executor_context(
 /// Construct a lightweight `tidb_kv::Context` from `DistSQLContext` (spec §8.3, `M-GOCTX`).
 // glue: M-GOCTX request source propagation from DistSQLContext
 pub(crate) fn kv_ctx_from_dctx(dctx: &DistSQLContext) -> tidb_kv::Context {
-    let base = tidb_kv::Context::background();
+    let mut base = tidb_kv::Context::background();
+    if let Some(kc) = &dctx.kill_cancel {
+        base = base.with_kill_cancel(kc.clone());
+    }
     if dctx.in_restricted_sql
         || !dctx.request_source_type.is_empty()
         || !dctx.explicit_request_source_type.is_empty()

@@ -118,6 +118,13 @@ pub const TIDB: &[GoMetric] = &[
         "R:pkg/metrics/server.go:150",
     ),
     m(
+        "tidb_server_event_total",
+        Counter,
+        &["type"],
+        None,
+        "R:pkg/metrics/server.go:162",
+    ),
+    m(
         "tidb_server_multi_query_num",
         Histogram,
         &[],

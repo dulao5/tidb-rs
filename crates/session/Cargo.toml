@@ -36,6 +36,7 @@ tidb-chunk = { workspace = true }
 tidb-memory = { workspace = true }
 # The ExecPool the executors' tasks run on (N3).
 tidb-runtime = { workspace = true }
+arc-swap = "1"
 futures = { workspace = true }
 parking_lot = "0.12"
 

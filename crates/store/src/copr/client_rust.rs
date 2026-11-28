@@ -6,12 +6,15 @@
 //! `pkg/store/driver/error.ToTiDBErr` does not exist yet, so they are plain errors carrying
 //! client-rust's message (spec §6).
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tidb_base::errors::Error;
 use tidb_kv::KeyRange;
 use tidb_kv::option::ReplicaReadType;
+use tidb_memory::sqlkiller::SqlKiller;
+use tidb_runtime::KillCancel;
 use tikv_client::proto::{coprocessor, kvrpcpb};
 use tikv_client::{
     Backoff, CopSender, Timestamp, TimestampExt, TransactionClient, TransactionOptions,
@@ -53,19 +56,22 @@ fn from_rust_ctx(c: tikv_client::transaction::CopRpcContext) -> RPCContext {
     }
 }
 
-/// TiDB's `backoff.Backoffer` over client-rust's time-budget [`Backoff`].
-pub struct ClientRustBackoffer(pub Backoff);
+/// TiDB's `backoff.Backoffer` over client-rust's time-budget [`Backoff`] with session
+/// cancellation support.
+pub struct ClientRustBackoffer {
+    pub bo: Backoff,
+    pub kill_cancel: Option<KillCancel>,
+}
 
 impl Backoffer for ClientRustBackoffer {
     // glue: backoff.Backoffer.Backoff(BoRegionMiss) on client-rust's Backoff (D07.1)
     async fn backoff_region_miss(&mut self, err: Error) -> Result<(), Error> {
-        self.0
-            .backoff(
-                tikv_client::metrics::BackoffType::RegionMiss,
-                tikv_client::Error::StringError(err.to_string()),
-            )
-            .await
-            .map_err(to_tidb_err)
+        let kill_cancel = self.kill_cancel.clone();
+        let fut = self.bo.backoff(
+            tikv_client::metrics::BackoffType::RegionMiss,
+            tikv_client::Error::StringError(err.to_string()),
+        );
+        run_with_cancel(kill_cancel.as_ref(), fut).await
     }
 
     // glue: backoff.Backoffer.BackoffWithMaxSleepTxnLockFast on client-rust's Backoff (D07.1)
@@ -74,18 +80,36 @@ impl Backoffer for ClientRustBackoffer {
         max_sleep_ms: i64,
         err: Error,
     ) -> Result<(), Error> {
-        self.0
-            .backoff_with_max_sleep_txn_lock_fast(
-                max_sleep_ms.max(0) as u64,
-                tikv_client::Error::StringError(err.to_string()),
-            )
-            .await
-            .map_err(to_tidb_err)
+        let kill_cancel = self.kill_cancel.clone();
+        let fut = self.bo.backoff_with_max_sleep_txn_lock_fast(
+            max_sleep_ms.max(0) as u64,
+            tikv_client::Error::StringError(err.to_string()),
+        );
+        run_with_cancel(kill_cancel.as_ref(), fut).await
     }
 
     // glue: backoff.Backoffer.GetTotalSleep on client-rust's Backoff (D07.1)
     fn get_total_sleep(&self) -> i64 {
-        self.0.total_sleep_ms() as i64
+        self.bo.total_sleep_ms() as i64
+    }
+}
+
+/// Awaits `fut`, dropping the underlying `client-rust` RPC or backoff future immediately
+/// when `kill_cancel` triggers (`Entry::is_canceled()` + tonic stream drop).
+// glue: N3 §3.3 cancellation wrapper around client-rust async calls
+async fn run_with_cancel<T, F>(kill_cancel: Option<&KillCancel>, fut: F) -> Result<T, Error>
+where
+    F: Future<Output = Result<T, tikv_client::Error>>,
+{
+    match kill_cancel {
+        Some(kc) => {
+            tokio::select! {
+                biased;
+                _ = kc.cancelled() => Err(SqlKiller::signal_to_error(kc.signal(), 0)),
+                res = fut => res.map_err(to_tidb_err),
+            }
+        }
+        None => fut.await.map_err(to_tidb_err),
     }
 }
 
@@ -128,11 +152,9 @@ impl TiKVRegionCache for ClientRustStore {
             .iter()
             .map(|r| (r.start_key.0.clone(), r.end_key.0.clone()))
             .collect();
-        let locs = self
-            .cache_sender
-            .locate_key_ranges(&mut bo.0, &ranges)
-            .await
-            .map_err(to_tidb_err)?;
+        let kill_cancel = bo.kill_cancel.clone();
+        let fut = self.cache_sender.locate_key_ranges(&mut bo.bo, &ranges);
+        let locs = run_with_cancel(kill_cancel.as_ref(), fut).await?;
         Ok(locs
             .into_iter()
             .map(|l| KeyLocation {
@@ -147,17 +169,16 @@ impl TiKVRegionCache for ClientRustStore {
     // glue: RegionCache.GetTiKVRPCContext over client-rust (leader only)
     async fn get_tikv_rpc_context(
         &self,
-        _bo: &mut ClientRustBackoffer,
+        bo: &mut ClientRustBackoffer,
         id: RegionVerID,
         _replica_read: ReplicaReadType,
         _follower_store_seed: u32,
     ) -> Result<Option<RPCContext>, Error> {
-        Ok(self
-            .cache_sender
-            .rpc_context(&to_rust_ver(id))
-            .await
-            .map_err(to_tidb_err)?
-            .map(from_rust_ctx))
+        let ver = to_rust_ver(id);
+        let kill_cancel = bo.kill_cancel.clone();
+        let fut = self.cache_sender.rpc_context(&ver);
+        let ctx = run_with_cancel(kill_cancel.as_ref(), fut).await?;
+        Ok(ctx.map(from_rust_ctx))
     }
 }
 
@@ -176,11 +197,10 @@ impl ClientHelper for ClientRustHelper {
         region: RegionVerID,
         timeout: Duration,
     ) -> Result<(coprocessor::Response, Option<RPCContext>, String), Error> {
-        let r = self
-            .0
-            .send(&mut bo.0, &to_rust_ver(region), req, timeout)
-            .await
-            .map_err(to_tidb_err)?;
+        let ver = to_rust_ver(region);
+        let kill_cancel = bo.kill_cancel.clone();
+        let fut = self.0.send(&mut bo.bo, &ver, req, timeout);
+        let r = run_with_cancel(kill_cancel.as_ref(), fut).await?;
         let ctx = r.rpc_ctx.map(from_rust_ctx);
         let addr = ctx.as_ref().map(|c| c.addr.clone()).unwrap_or_default();
         Ok((r.resp, ctx, addr))
@@ -192,10 +212,9 @@ impl ClientHelper for ClientRustHelper {
         bo: &mut ClientRustBackoffer,
         lock_info: kvrpcpb::LockInfo,
     ) -> Result<(), Error> {
-        self.0
-            .resolve_lock(&mut bo.0, lock_info)
-            .await
-            .map_err(to_tidb_err)
+        let kill_cancel = bo.kill_cancel.clone();
+        let fut = self.0.resolve_lock(&mut bo.bo, lock_info);
+        run_with_cancel(kill_cancel.as_ref(), fut).await
     }
 }
 
@@ -220,7 +239,10 @@ impl TiKVStore for ClientRustStore {
     // glue: backoff.NewBackofferWithVars over client-rust's time budget (D07.1)
     fn new_backoffer(&self, max_sleep_ms: i64, vars: &Variables) -> ClientRustBackoffer {
         let ms = (max_sleep_ms * vars.backoff_weight.max(1)).max(0) as u64;
-        ClientRustBackoffer(Backoff::time_budget(ms).start())
+        ClientRustBackoffer {
+            bo: Backoff::time_budget(ms).start(),
+            kill_cancel: vars.kill_cancel.clone(),
+        }
     }
 
     /// Boundary stub: client-rust has no GC safe-point cache yet, so a read below the safe
@@ -229,5 +251,42 @@ impl TiKVStore for ClientRustStore {
     // glue: stub, blocked-by:client-rust GC safe point (client-go-parity.md §4 CheckVisibility)
     fn check_visibility(&self, _start_ts: u64) -> Result<(), Error> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn client_rust_backoffer_cancels_on_kill() {
+        let killer = SqlKiller::new();
+        let kc = KillCancel::new(killer.signal_handle());
+        let kc2 = kc.clone();
+        let k2 = Arc::clone(&killer);
+        killer.set_on_kill(Some(Box::new(move || kc2.notify())));
+        let mut bo = ClientRustBackoffer {
+            bo: Backoff::time_budget(60_000).start(),
+            kill_cancel: Some(kc),
+        };
+        // Advance past initial 1-2ms sleeps so the tested backoff sleeps long enough to race kill.
+        for _ in 0..7 {
+            let _ = bo.bo.next_delay_duration();
+        }
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            k2.send_kill_signal(tidb_memory::sqlkiller::QueryInterrupted);
+        });
+        let start = std::time::Instant::now();
+        let mut err = None;
+        for _ in 0..32 {
+            if let Err(e) = bo.backoff_region_miss(Error::plain("region miss")).await {
+                err = Some(e);
+                break;
+            }
+        }
+        let err = err.expect("backoff loop must be interrupted by KillCancel");
+        assert_eq!(err.code(), tidb_base::errno::ErrQueryInterrupted as isize);
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 }

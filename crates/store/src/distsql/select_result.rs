@@ -40,10 +40,37 @@ use tidb_expression::{EvalContext, Schema};
 use tidb_kv::copr::CopRuntimeStats;
 use tidb_kv::kv::Response;
 use tidb_memory::TrackedAlloc;
+use tidb_memory::sqlkiller::SqlKiller;
 use tidb_memory::tracker::Tracker;
 use tidb_parser::types::FieldType;
+use tidb_runtime::{CheckpointHook, KillCancel};
 use tidb_sessionctx::distsql_ctx::DistSQLContext;
 use tidb_sessionctx::variable::tidb_defs::DefInitChunkSize;
+
+/// Checkpoint hook that checks the statement's `SqlKiller` (1s throttled disconnect probe +
+/// signal mapping) or falls back to `KillCancel` when `SqlKiller` is not attached.
+// glue: N3 §3.3 cooperative cancellation checkpoint hook in DistSQL
+struct KillCheckHook<'a> {
+    sql_killer: Option<&'a Arc<SqlKiller>>,
+    kill_cancel: Option<&'a KillCancel>,
+}
+
+impl CheckpointHook for KillCheckHook<'_> {
+    type Error = Error;
+
+    #[inline]
+    fn check(&self) -> Result<(), Error> {
+        if let Some(killer) = self.sql_killer {
+            return killer.handle_signal();
+        }
+        if let Some(kc) = self.kill_cancel
+            && kc.is_killed()
+        {
+            return Err(SqlKiller::signal_to_error(kc.signal(), 0));
+        }
+        Ok(())
+    }
+}
 
 /// SelectResultRow indicates the row returned by [`SelectResultIter`].
 #[derive(Clone, Debug)]
@@ -166,13 +193,15 @@ impl heap::PushInterface for ChunkRowHeap<'_> {
 /// NewSortedSelectResults merges multiple sorted [`SelectResult`] streams (e.g. from
 /// partition tables) in `by_items` order. If `schema` is `None`, sorts by the first
 /// `by_items.len()` columns.
-// go: NewSortedSelectResults L2 (returns Result on unsupported compare type or non-column ByItems; A1 / M-MEM TrackedAlloc)
+// go: NewSortedSelectResults L2 (returns Result on unsupported compare type or non-column ByItems; A1 / M-MEM TrackedAlloc; N3 KillCancel)
 pub fn new_sorted_select_results(
     eval_ctx: &dyn EvalContext,
     select_results: Vec<Box<dyn SelectResult>>,
     schema: Option<&Schema>,
     by_items: Vec<ByItems>,
     mem_tracker: Option<Arc<Tracker>>,
+    sql_killer: Option<Arc<SqlKiller>>,
+    kill_cancel: Option<KillCancel>,
 ) -> Result<Box<dyn SelectResult>, Error> {
     let n = select_results.len();
     let tracked_alloc = mem_tracker
@@ -187,6 +216,8 @@ pub fn new_sorted_select_results(
         row_ptrs: Vec::new(),
         mem_tracker,
         tracked_alloc,
+        sql_killer,
+        kill_cancel,
         closed: false,
     };
     s.init_compare_funcs(eval_ctx)?;
@@ -205,6 +236,8 @@ struct SortedSelectResults {
 
     mem_tracker: Option<Arc<Tracker>>,
     tracked_alloc: Option<TrackedAlloc>,
+    sql_killer: Option<Arc<SqlKiller>>,
+    kill_cancel: Option<KillCancel>,
     closed: bool,
 }
 
@@ -377,7 +410,11 @@ impl SelectResult for SortedSelectResults {
                     },
                 );
             }
-            let Ok(()) = tidb_runtime::checkpoint(&()).await;
+            let hook = KillCheckHook {
+                sql_killer: self.sql_killer.as_ref(),
+                kill_cancel: self.kill_cancel.as_ref(),
+            };
+            tidb_runtime::checkpoint(&hook).await?;
         }
         Ok(())
     }
@@ -542,6 +579,13 @@ impl Drop for SelectResultInner {
 }
 
 impl SelectResultInner {
+    fn kill_hook(&self) -> KillCheckHook<'_> {
+        KillCheckHook {
+            sql_killer: self.ctx.sql_killer.as_ref(),
+            kill_cancel: self.ctx.kill_cancel.as_ref(),
+        }
+    }
+
     // go: selectResult.fetchResp L1
     async fn fetch_resp(&mut self, ctx: &tidb_kv::Context) -> Result<(), Error> {
         self.fetch_resp_with_intermediate_results(ctx, Vec::new())
@@ -634,7 +678,7 @@ impl SelectResultInner {
 
             let sr = self.select_resp.as_ref().unwrap();
             if !sr.get_chunks().is_empty() {
-                let Ok(()) = tidb_runtime::checkpoint(&()).await;
+                tidb_runtime::checkpoint(&self.kill_hook()).await?;
                 break;
             }
 
@@ -642,12 +686,12 @@ impl SelectResultInner {
             if !intermediates.is_empty() {
                 for output in intermediates {
                     if !output.get_chunks().is_empty() {
-                        let Ok(()) = tidb_runtime::checkpoint(&()).await;
+                        tidb_runtime::checkpoint(&self.kill_hook()).await?;
                         return Ok(());
                     }
                 }
             }
-            let Ok(()) = tidb_runtime::checkpoint(&()).await;
+            tidb_runtime::checkpoint(&self.kill_hook()).await?;
         }
         Ok(())
     }
@@ -723,7 +767,7 @@ impl SelectResultInner {
                 self.resp_chk_idx += 1;
                 self.rows_data_offset = 0;
             }
-            let Ok(()) = tidb_runtime::checkpoint(&()).await;
+            tidb_runtime::checkpoint(&self.kill_hook()).await?;
         }
         Ok(())
     }
@@ -773,6 +817,7 @@ impl SelectResultInner {
             if decoder.is_finished() {
                 self.resp_chk_idx += 1;
             }
+            tidb_runtime::checkpoint(&self.kill_hook()).await?;
         }
         Ok(())
     }
@@ -1216,7 +1261,7 @@ impl SelectResultIter for SelectResultIterImpl {
                 let _ = self.result.mem_consume(-prev);
             }
             self.result.select_resp = None;
-            let Ok(()) = tidb_runtime::checkpoint(&()).await;
+            tidb_runtime::checkpoint(&self.result.kill_hook()).await?;
         }
     }
 

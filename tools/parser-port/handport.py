@@ -1384,6 +1384,21 @@ act("RowStmt", "row RowValue", "Box::new(RowExpr { values: $2 })")
 act("Values", "Values ',' ExprOrDefault", "{ let mut v = $1; v.push($3); v }")
 act("Values", "ExprOrDefault", "vec![$1]")
 
+# --- BuiltinFunction & KillStmt ------------------------------------------------------------------
+act("BuiltinFunction", "'(' BuiltinFunction ')'", "$2")
+act("BuiltinFunction", "identifier '(' ')'", "call(tok_text($lexer, &$1), Vec::new())")
+act("BuiltinFunction", "identifier '(' ExpressionList ')'", "call(tok_text($lexer, &$1), $3)")
+act("BuiltinFunction", "uuid '(' ')'", "call(tok_text($lexer, &$1), Vec::new())")
+act("BuiltinFunction", "replace '(' ExpressionList ')'", "call(tok_text($lexer, &$1), $3)")
+act("KillStmt", "KillOrKillTiDB NUM",
+    "Stmt::Kill(Box::new(KillStmt { connection_id: kill_num($lexer.src_str($span), $span, p), tidb_extension: $1, ..Default::default() }))")
+act("KillStmt", "KillOrKillTiDB connection NUM",
+    "Stmt::Kill(Box::new(KillStmt { connection_id: kill_num($lexer.src_str($span), $span, p), tidb_extension: $1, ..Default::default() }))")
+act("KillStmt", "KillOrKillTiDB query NUM",
+    "Stmt::Kill(Box::new(KillStmt { connection_id: kill_num($lexer.src_str($span), $span, p), query: true, tidb_extension: $1, ..Default::default() }))")
+act("KillStmt", "KillOrKillTiDB BuiltinFunction",
+    "Stmt::Kill(Box::new(KillStmt { tidb_extension: $1, expr: Some($2), ..Default::default() }))")
+
 ACTIONS = A
 
 PROGRAMS = r'''
@@ -1580,6 +1595,19 @@ fn int_lit_datum(s: &str) -> Datum {
             Err(_) => Datum::Decimal(normalize_decimal(s)),
         },
     }
+}
+
+/// Extract the trailing unsigned integer literal (`NUM`) of a `KILL` statement.
+fn kill_num(src: &str, span: Span, p: &Ctx) -> u64 {
+    let s = src
+        .trim_end()
+        .rsplit(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or("");
+    s.parse::<u64>().unwrap_or_else(|_| {
+        p.fail(format!("{s} is out of range [0,18446744073709551615]"), span.start());
+        0
+    })
 }
 
 /// MyDecimal.FromString + String(): no leading zeros in the integer part, no trailing '.'.

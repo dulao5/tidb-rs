@@ -2374,6 +2374,8 @@ async fn sorted_select_results_merge_sort_and_tie_breaking() {
         Some(&schema),
         by_items,
         Some(Arc::clone(&tracker)),
+        None,
+        None,
     )
     .unwrap();
 
@@ -2457,6 +2459,8 @@ async fn sorted_select_results_close_drains_all_on_error() {
             desc: false,
         }],
         Some(Arc::clone(&tracker)),
+        None,
+        None,
     )
     .unwrap();
 
@@ -2490,6 +2494,8 @@ async fn sorted_select_results_close_drains_all_on_error() {
             desc: false,
         }],
         Some(Arc::clone(&tracker)),
+        None,
+        None,
     )
     .unwrap();
     let mut chk2 = new_chunk_with_capacity(&fts, 1);
@@ -2498,4 +2504,55 @@ async fn sorted_select_results_close_drains_all_on_error() {
     drop(ssr2);
     assert!(closed_drop.load(Ordering::SeqCst));
     assert_eq!(tracker.bytes_consumed(), 0);
+}
+
+#[tokio::test]
+async fn sorted_select_results_checks_sql_killer_during_merge() {
+    use tidb_expression::byitem::ByItems;
+    use tidb_expression::column::Column;
+    use tidb_expression::expression::Expr;
+    use tidb_runtime::KillCancel;
+    use tidb_sessionctx::exprstatic::evalctx::new_eval_context;
+
+    let ectx = new_eval_context(vec![]);
+    let fts = vec![int64_field_type()];
+    let c0 = Arc::new(Column {
+        id: 1,
+        unique_id: 1,
+        ret_type: Arc::clone(&fts[0]),
+        ..Default::default()
+    });
+    let closed0 = Arc::new(AtomicBool::new(false));
+    let child0: Box<dyn SelectResult> = Box::new(MockChildResult {
+        chunks: vec![vec![
+            vec![new_int_datum(1)],
+            vec![new_int_datum(2)],
+            vec![new_int_datum(3)],
+        ]]
+        .into(),
+        close_err: None,
+        closed: Arc::clone(&closed0),
+    });
+    let killer = SqlKiller::new();
+    let kc = KillCancel::new(killer.signal_handle());
+    killer.send_kill_signal(tidb_memory::sqlkiller::QueryInterrupted);
+    let mut ssr = new_sorted_select_results(
+        ectx.as_ref(),
+        vec![child0],
+        None,
+        vec![ByItems {
+            expr: Expr::Column((*c0).clone()).into_ref(),
+            desc: false,
+        }],
+        None,
+        Some(Arc::clone(&killer)),
+        Some(kc),
+    )
+    .unwrap();
+    let mut chk = new_chunk_with_capacity(&fts, 4);
+    let err = ssr
+        .next(&Context::background(), &mut chk)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), errno::ErrQueryInterrupted as isize);
 }

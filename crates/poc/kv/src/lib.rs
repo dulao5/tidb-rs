@@ -383,14 +383,22 @@ impl KvSnapshot {
 
     /// Send a coprocessor request at this snapshot through the coprocessor client of D07.2
     /// (`copr.CopClient.Send`, then `Next` until the end) and return every response's data,
-    /// in the iterator's order. `req.start_ts` is the snapshot's timestamp. `killed` is the
-    /// statement's kill signal (Go `tikv.Variables.Killed` = `&SQLKiller.Signal`): the
-    /// iterator's workers stop once it is non-zero (VS1-14; the PoC has no KILL and passes
-    /// `None`).
+    /// in the iterator's order. `req.start_ts` is the snapshot's timestamp.
     pub async fn coprocessor(
+        &mut self,
+        req: CopRequest,
+        killed: Option<Arc<AtomicU32>>,
+    ) -> Result<Vec<Vec<u8>>> {
+        self.coprocessor_with_cancel(req, killed, None).await
+    }
+
+    /// Variant of [`Self::coprocessor`] also forwarding [`tidb_runtime::cancel::KillCancel`] so
+    /// in-flight region RPCs/backoffs cancel cooperatively alongside `killed`.
+    pub async fn coprocessor_with_cancel(
         &mut self,
         mut req: CopRequest,
         killed: Option<Arc<AtomicU32>>,
+        kill_cancel: Option<tidb_runtime::cancel::KillCancel>,
     ) -> Result<Vec<Vec<u8>>> {
         req.start_ts = self.ts;
         let client = self.copr.get_client();
@@ -398,6 +406,7 @@ impl KvSnapshot {
         let vars: tidb_kv::kv::OptionValue = Box::new(tidb_store::copr::tikv::Variables {
             backoff_weight: DEFAULT_BACKOFF_WEIGHT as i64,
             killed,
+            kill_cancel,
         });
         let option = tidb_kv::kv::ClientSendOption::default();
         let mut resp = client.send(&req, Some(&vars), &option);
