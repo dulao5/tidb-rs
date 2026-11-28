@@ -720,6 +720,7 @@ impl<'ast> PlanBuilder<'ast> {
         for cond in conditions {
             let expr = self.rewrite(
                 &*ctx.expr_ctx,
+                Some(&mut *ctx.vars),
                 cond,
                 rewrite_plan(&ctx.arena, *p),
                 agg_mapper,
@@ -1040,6 +1041,7 @@ impl<'ast> PlanBuilder<'ast> {
             }
             let new_expr = self.rewrite_with_preprocess(
                 &*ctx.expr_ctx,
+                Some(&mut *ctx.vars),
                 fexpr,
                 rewrite_plan(&ctx.arena, p),
                 mapper,
@@ -1164,6 +1166,7 @@ impl<'ast> PlanBuilder<'ast> {
             let it = self
                 .rewrite_with_preprocess(
                     &*ctx.expr_ctx,
+                    Some(&mut *ctx.vars),
                     &item.expr,
                     rewrite_plan(&ctx.arena, p),
                     agg_mapper,
@@ -1302,6 +1305,7 @@ impl UserVarTypeProcessor<'_, '_> {
         }
         b.rewrite(
             &*ctx.expr_ctx,
+            Some(&mut *ctx.vars),
             e,
             rewrite_plan(&ctx.arena, self.plan),
             self.mapper,
@@ -1553,6 +1557,7 @@ impl<'ast> PlanBuilder<'ast> {
                 let new_arg = self
                     .rewrite_with_col_replacements(
                         &*ctx.expr_ctx,
+                        Some(&mut *ctx.vars),
                         arg,
                         rewrite_plan(&ctx.arena, p),
                         None,
@@ -1580,6 +1585,7 @@ impl<'ast> PlanBuilder<'ast> {
                     let new_by_item = self
                         .rewrite_with_col_replacements(
                             &*ctx.expr_ctx,
+                            Some(&mut *ctx.vars),
                             ret_expr,
                             rewrite_plan(&ctx.arena, p),
                             None,
@@ -3114,6 +3120,7 @@ impl<'ast> PlanBuilder<'ast> {
                         // correlated agg will be extracted completely latter.
                         self.rewrite(
                             &*ctx.expr_ctx,
+                            Some(&mut *ctx.vars),
                             &by_item.expr,
                             rewrite_plan(&ctx.arena, p),
                             None,
@@ -3567,6 +3574,7 @@ impl<'ast> PlanBuilder<'ast> {
             let expr = self
                 .rewrite_with_col_replacements(
                     &*ctx.expr_ctx,
+                    Some(&mut *ctx.vars),
                     expr_node,
                     rewrite_plan(&ctx.arena, p),
                     None,
@@ -4421,6 +4429,7 @@ impl<'ast> PlanBuilder<'ast> {
             let new_arg = self
                 .rewrite(
                     &*ctx.expr_ctx,
+                    Some(&mut *ctx.vars),
                     arg,
                     rewrite_plan(&ctx.arena, p),
                     agg_map,
@@ -4471,6 +4480,7 @@ impl<'ast> PlanBuilder<'ast> {
             let new_arg = self
                 .rewrite(
                     &*ctx.expr_ctx,
+                    Some(&mut *ctx.vars),
                     arg,
                     rewrite_plan(&ctx.arena, p),
                     agg_map,
@@ -4510,6 +4520,7 @@ impl<'ast> PlanBuilder<'ast> {
             let it = self
                 .rewrite(
                     &*ctx.expr_ctx,
+                    Some(&mut *ctx.vars),
                     &item.expr,
                     rewrite_plan(&ctx.arena, p),
                     agg_map,

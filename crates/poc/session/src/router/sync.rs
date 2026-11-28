@@ -1,45 +1,28 @@
 //! The session-state sync of VS1 plan §4.1: `USE`, `SET NAMES` and `SET <sysvar>` are still
 //! parsed and executed by the PoC (they are D12.12, P5); after the PoC accepted one, the
 //! router writes the same change into the new session, whose `SessionVars` are the source of
-//! truth. Only the variables of [`SYNCED_SYSVARS`] (the ones the PoC accepts) are synced.
-//! When the new session rejects a value the PoC accepted, the variable is *diverged*: the
-//! new session does not know it, so step 0 of the routing order sends statements to the PoC
-//! until a later `SET` brings both sides together again.
+//! truth. Every writable session-scoped system variable (except [`FENCED_SYSVARS`], which the
+//! prototype must reject) is synced; when the new session rejects a value the PoC accepted, the
+//! variable is *diverged* and step 0 keeps statements on the PoC until a later `SET` brings
+//! both sides together again.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tidb_sessionctx::variable::session::SessionVars;
 use tidb_sql::ir::{Literal, SetAssignment, SetValue};
 
 use super::PocValues;
 
-/// The system variables the PoC accepts (`Session::set`), synced into the new session. The
-/// PoC models some of them (charsets) and accepts the rest without effect; the new session
-/// applies all of them with Go's semantics.
-pub const SYNCED_SYSVARS: &[&str] = &[
-    "autocommit",
-    "character_set_client",
-    "character_set_connection",
-    "character_set_results",
-    "collation_connection",
-    "sql_mode",
-    "wait_timeout",
-    "interactive_timeout",
-    "net_write_timeout",
-    "net_read_timeout",
-    "transaction_isolation",
-    "tx_isolation",
-    "transaction_read_only",
-    "tx_read_only",
-    "time_zone",
-    "max_execution_time",
-    // Connect-time SETs of drivers and pools (#505).
-    "sql_select_limit",
-    "sql_safe_updates",
-    "foreign_key_checks",
-    "unique_checks",
-    "innodb_lock_wait_timeout",
-    "group_concat_max_len",
+/// Session-scoped variables whose semantics the prototype / read-only node cannot honor and
+/// whose session `SET` stays fenced with 1235.
+pub(crate) const FENCED_SYSVARS: &[&str] = &[
+    "tidb_snapshot",
+    "tidb_read_staleness",
+    "tx_read_ts",
+    "tidb_txn_mode",
+    "tidb_replica_read",
+    "tidb_read_consistency",
+    "tidb_rc_read_check_ts",
 ];
 
 /// Go `variable.SetNamesVariables`.
@@ -53,7 +36,12 @@ pub(crate) const SET_CHARSET_VARIABLES: [&str; 2] =
     ["character_set_client", "character_set_results"];
 
 /// Writes `name = value` into the new session, recording whether it diverged.
-fn set(vars: &mut SessionVars, diverged: &mut BTreeSet<String>, name: &str, value: &str) {
+pub(super) fn set(
+    vars: &mut SessionVars,
+    diverged: &mut BTreeSet<String>,
+    name: &str,
+    value: &str,
+) {
     if vars.set_system_var(name, value).is_ok() {
         diverged.remove(name);
     } else {
@@ -100,6 +88,8 @@ pub(crate) fn value_text(vars: &mut SessionVars, name: &str, v: &SetValue) -> Op
 pub(super) fn sync_set(
     vars: &mut SessionVars,
     diverged: &mut BTreeSet<String>,
+    pending_defaults: &mut BTreeMap<String, &'static str>,
+    globals_loaded: bool,
     assignments: &[SetAssignment],
     poc: &PocValues,
 ) {
@@ -108,14 +98,17 @@ pub(super) fn sync_set(
             // Go `SetExecutor.setCharset(cs, co, true)`, with the collation the PoC resolved.
             SetAssignment::Names { .. } => {
                 for v in SET_NAMES_VARIABLES {
+                    pending_defaults.remove(v);
                     set(vars, diverged, v, &poc.charset);
                 }
+                pending_defaults.remove("collation_connection");
                 set(vars, diverged, "collation_connection", &poc.collation);
             }
             // Go `setCharset(cs, "", false)`: client and results, connection from the database.
             SetAssignment::Charset { .. } => {
                 let cs = poc.results_charset.clone().unwrap_or_default();
                 for v in SET_CHARSET_VARIABLES {
+                    pending_defaults.remove(v);
                     set(vars, diverged, v, &cs);
                 }
                 for (var, db_var) in [
@@ -123,8 +116,16 @@ pub(super) fn sync_set(
                     ("collation_connection", "collation_database"),
                 ] {
                     match vars.get_global_system_var(db_var) {
-                        Ok(v) => set(vars, diverged, var, &v),
+                        Ok(v) => {
+                            pending_defaults.remove(var);
+                            set(vars, diverged, var, &v);
+                        }
+                        Err(_) if !globals_loaded => {
+                            diverged.remove(var);
+                            pending_defaults.insert(var.to_owned(), db_var);
+                        }
                         Err(_) => {
+                            pending_defaults.remove(var);
                             diverged.insert(var.to_owned());
                         }
                     }
@@ -147,12 +148,22 @@ pub(super) fn sync_set(
                 name,
                 global: false,
                 value,
-            } => match value_text(vars, name, value) {
-                Some(v) => set(vars, diverged, name, &v),
-                None => {
-                    diverged.insert(name.clone());
+            } => {
+                if *value == SetValue::Default && !globals_loaded {
+                    if let Some(sv) = tidb_sessionctx::variable::get_sys_var(name) {
+                        diverged.remove(sv.name);
+                        pending_defaults.insert(sv.name.to_owned(), sv.name);
+                    }
+                    continue;
                 }
-            },
+                pending_defaults.remove(name);
+                match value_text(vars, name, value) {
+                    Some(v) => set(vars, diverged, name, &v),
+                    None => {
+                        diverged.insert(name.clone());
+                    }
+                }
+            }
             // The PoC rejects these, so they never get here.
             SetAssignment::SysVar { global: true, .. } | SetAssignment::UserVar { .. } => {}
         }
@@ -164,7 +175,10 @@ pub(super) fn sync_db(vars: &mut SessionVars, poc: &PocValues) {
     vars.current_db = poc.current_db.clone().unwrap_or_default();
 }
 
-/// Whether `name` is synced (a `SET` of anything else is rejected by the PoC).
+/// Whether `name` is synced into the new session (all writable session-scoped variables
+/// except the fenced ones).
 pub fn is_synced(name: &str) -> bool {
-    SYNCED_SYSVARS.contains(&name)
+    tidb_sessionctx::variable::get_sys_var(name).is_some_and(|sv| {
+        sv.has_session_scope() && !sv.read_only && !FENCED_SYSVARS.contains(&sv.name)
+    })
 }

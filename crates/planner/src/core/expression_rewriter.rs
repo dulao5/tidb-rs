@@ -68,14 +68,17 @@ use tidb_expression::simple_rewriter::{
     column_name_orig_col_name, column_name_string, find_field_name,
 };
 use tidb_expression::util::{
-    check_args_not_multi_column_row, get_func_arg, get_int_from_constant, get_row_len,
-    param_marker_expression,
+    check_args_not_multi_column_row, datum_to_constant, get_func_arg, get_int_from_constant,
+    get_row_len, param_marker_expression,
 };
 use tidb_model::TableInfo;
 use tidb_parser::ast::funcs as fnames;
 use tidb_parser::ast::{self, Expr as AstExpr, Op};
-use tidb_parser::gocharset::{CharsetBin, CharsetUTF8MB4, ErrCollationCharsetMismatch};
+use tidb_parser::gocharset::{
+    CharsetBin, CharsetUTF8MB4, CollationBin, ErrCollationCharsetMismatch,
+};
 use tidb_parser::types::{ETDatetime, ETDecimal, ETDuration, ETInt, ETReal, ETString};
+use tidb_sessionctx::variable::session::SessionVars;
 use tidb_types::collate::{get_collation_by_name, new_collation_enabled};
 use tidb_types::datum::{GoValue, new_datum, new_int_datum, new_string_datum};
 use tidb_types::etc::{FieldType, op_name};
@@ -240,6 +243,8 @@ pub struct ExprRewriterPlanCtx<'b, 'ast> {
     pub plan: Option<PlanId>,
     /// builder.
     pub builder: &'b mut PlanBuilder<'ast>,
+    /// Session variables (Go: `planCtx.builder.ctx.GetSessionVars()`), read by `@@var`.
+    pub vars: Option<&'b mut SessionVars>,
     /// curClause tracks which part of the query is being processed
     pub cur_clause: ClauseCode,
     /// aggrMap.
@@ -304,12 +309,13 @@ impl<'ast> PlanBuilder<'ast> {
     pub fn rewrite(
         &mut self,
         sctx: &dyn BuildContext,
+        vars: Option<&mut SessionVars>,
         expr_node: &AstExpr,
         p: RewritePlan<'_>,
         agg_mapper: Option<&AggMapper<'_>>,
         as_scalar: bool,
     ) -> Result<Option<ExprRef>, Error> {
-        self.rewrite_with_preprocess(sctx, expr_node, p, agg_mapper, None, as_scalar)
+        self.rewrite_with_preprocess(sctx, vars, expr_node, p, agg_mapper, None, as_scalar)
     }
 
     /// rewriteWithPreprocess is for handling the situation that we need to adjust the input ast tree
@@ -319,9 +325,11 @@ impl<'ast> PlanBuilder<'ast> {
     /// The `preprocess` hook is not here: its only caller (`resolveHavingAndOrderBy`'s
     /// window-function path, D09.4) rewrites the AST before the call instead.
     // go: PlanBuilder.rewriteWithPreprocess L2 (no preprocess hook; no rewriter pool, M-POOL)
+    #[allow(clippy::too_many_arguments)]
     pub fn rewrite_with_preprocess(
         &mut self,
         sctx: &dyn BuildContext,
+        vars: Option<&mut SessionVars>,
         expr_node: &AstExpr,
         p: RewritePlan<'_>,
         agg_mapper: Option<&AggMapper<'_>>,
@@ -332,6 +340,7 @@ impl<'ast> PlanBuilder<'ast> {
         let allow_build_cast_array = self.allow_build_cast_array;
         let mut rewriter = self.get_expression_rewriter(sctx, p);
         if let Some(pc) = rewriter.plan_ctx.as_mut() {
+            pc.vars = vars;
             pc.aggr_map = agg_mapper;
             pc.window_map = window_mapper;
         }
@@ -343,9 +352,11 @@ impl<'ast> PlanBuilder<'ast> {
     /// Variant of [`PlanBuilder::rewrite`] that applies local AST column-alias replacements
     /// without mutating the AST (`agg_col_replacements` and `gby_col_replacements`, D09.4 §4.3).
     // glue: immutable-AST helper for PlanBuilder.rewrite with local column replacements
+    #[allow(clippy::too_many_arguments)]
     pub fn rewrite_with_col_replacements<'a>(
         &mut self,
         sctx: &'a dyn BuildContext,
+        vars: Option<&mut SessionVars>,
         expr_node: &'a AstExpr,
         p: RewritePlan<'a>,
         agg_mapper: Option<&AggMapper<'_>>,
@@ -355,6 +366,7 @@ impl<'ast> PlanBuilder<'ast> {
         let allow_build_cast_array = self.allow_build_cast_array;
         let mut rewriter = self.get_expression_rewriter(sctx, p);
         if let Some(pc) = rewriter.plan_ctx.as_mut() {
+            pc.vars = vars;
             pc.aggr_map = agg_mapper;
         }
         rewriter.as_scalar = as_scalar;
@@ -391,6 +403,7 @@ impl<'ast> PlanBuilder<'ast> {
             plan_ctx: Some(ExprRewriterPlanCtx {
                 plan: p.id,
                 builder: self,
+                vars: None,
                 cur_clause,
                 aggr_map: None,
                 window_map: None,
@@ -474,7 +487,7 @@ pub fn eval_ast_expr_with_plan_ctx(
     if let AstExpr::Value(val) = expr {
         return Ok(value_expr_datum(val));
     }
-    let (new_expr, _) = rewrite_ast_expr_with_plan_ctx(sctx, expr, None, &[], false)?;
+    let (new_expr, _) = rewrite_ast_expr_with_plan_ctx(sctx, None, expr, None, &[], false)?;
     new_expr.eval(&*sctx.get_eval_ctx(), &EvalState::new(), Row::default())
 }
 
@@ -521,6 +534,7 @@ pub fn has_current_datetime_default() -> Result<(), Error> {
 // go: rewriteAstExprWithPlanCtx L2 (the hint handler and saved block names are D13.3)
 pub fn rewrite_ast_expr_with_plan_ctx(
     sctx: &dyn BuildContext,
+    vars: Option<&mut SessionVars>,
     expr: &AstExpr,
     schema: Option<&Schema>,
     names: &[Arc<FieldName>],
@@ -543,7 +557,7 @@ pub fn rewrite_ast_expr_with_plan_ctx(
         schema,
         names,
     };
-    let new_expr = b.rewrite(sctx, expr, p, None, true)?;
+    let new_expr = b.rewrite(sctx, vars, expr, p, None, true)?;
     let new_expr = new_expr.expect("asScalar rewrite returns an expression");
     Ok((new_expr, b.visit_info))
 }
@@ -1141,7 +1155,7 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
     }
 
     /// Leave implements Visitor interface.
-    // go: expressionRewriter.Leave L2 (variables, DEFAULT(), GROUPING() and ORDER BY ? are stubs, spec §4)
+    // go: expressionRewriter.Leave L2 (DEFAULT(), GROUPING() and ORDER BY ? are stubs, spec §4)
     fn leave(&mut self, in_node: &AstExpr) -> Result<(), Error> {
         match in_node {
             AstExpr::Aggregate(_) => {
@@ -1195,17 +1209,14 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
                         in_node,
                         "accessing system variable requires plan context",
                     )?;
-                    // glue: stub of expressionRewriter.rewriteSystemVariable, blocked-by:D09.2 (part 2: the rewriter does not get the session variables yet)
+                    self.rewrite_system_variable(v)?;
+                } else {
+                    // glue: stub of expressionRewriter.rewriteUserVariable, blocked-by:D08.9 (getvar / setvar functions)
                     return Err(blocked(
-                        "D09.2",
-                        "a system variable in an expression (the rewriter does not get the session variables yet)",
+                        "D08.9",
+                        "a user variable in an expression (the getvar / setvar functions)",
                     ));
                 }
-                // glue: stub of expressionRewriter.rewriteUserVariable, blocked-by:D08.9 (getvar / setvar functions)
-                return Err(blocked(
-                    "D08.9",
-                    "a user variable in an expression (the getvar / setvar functions)",
-                ));
             }
             AstExpr::FuncCall(v) => {
                 let l = v.fn_name.l();
@@ -1396,6 +1407,81 @@ impl<'a, 'b, 'ast> ExpressionRewriter<'a, 'b, 'ast> {
     /// newFunctionWithInit chooses which expression.NewFunctionImpl() will be used.
     ///
     /// `BuiltinFunctionUsageInc` is telemetry (spec §5 item 2).
+    // go: expressionRewriter.rewriteSystemVariable L2 (no SEM check: SEM is not enabled on this node)
+    fn rewrite_system_variable(&mut self, v: &ast::VariableExpr) -> Result<(), Error> {
+        let name = v.name.to_lowercase();
+        let vars = self
+            .plan_ctx
+            .as_mut()
+            .and_then(|pc| pc.vars.as_deref_mut())
+            .expect("session vars required for system variable rewrite");
+        let Some(sys_var) = tidb_sessionctx::variable::get_sys_var(&name) else {
+            let mut err = tidb_sessionctx::variable::error::ErrUnknownSystemVar
+                .fast_gen_by_args(go_args![name.clone()]);
+            if let Err(removed) =
+                tidb_sessionctx::variable::removed::check_sys_var_is_removed(&name)
+            {
+                // Removed vars still return an error, but we customize it from
+                // "unknown" to an explanation of why it is not supported.
+                // This is important so users at least know they had the name correct.
+                err = removed;
+            }
+            return Err(err);
+        };
+        if sys_var.is_noop
+            && !tidb_sessionctx::variable::tidb_vars::EnableNoopVariables
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            // The variable does nothing, append a warning to the statement output.
+            vars.stmt_ctx().append_warning(
+                tidb_base::dbterror::plannererrors::ErrGettingNoopVariable
+                    .fast_gen_by_args(go_args![sys_var.name.to_owned()]),
+            );
+        }
+        // sem.IsEnabled() && sem.IsInvisibleSysVar: SEM is not enabled on tidb-rs.
+        if v.explicit_scope && !sys_var.has_none_scope() {
+            if v.is_global && !(sys_var.has_global_scope() || sys_var.has_instance_scope()) {
+                return Err(tidb_sessionctx::variable::error::ErrIncorrectScope
+                    .gen_with_stack_by_args(go_args![name, "SESSION"]));
+            }
+            if !v.is_global && !sys_var.has_session_scope() {
+                return Err(tidb_sessionctx::variable::error::ErrIncorrectScope
+                    .gen_with_stack_by_args(go_args![name, "GLOBAL"]));
+            }
+        }
+        let val = if sys_var.has_none_scope() {
+            sys_var.value.clone()
+        } else if v.is_global {
+            vars.get_global_system_var(&name)?
+        } else {
+            vars.get_session_or_global_system_var(&name)?
+        };
+        let (native_val, native_type, native_flag) = sys_var.get_native_val_type(&val);
+        let mut e = datum_to_constant(native_val, native_type, native_flag);
+        match native_type {
+            mysql::TypeVarString => {
+                let (charset, _) =
+                    vars.get_system_var(tidb_sessionctx::variable::names::CharacterSetConnection);
+                e.ret_type.set_charset(&charset);
+                let (collate, _) =
+                    vars.get_system_var(tidb_sessionctx::variable::names::CollationConnection);
+                e.ret_type.set_collate(&collate);
+            }
+            mysql::TypeLong | mysql::TypeLonglong => {
+                e.ret_type.set_charset(CharsetBin);
+                e.ret_type.set_collate(CollationBin);
+            }
+            _ => {
+                return Err(go_errorf(
+                    "Not supported type(%x) in GetNativeValType() function",
+                    go_args![i64::from(native_type)],
+                ));
+            }
+        }
+        self.ctx_stack_append(Expr::Constant(e).into_ref(), EmptyName.clone());
+        Ok(())
+    }
+
     // go: expressionRewriter.newFunctionWithInit L2 (no builtin function usage telemetry)
     fn new_function_with_init(
         &mut self,

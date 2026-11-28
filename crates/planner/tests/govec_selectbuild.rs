@@ -83,8 +83,6 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D09.12", 4),
     // The lock operator (SELECT ... FOR UPDATE).
     ("D09.14", 2),
-    // System variables in expressions (the rewriter's part 2).
-    ("D09.2", 2),
     // Joins.
     ("D09.3", 6),
     // GROUP BY ... WITH ROLLUP (D09.4 part C).
@@ -136,8 +134,10 @@ fn ft_out(ft: &FieldType) -> Value {
 struct Acc;
 
 impl GlobalVarAccessor for Acc {
-    fn get_global_sys_var(&self, _: &str) -> Result<String, Error> {
-        Ok(String::new())
+    fn get_global_sys_var(&self, name: &str) -> Result<String, Error> {
+        tidb_sessionctx::variable::get_sys_var(name)
+            .map(|sv| sv.value.clone())
+            .ok_or_else(|| tidb_base::errors::new(format!("unknown sysvar {name}")))
     }
     fn set_global_sys_var_only(&mut self, _: &str, _: &str, _: bool) -> Result<(), Error> {
         Ok(())
@@ -1347,8 +1347,9 @@ fn run_winop(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
 /// table-read `SelectPriv` (`column = "*"`, error `1142`) at `build_data_source` and removes Go's
 /// case-sensitive `collectPrivsForCount` patch. Pinned so any unexpected drift fails CI.
 /// Includes the 2 records of `SELECT a FROM t2 USE INDEX (ia)`, which build now that the index
-/// hint loop of `getPossibleAccessPaths` is ported, and read a base table like the others.
-const EXPECTED_R29_NORMALIZED: usize = 2323;
+/// hint loop of `getPossibleAccessPaths` is ported, and the 2 records of `@@` system variable
+/// reads unblocked by `rewrite_system_variable` (#541).
+const EXPECTED_R29_NORMALIZED: usize = 2325;
 
 fn select_list_has_group_by(list: &tidb_parser::ast::SetOprSelectList) -> bool {
     list.selects.iter().any(|s| match s {

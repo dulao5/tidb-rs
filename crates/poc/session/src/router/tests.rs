@@ -536,14 +536,14 @@ fn kind_and_ast_precheck() {
             "SELECT c FROM t WHERE id = ?",
             Reason::Ast("parameter marker"),
         ),
-        (
-            "SELECT @@max_allowed_packet, @@wait_timeout",
-            Reason::Ast("variable"),
-        ),
         ("SELECT c FROM t WHERE id = @x", Reason::Ast("variable")),
     ] {
         assert_eq!(route(sql), Route::Poc(want), "{sql}");
     }
+    assert_eq!(
+        route("SELECT @@max_allowed_packet, @@wait_timeout"),
+        Route::New
+    );
     // Prepared statements may have `?`.
     assert_eq!(
         r.route(&parse("SELECT c FROM t WHERE id = ?"), &p, true),
@@ -2295,22 +2295,25 @@ fn warning_texts(c: &crate::plan_cache::PrepareCacheability) -> Vec<String> {
         .collect()
 }
 
-/// A statement only the PoC prepares (a system variable read) gets Go's reason, decided with
-/// the new session's variables; SHOW WARNINGS then goes to the PoC. A cacheable one gets
-/// none.
+/// A statement only the PoC prepares (e.g. a non-ported session function) gets Go's reason,
+/// decided with the new session's variables; SHOW WARNINGS then goes to the PoC. A cacheable
+/// one gets none.
 #[test]
 fn poc_prepare_takes_the_plan_cache_decision() {
     let mut p = poc();
     let (mut r, script) = scripted(NewStackMode::Fallback, &p);
     r.last.engine = Engine::New;
-    block_on(r.prepare(&mut p, 1, "SELECT @@max_allowed_packet")).unwrap();
-    assert_eq!(r.owner(1), Some(&Owner::Poc(Reason::Ast("variable"))));
+    block_on(r.prepare(&mut p, 1, "SELECT DATABASE()")).unwrap();
+    assert_eq!(
+        r.owner(1),
+        Some(&Owner::Poc(Reason::Ast("function not ported")))
+    );
     assert!(script.lock().unwrap().log.is_empty());
     let c = &p.cacheability[&1];
-    assert_eq!(c.reason, "query has user-defined variables is un-cacheable");
+    assert_eq!(c.reason, "query has 'database' is un-cacheable");
     assert_eq!(
         warning_texts(c),
-        ["Warning: skip prepared plan-cache: query has user-defined variables is un-cacheable"]
+        ["Warning: skip prepared plan-cache: query has 'database' is un-cacheable"]
     );
     assert_eq!(r.last.engine, Engine::Poc);
     // Cacheable (no InfoSchema here: the table checks are left out).
@@ -2397,4 +2400,225 @@ fn router_error_clears_the_poc_warnings() {
     block_on(s.prepare(&mut p, 2, "SELECT count(*) FROM t")).unwrap();
     block_on(s.execute(&mut p, 2, vec![])).unwrap();
     assert_eq!(p.warnings_cleared, 1);
+}
+
+fn decode_encoded_rows(resp: Response) -> (Vec<ColumnDef>, Vec<Vec<Option<String>>>) {
+    let Response::Encoded(rs) = resp else {
+        panic!("expected Response::Encoded, got {resp:?}");
+    };
+    let rows = rs
+        .rows
+        .iter()
+        .map(|row| {
+            let mut r = tidb_mysql_protocol::codec::Reader::new(row);
+            let mut out = Vec::with_capacity(rs.columns.len());
+            for _ in 0..rs.columns.len() {
+                let s = r
+                    .lenenc_str()
+                    .unwrap()
+                    .map(|b| String::from_utf8_lossy(b).into_owned());
+                out.push(s);
+            }
+            assert!(r.is_empty(), "trailing encoded bytes");
+            out
+        })
+        .collect();
+    (rs.columns, rows)
+}
+
+fn decode_binary_rows(resp: Response) -> (Vec<ColumnDef>, Vec<Vec<Option<String>>>) {
+    let Response::Encoded(rs) = resp else {
+        panic!("expected Response::Encoded, got {resp:?}");
+    };
+    let bitmap_len = (rs.columns.len() + 2).div_ceil(8);
+    let rows = rs
+        .rows
+        .iter()
+        .map(|row| {
+            let mut r = tidb_mysql_protocol::codec::Reader::new(row);
+            assert_eq!(r.u8().unwrap(), 0);
+            let bitmap = r.take(bitmap_len).unwrap();
+            let mut out = Vec::with_capacity(rs.columns.len());
+            for (i, col) in rs.columns.iter().enumerate() {
+                let bit_pos = i + 2;
+                if bitmap[bit_pos / 8] & (1 << (bit_pos % 8)) != 0 {
+                    out.push(None);
+                    continue;
+                }
+                let val = match col.column_type {
+                    ColumnType::LongLong => {
+                        let v = r.u64().unwrap();
+                        if col.is_unsigned() {
+                            v.to_string()
+                        } else {
+                            (v as i64).to_string()
+                        }
+                    }
+                    _ => String::from_utf8_lossy(r.lenenc_str().unwrap().unwrap()).into_owned(),
+                };
+                out.push(Some(val));
+            }
+            assert!(r.is_empty(), "trailing binary encoded bytes");
+            out
+        })
+        .collect();
+    (rs.columns, rows)
+}
+
+/// Real `NewSession` executes `SELECT @@...` and driver connect queries on the new stack
+/// (both `Fallback` and `Strict`), reflects cluster `SysVarCache` + `mysql.tidb`, propagates
+/// `SET` / `SET DEFAULT`, and reports Go scope/unknown/removed errors directly (`1238`,
+/// `1193`, `8136`).
+#[test]
+fn new_stack_serves_system_variables_and_connect_queries() {
+    tidb_session::session::init_mdl_variable();
+    let cache = cluster_cache(&[
+        ("sql_mode", "STRICT_TRANS_TABLES"),
+        ("time_zone", "+02:00"),
+        ("div_precision_increment", "7"),
+        ("group_concat_max_len", "4096"),
+        ("max_execution_time", "1500"),
+        ("tidb_enable_noop_functions", "ON"),
+        ("tidb_skip_isolation_level_check", "ON"),
+        ("tidb_enable_prepared_plan_cache", "ON"),
+    ]);
+    let tidb_table = Arc::new(parking_lot::RwLock::new(
+        [("tikv_gc_life_time".to_owned(), "24h0m0s".to_owned())]
+            .into_iter()
+            .collect(),
+    ));
+    let mut p = poc();
+    let mut new = NewSession::with_globals(
+        None,
+        None,
+        None,
+        Arc::clone(&cache),
+        Some(Arc::clone(&tidb_table)),
+    );
+    new.session_mut()
+        .set_domain_info_schema(sbtest_info_schema());
+    let mut r = Router::new(NewStackMode::Strict, Box::new(new), &p.values());
+
+    // Cluster global values are returned by the new stack.
+    let (_, rows) = decode_encoded_rows(
+        block_on(r.query(
+            &mut p,
+            "SELECT @@global.sql_mode, @@session.sql_mode, @@time_zone, @@div_precision_increment, \
+             @@group_concat_max_len, @@max_execution_time, @@tidb_enable_noop_functions, \
+             @@tidb_skip_isolation_level_check, @@tidb_enable_prepared_plan_cache, \
+             @@tidb_gc_life_time, @@max_allowed_packet",
+        ))
+        .unwrap(),
+    );
+    assert_eq!(
+        rows[0],
+        vec![
+            Some("STRICT_TRANS_TABLES".to_owned()),
+            Some("STRICT_TRANS_TABLES".to_owned()),
+            Some("+02:00".to_owned()),
+            Some("7".to_owned()),
+            Some("4096".to_owned()),
+            Some("1500".to_owned()),
+            Some("ON".to_owned()),
+            Some("1".to_owned()),
+            Some("1".to_owned()),
+            Some("24h0m0s".to_owned()),
+            Some((64u64 << 20).to_string()),
+        ]
+    );
+    assert_eq!(r.last.engine, Engine::New);
+
+    // Connect-time queries (#505) execute cleanly on the new stack.
+    let (cols, rows) =
+        decode_encoded_rows(block_on(r.query(&mut p, "SELECT @@version_comment LIMIT 1")).unwrap());
+    assert_eq!(cols[0].name, "@@version_comment");
+    assert!(!rows.is_empty());
+
+    // Scope, unknown, and removed variable errors match Go without fallback.
+    for (sql, want_code) in [
+        ("SELECT @@global.warning_count", 1238),
+        ("SELECT @@session.tidb_gc_life_time", 1238),
+        ("SELECT @@local.tidb_gc_life_time", 1238),
+        ("SELECT @@no_such_var", 1193),
+        ("SELECT @@tidb_enable_streaming", 8136),
+    ] {
+        let e = block_on(r.query(&mut p, sql)).unwrap_err();
+        assert_eq!(e.code, want_code, "{sql}: {e:?}");
+    }
+
+    // Session SET updates NewSession so subsequent `SELECT @@...` sees session values and
+    // `SET ... = DEFAULT` returns to cluster global values.
+    block_on(r.query(
+        &mut p,
+        "SET div_precision_increment = 9, max_execution_time = 2500, \
+         transaction_isolation = 'SERIALIZABLE', time_zone = '+08:00', sql_mode = '', \
+         tidb_enable_prepared_plan_cache = OFF",
+    ))
+    .unwrap();
+    let (_, rows) = decode_encoded_rows(
+        block_on(r.query(
+            &mut p,
+            "SELECT @@div_precision_increment, @@max_execution_time, @@transaction_isolation, \
+             @@tx_isolation, @@time_zone, @@session.sql_mode, @@global.sql_mode, \
+             @@tidb_enable_prepared_plan_cache",
+        ))
+        .unwrap(),
+    );
+    assert_eq!(
+        rows[0],
+        vec![
+            Some("9".to_owned()),
+            Some("2500".to_owned()),
+            Some("SERIALIZABLE".to_owned()),
+            Some("SERIALIZABLE".to_owned()),
+            Some("+08:00".to_owned()),
+            Some(String::new()),
+            Some("STRICT_TRANS_TABLES".to_owned()),
+            Some("0".to_owned()),
+        ]
+    );
+    block_on(r.query(&mut p, "SET sql_mode = DEFAULT, time_zone = DEFAULT")).unwrap();
+    let (_, rows) =
+        decode_encoded_rows(block_on(r.query(&mut p, "SELECT @@sql_mode, @@time_zone")).unwrap());
+    assert_eq!(
+        rows[0],
+        vec![
+            Some("STRICT_TRANS_TABLES".to_owned()),
+            Some("+02:00".to_owned())
+        ]
+    );
+
+    // PREPARE + EXECUTE of `SELECT @@max_allowed_packet` runs on the new stack.
+    block_on(r.prepare(&mut p, 1, "SELECT @@max_allowed_packet, @@sql_mode")).unwrap();
+    let (_, rows) = decode_binary_rows(block_on(r.execute(&mut p, 1, vec![])).unwrap());
+    assert_eq!(
+        rows[0],
+        vec![
+            Some((64u64 << 20).to_string()),
+            Some("STRICT_TRANS_TABLES".to_owned())
+        ]
+    );
+    assert_eq!(r.last.engine, Engine::New);
+}
+
+/// Issuing `SET x = DEFAULT` (or `SET CHARACTER SET`) while `SysVarCache` is still unbuilt must
+/// not leave `x` permanently stuck in `self.diverged` once globals finish loading.
+#[test]
+fn set_default_before_globals_loaded_resolves_without_divergence() {
+    let mut p = poc();
+    let unbuilt = Arc::new(tidb_systable::sysvar_cache::SysVarCache::new());
+    let (mut r, _script) = scripted_over(NewStackMode::Fallback, &p, Arc::clone(&unbuilt));
+    assert_eq!(r.session_condition(&p), Some("global variables not loaded"));
+    block_on(r.query(&mut p, "SET sql_mode = DEFAULT, CHARACTER SET utf8mb4")).unwrap();
+    assert!(r.diverged.is_empty(), "{:?}", r.diverged);
+    unbuilt
+        .rebuild(None, &mut || {
+            Ok([("sql_mode".to_owned(), "STRICT_TRANS_TABLES".to_owned())]
+                .into_iter()
+                .collect())
+        })
+        .unwrap();
+    r.ensure_globals();
+    assert_eq!(r.session_condition(&p), None);
+    assert_eq!(get(&mut r, "sql_mode"), "STRICT_TRANS_TABLES");
 }

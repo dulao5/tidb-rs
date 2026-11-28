@@ -46,7 +46,7 @@ pub mod sync;
 mod tests;
 pub mod trace;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -384,10 +384,19 @@ pub struct Router {
     mode: NewStackMode,
     new: Box<dyn NewStack>,
     owners: HashMap<u32, Owner>,
+    /// Prepared statement ids whose lowered statement is a `SELECT` (used to set `ROW_COUNT()`
+    /// `-1` vs `0` when the PoC executes or falls back to execute).
+    select_stmts: HashSet<u32>,
+    /// True after a PoC statement ran so the next new-stack statement seeds `ResetContextOfStmt`
+    /// inputs from `last` before compiling/executing.
+    poc_dirty: bool,
     /// The previous statement's state (§4.5): the PoC's copy, and what was last written.
     last: LastStmtInfo,
     /// Synced variables the new session rejected (step 0).
     diverged: BTreeSet<String>,
+    /// `SET x = DEFAULT` (or `SET CHARACTER SET`) issued while globals were not loaded yet,
+    /// deferred until `ensure_globals()` loads `mysql.global_variables`.
+    pending_defaults: BTreeMap<String, &'static str>,
     /// `tidb_txn_mode` when the session opened (step 0 compares with it).
     initial_txn_mode: String,
     /// The new session's global variables were loaded from the cluster's
@@ -564,8 +573,11 @@ impl Router {
             mode,
             new,
             owners: HashMap::new(),
+            select_stmts: HashSet::new(),
+            poc_dirty: false,
             last: LastStmtInfo::default(),
             diverged: BTreeSet::new(),
+            pending_defaults: BTreeMap::new(),
             initial_txn_mode,
             globals_loaded: false,
             globals_failed: false,
@@ -582,8 +594,16 @@ impl Router {
             charset: None,
             collation: None,
         }];
+        let globals_loaded = r.globals_loaded;
         let vars = r.new.session_mut().vars_mut();
-        sync::sync_set(vars, &mut r.diverged, &names, poc);
+        sync::sync_set(
+            vars,
+            &mut r.diverged,
+            &mut r.pending_defaults,
+            globals_loaded,
+            &names,
+            poc,
+        );
         sync::sync_db(vars, poc);
         r
     }
@@ -611,6 +631,16 @@ impl Router {
         {
             Ok(()) => {
                 self.globals_loaded = true;
+                let pending = std::mem::take(&mut self.pending_defaults);
+                let vars = self.new.session_mut().vars_mut();
+                for (target, source) in pending {
+                    match vars.get_global_system_var(source) {
+                        Ok(v) => sync::set(vars, &mut self.diverged, &target, &v),
+                        Err(_) => {
+                            self.diverged.insert(target);
+                        }
+                    }
+                }
                 self.initial_txn_mode = self.new.session().vars().txn_mode.clone();
             }
             Err(e) => {
@@ -752,6 +782,7 @@ impl Router {
     /// The new stack finished a statement: record its state and copy it to the PoC side.
     fn finish_new(&mut self) {
         self.last = LastStmtInfo::from_new(self.new.session().vars());
+        self.poc_dirty = false;
         self.stmt_ended = true;
     }
 
@@ -769,6 +800,7 @@ impl Router {
         }
         self.new.txn_ended_elsewhere();
         for stmt_id in std::mem::take(&mut self.closed) {
+            self.select_stmts.remove(&stmt_id);
             match self.owners.remove(&stmt_id) {
                 Some(Owner::Both { .. }) | Some(Owner::Poc(_)) => poc.close(stmt_id),
                 Some(Owner::New { .. }) | None => {}
@@ -778,9 +810,10 @@ impl Router {
 
     /// The PoC finished a statement with `result`: record its state and copy it into the new
     /// session.
-    fn finish_poc(&mut self, result: &Result<Response, SqlError>) {
-        self.last = LastStmtInfo::from_poc(&self.last, result);
+    fn finish_poc(&mut self, result: &Result<Response, SqlError>, is_select: bool) {
+        self.last = LastStmtInfo::from_poc_stmt(&self.last, result, is_select);
         self.last.apply_to(self.new.session_mut().vars_mut());
+        self.poc_dirty = true;
         self.stmt_ended = true;
     }
 
@@ -812,6 +845,10 @@ impl Router {
             return Err(NotRun::NotIdle);
         }
         let cp = self.new.session().checkpoint();
+        if self.poc_dirty {
+            self.last
+                .apply_reset_inputs(self.new.session_mut().vars_mut());
+        }
         let executed = self.new.executed_stmts();
         let r = match op {
             NewOp::Query(stmt, sql) => self.new.execute(stmt, sql).await,
@@ -902,7 +939,7 @@ impl Router {
     /// to fall back to): recorded as the previous statement's state like the PoC's errors.
     fn fail(&mut self, e: SqlError) -> Result<Response, SqlError> {
         let r = Err(e);
-        self.finish_poc(&r);
+        self.finish_poc(&r, false);
         self.poc_warnings_stale = true;
         r
     }
@@ -942,16 +979,19 @@ impl Router {
             Ok(s) => s,
             Err(e) => {
                 let vars = self.new.session().vars();
-                if !vars.in_restricted_sql {
-                    return Err(log_and_wrap_parse_error(
+                let wrapped = if !vars.in_restricted_sql {
+                    log_and_wrap_parse_error(
                         self.conn_id,
                         &vars.session_alias,
                         &vars.enable_redact_log,
                         sql,
                         e,
-                    ));
-                }
-                return Err(e);
+                    )
+                } else {
+                    e
+                };
+                self.last = LastStmtInfo::from_poc_stmt(&self.last, &Err(wrapped.clone()), false);
+                return Err(wrapped);
             }
         };
         let parse = start.elapsed();
@@ -1025,6 +1065,7 @@ impl Router {
         }
         poc.set_prev_stmt(&self.last);
         let result = poc.run(&lowered).await;
+        let globals_loaded = self.globals_loaded;
         let vars = self.new.session_mut().vars_mut();
         match &lowered.stmt {
             // A failing SET keeps the assignments before the failing one (Go's
@@ -1038,6 +1079,8 @@ impl Router {
                 sync::sync_set(
                     vars,
                     &mut self.diverged,
+                    &mut self.pending_defaults,
+                    globals_loaded,
                     &assignments[..applied],
                     &poc.values(),
                 )
@@ -1045,7 +1088,8 @@ impl Router {
             Statement::Use(_) if result.is_ok() => sync::sync_db(vars, &poc.values()),
             _ => {}
         }
-        self.finish_poc(&result);
+        let is_select = matches!(lowered.stmt, Statement::Select(_));
+        self.finish_poc(&result, is_select);
         result
     }
 
@@ -1123,7 +1167,14 @@ impl Router {
             Err(reason) => Err(reason),
         };
         let old = match tidb_sql::ir::lower_statement(&stmt, sql) {
-            Ok(lowered) => poc.prepare(stmt_id, lowered).await,
+            Ok(lowered) => {
+                if matches!(lowered.stmt, Statement::Select(_)) {
+                    self.select_stmts.insert(stmt_id);
+                } else {
+                    self.select_stmts.remove(&stmt_id);
+                }
+                poc.prepare(stmt_id, lowered).await
+            }
             Err(e) => {
                 // Go would have started the PREPARE: the PoC's older warnings go.
                 poc.clear_warnings();
@@ -1255,7 +1306,10 @@ impl Router {
         let owner = self.owners.get(&stmt_id).cloned();
         let result = match owner {
             // Unknown here: the PoC reports Go's error for an unknown statement.
-            None => poc.execute(stmt_id, params).await,
+            None => {
+                poc.set_prev_stmt(&self.last);
+                poc.execute(stmt_id, params).await
+            }
             Some(Owner::Poc(reason)) => match reason {
                 Reason::Blocked(block) if self.mode == NewStackMode::Strict => {
                     self.note(NOWHERE, &block);
@@ -1267,15 +1321,18 @@ impl Router {
                 }
                 reason => {
                     self.note(Engine::Poc.label(), reason.label());
+                    poc.set_prev_stmt(&self.last);
                     poc.execute(stmt_id, params).await
                 }
             },
             Some(Owner::Both { new_id, columns }) => {
                 if let Some(c) = self.session_condition(poc) {
                     self.note(Engine::Poc.label(), Reason::Session(c).label());
+                    poc.set_prev_stmt(&self.last);
                     poc.execute(stmt_id, params).await
                 } else if let Err(reason) = self.schema_check(poc) {
                     self.note(Engine::Poc.label(), reason.label());
+                    poc.set_prev_stmt(&self.last);
                     poc.execute(stmt_id, params).await
                 } else {
                     // The statement is started (metrics) only once it is known which engine
@@ -1305,6 +1362,7 @@ impl Router {
                             )));
                         }
                         Err(_) => {
+                            poc.set_prev_stmt(&self.last);
                             let r = poc.execute(stmt_id, params).await;
                             match r {
                                 Ok(resp) => check_columns(&columns, &resp).map(|()| resp),
@@ -1354,7 +1412,8 @@ impl Router {
             }
         };
         self.cursor = false;
-        self.finish_poc(&result);
+        let is_select = self.select_stmts.contains(&stmt_id);
+        self.finish_poc(&result, is_select);
         result
     }
 

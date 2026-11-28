@@ -476,7 +476,11 @@ pub(super) fn gg_tidb_committer_concurrency(_s: &mut SessionVars) -> Result<Stri
 
 // go-part: defaultSysVars (sysvar.go:L1347 tidb_mem_quota_analyze GetGlobal closure) L1
 pub(super) fn gg_tidb_mem_quota_analyze(_s: &mut SessionVars) -> Result<String, Error> {
-    Ok(registered(&GetMemQuotaAnalyze)().to_string())
+    let val = GetMemQuotaAnalyze
+        .read()
+        .as_ref()
+        .map_or(DefTiDBMemQuotaAnalyze, |f| f());
+    Ok(val.to_string())
 }
 
 // go-part: defaultSysVars (sysvar.go:L1347 tidb_mem_quota_analyze SetGlobal closure) L1
@@ -672,7 +676,10 @@ pub(super) fn sg_tidb_external_ts(s: &mut SessionVars, val: &str) -> Result<(), 
 
 // go-part: defaultSysVars (sysvar.go:L2940 tidb_external_ts GetGlobal closure) L1
 pub(super) fn gg_tidb_external_ts(_s: &mut SessionVars) -> Result<String, Error> {
-    let ts = registered(&GetExternalTimestamp)()?;
+    let ts = match GetExternalTimestamp.read().as_ref() {
+        Some(f) => f()?,
+        None => 0,
+    };
     Ok((ts as i64).to_string())
 }
 

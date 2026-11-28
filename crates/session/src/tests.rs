@@ -1962,6 +1962,7 @@ fn execute_reads_the_parameters_through_the_session_expression_context() {
         // ... and what the planner builds a parameter marker from.
         let (expr, _) = tidb_planner::core::expression_rewriter::rewrite_ast_expr_with_plan_ctx(
             &*ctx as &dyn BuildContext,
+            None,
             marker,
             None,
             &[],

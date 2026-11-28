@@ -358,8 +358,9 @@ impl SysVar {
         }
     }
 
+    /// Check whether `scope` is permitted for writing this system variable.
     // go: SysVar.validateScope L1
-    fn validate_scope(&self, scope: ScopeFlag) -> Result<(), Error> {
+    pub fn validate_scope(&self, scope: ScopeFlag) -> Result<(), Error> {
         if self.read_only || self.scope == ScopeNone {
             return Err(
                 ErrIncorrectScope.fast_gen_by_args(vec![self.name.into(), "read only".into()])

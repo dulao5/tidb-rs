@@ -365,6 +365,26 @@ fn main() {
         tls,
         ..ServerConfig::default()
     };
+    tidb_sessionctx::variable::set_sys_var("port", &effective_port.to_string());
+    if !tidb_cfg.socket.is_empty() {
+        tidb_sessionctx::variable::set_sys_var("socket", &tidb_cfg.socket);
+    }
+    if !tidb_cfg.path.is_empty() {
+        tidb_sessionctx::variable::set_sys_var("datadir", &tidb_cfg.path);
+    }
+    if config.tls.is_some() {
+        tidb_sessionctx::variable::set_sys_var("have_ssl", "YES");
+        tidb_sessionctx::variable::set_sys_var("have_openssl", "YES");
+        if let Some(p) = &args.ssl_cert {
+            tidb_sessionctx::variable::set_sys_var("ssl_cert", &p.to_string_lossy());
+        }
+        if let Some(p) = &args.ssl_key {
+            tidb_sessionctx::variable::set_sys_var("ssl_key", &p.to_string_lossy());
+        }
+        if let Some(p) = &args.ssl_ca {
+            tidb_sessionctx::variable::set_sys_var("ssl_ca", &p.to_string_lossy());
+        }
+    }
     tidb_metrics::init(&tidb_metrics::ServerFacts {
         version: tidb_log::release_version(&tidb_cfg),
         git_hash: tidb_log::TIDB_GIT_HASH.to_owned(),
@@ -508,7 +528,9 @@ fn main() {
         })
         .with_new_stack(new_stack)
         .map_err(std::io::Error::other)?;
-        let factory = factory.with_sys_var_cache(std::sync::Arc::clone(sys_vars.cache()));
+        let factory = factory
+            .with_sys_var_cache(std::sync::Arc::clone(sys_vars.cache()))
+            .with_tidb_table(sys_vars.tidb_table());
         if new_stack != poc_session::router::NewStackMode::Off {
             let mode_str = format!("{new_stack:?}");
             tidb_base::log_info!(
