@@ -110,7 +110,7 @@ Not exercised: the `tiup cluster` path (`additional_scrape_conf`) needs a deploy
 | Query Summary | Duration, Command Per Second, QPS (by statement type), CPS By Instance, Connection Idle Duration (`in_txn=0`), 999/99/95/80 Duration |
 | Query Detail | Duration 80/95/99/999 By Instance |
 | Server | TiDB Server Status, Uptime, CPU Usage (+ quota from `tidb_server_maxprocs`), Memory Usage (RSS line), Open FD Count, Connection Count (incl. tokens), Disconnection Count, Get Token Duration, Client Data Traffic |
-| Transaction | Transaction OPS / Duration (`optimistic`/`commit`, `general`: statements that took a TSO; MaxTS point gets do not start a transaction, as in Go) |
+| Transaction | Transaction OPS / Duration (`optimistic`/`commit`, `general`: autocommit statements that took a TSO; MaxTS point gets do not start a transaction, as in Go. Read-only transactions (`BEGIN`, `autocommit = 0`; #547) record `commit` / `rollback` / `abort` with `txn_mode` `optimistic` or `pessimistic`, as Go's `CommitTxn` and rollback executor do) |
 | Executor | Compile Duration, Execution Duration, Expensive Executors OPS (HashAgg / StreamAgg / Sort / TopN), Plan Cache Miss OPS (`prepared`: every execute, there is no plan cache) |
 | Distsql | Distsql Duration, Distsql QPS (`copr_type="common"`: tidb-rs does not page these reads), Coprocessor Seconds 999 |
 | KV Errors | KV Backoff Duration/OPS, TiClient Region Error OPS, Lock Resolve OPS, Replica Selector Failure (these show 0 unless errors, locks or backoffs occur) |
@@ -129,5 +129,5 @@ Not exercised: the `tiup cluster` path (`additional_scrape_conf`) needs a deploy
 | Events, Panic, Keep Alive, Time Jump, Skip Binlog, RCCheckTS, Handshake Error, Internal Sessions, Prepare Statement Count | Not implemented (no such events or concept). |
 | Affected Rows, Internal SQL OPS, txn write/lock/commit panels, batch client, TopSQL, TTL, DDL, statistics, owner, GC, schema load, ... | Read-only node without those subsystems. |
 | KV Request Forwarding, Stale Read, slow scores, Read Req Traffic, `TiDB Wait TSO Future Duration` | Not recorded (no forwarding/stale read, no per-store slow score). |
-| Command Per Second "`offset 1d`" line, Transaction OPS `scope="internal"`, Connection Idle `in_txn='1'` | No history, no internal SQL, no explicit transactions. |
+| Command Per Second "`offset 1d`" line, Transaction OPS `scope="internal"` | No history, no internal SQL. (Connection Idle `in_txn='1'` is recorded since #547: idle time inside a read-only transaction.) |
 | TiClient Region Error OPS, second query | The dashboard's expression `{...}{EXTERNAL_LABELtype=...}` is invalid for every instance, Go included. |

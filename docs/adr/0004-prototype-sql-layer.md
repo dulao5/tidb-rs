@@ -9,8 +9,8 @@
 
 ## Decision
 
-A deliberately small SQL layer: single-table, read-only, autocommit SELECTs on tables with an
-integer row handle, planned into one fixed pipeline. Everything outside that subset is
+A deliberately small SQL layer: single-table, read-only SELECTs (autocommit or in read-only
+transactions) on tables with an integer row handle, planned into one fixed pipeline. Everything outside that subset is
 rejected with `ER_NOT_SUPPORTED_YET` (1235) before any data is read. Unsupported never means
 "probably right".
 
@@ -69,7 +69,7 @@ rejected with `ER_NOT_SUPPORTED_YET` (1235) before any data is read. Unsupported
 - Readable column types: integer types, YEAR, DECIMAL, FLOAT/DOUBLE, CHAR/VARCHAR/TEXT/BLOB,
   DATE, DATETIME, TIME.
 - Session statements: `USE db` (1049 for unknown databases), `SET NAMES`, `SET CHARACTER SET`,
-  `SET [SESSION] autocommit = 1/ON`, `SET character_set_*`/`collation_connection`, `SET
+  `SET [SESSION] autocommit`, `SET character_set_*`/`collation_connection`, `SET
   sql_mode` (unless it contains PAD_CHAR_TO_FULL_LENGTH), a few timeouts/isolation variables
   that cannot affect results; `SHOW WARNINGS`/`SHOW ERRORS`. Since #489 the
   value of each of these variables is first checked by the ported `SysVar.Validate` (D05.1),
@@ -106,6 +106,18 @@ rejected with `ER_NOT_SUPPORTED_YET` (1235) before any data is read. Unsupported
   characters as Go's messages do. `@@system_time_zone` is the
   cluster's `mysql.tidb` `system_tz`, loaded at start as Go's `BootstrapSession` and
   `setSystemTimeZoneVariable` do (a missing row fails the start, as in Go).
+- Read-only transactions (#547; the transaction context block (D05.4) spec §6): `BEGIN`,
+  `START TRANSACTION [READ ONLY | WITH CONSISTENT SNAPSHOT]`, `BEGIN PESSIMISTIC/OPTIMISTIC`,
+  `COMMIT`, `ROLLBACK` and `SET autocommit = 0`. The statements of a transaction read one
+  snapshot with Go v8.5.8's start-ts rules: `BEGIN` takes the start ts at once, `autocommit =
+  0` at the first statement that reads a table; pessimistic read-committed transactions take a
+  new ts per statement, every other kind reads the start ts. `SET autocommit = 1` from off
+  commits the transaction; `@@autocommit` and the `SERVER_STATUS_IN_TRANS` /
+  `SERVER_STATUS_AUTOCOMMIT` flags follow the session. A write (`INSERT`, `REPLACE`, `UPDATE`,
+  `DELETE`, `LOAD DATA`) or `SELECT ... FOR UPDATE` in a transaction or with `autocommit = 0`
+  is Go's 1792 `Cannot execute statement in a READ ONLY transaction.` (the read-only-node
+  decision N11 D8, #146). The VS1 router keeps these statements on the prototype. Known
+  differences (no metadata lock, no `minstartts`) are listed in that spec's §6.5.
 - Errors that match Go: 1146 unknown table, 1054 unknown column (with Go's clause names), 1046
   no database selected, 1051 unknown table in `t.*`, 1064 syntax errors, 1193 unknown system
   variable (8136 for a removed one), 1238 `@@global.` / `@@session.` of a variable without
@@ -121,9 +133,9 @@ CTEs, set operations; FOR UPDATE/SHARE, SELECT INTO, AS OF TIMESTAMP, partitions
 TABLESAMPLE, optimizer hints; GROUP BY expressions or DESC, DISTINCT together with GROUP BY,
 non-aggregated columns outside GROUP BY; non-numeric strings compared with the handle; ranges
 on an UNSIGNED primary key; TIMESTAMP/ENUM/SET/BIT/JSON columns, virtual generated columns,
-clustered non-integer primary keys, partitioned tables, views; BEGIN/START TRANSACTION, COMMIT,
-ROLLBACK, `SET autocommit=0`, user variables, SET GLOBAL, any other SET; all other statements
-(DML, DDL, other SHOW, ...).
+clustered non-integer primary keys, partitioned tables, views; `BEGIN ... AS OF TIMESTAMP`
+(stale-read transactions), user variables, SET GLOBAL, any other SET; all other statements
+(DML, DDL, other SHOW, ...; DML in a transaction is 1792, above).
 
 Known differences from Go, decided by the maintainer on #505, answered with 1235 and counted
 as `unsupported` by `tools/ab` (`prototype-not-supported.txt`):

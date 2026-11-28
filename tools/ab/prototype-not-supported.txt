@@ -3,7 +3,6 @@
 # (tolerance T1, docs/testing/tolerances.toml).
 '.*' in the select list of a table read \(only columns and COUNT/SUM/MIN/MAX are supported\)
 .* statements \(read\-only prototype\)
-.*: explicit transactions are not supported by the read\-only node \(every statement runs in autocommit mode\)
 AS OF TIMESTAMP \(stale reads\)
 BETWEEN other than on the integer primary key with constant bounds
 COM_CHANGE_USER

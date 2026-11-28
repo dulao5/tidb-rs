@@ -96,6 +96,10 @@ impl PocEngine for FakePoc {
     fn in_txn(&self) -> bool {
         self.in_txn
     }
+    fn txn_write_error(&mut self, stmt: &ast::Stmt) -> Option<SqlError> {
+        // Like the PoC: a write in its transaction is 1792.
+        (self.in_txn && tidb_sql::ir::writes_in_txn(stmt)).then(crate::read_only_txn_error)
+    }
     fn values(&self) -> PocValues {
         self.values.clone()
     }
@@ -695,6 +699,34 @@ fn step0_comes_first() {
         r.route(&parse("SELECT count(*) FROM t"), &p, false),
         Route::Poc(Reason::Session("explicit transaction"))
     );
+}
+
+/// A write in the PoC's read-only transaction (D05.4 spec §6.2) is the PoC's 1792, checked
+/// before lowering (the write's lowering would answer the delegation fence's 1235); outside a
+/// transaction the fence answers as before. The transaction goes on: the PoC runs the next
+/// read.
+#[test]
+fn write_in_the_pocs_transaction_is_1792() {
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
+        let mut p = poc();
+        let mut r = real(mode, &p);
+        let insert = "INSERT INTO t VALUES (1)";
+        assert_eq!(block_on(r.query(&mut p, insert)).unwrap_err().code, 1235);
+        p.in_txn = true;
+        for sql in [
+            insert,
+            "DELETE FROM t",
+            "SELECT c FROM t WHERE id = 1 FOR UPDATE",
+        ] {
+            let e = block_on(r.query(&mut p, sql)).unwrap_err();
+            assert_eq!((e.code, e.state), (1792, "25006"), "{mode:?} {sql}");
+        }
+        // DDL keeps the fence; a read runs on the PoC.
+        let e = block_on(r.query(&mut p, "CREATE TABLE u (id INT)")).unwrap_err();
+        assert_eq!(e.code, 1235, "{mode:?}");
+        let res = block_on(r.query(&mut p, POINT));
+        assert_eq!(rows(&res).map(|r| r.0), Some(3), "{mode:?}");
+    }
 }
 
 /// The three statements of #509 (Go's integration test `types/const`, lines 13, 141 and 142):

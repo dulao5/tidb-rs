@@ -15,13 +15,24 @@ pub enum Statement {
     Use(String),
     Set(Vec<SetAssignment>),
     /// `BEGIN` / `START TRANSACTION`.
-    Begin,
+    Begin(Begin),
     Commit,
     Rollback,
     /// `SHOW WARNINGS` (`errors = false`) or `SHOW ERRORS`.
     ShowWarnings {
         errors: bool,
     },
+}
+
+/// The options of `BEGIN` / `START TRANSACTION` the read-only transaction reads (D05.4 spec
+/// §6): `READ ONLY` is always accepted (N11 D8) and `WITH CONSISTENT SNAPSHOT` /
+/// `WITH CAUSAL CONSISTENCY ONLY` change nothing for a transaction that only reads, so the
+/// transaction mode is all that is kept.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Begin {
+    /// `BEGIN PESSIMISTIC` / `BEGIN OPTIMISTIC` (Go `ast.Pessimistic` / `ast.Optimistic`),
+    /// empty for the session's `tidb_txn_mode`.
+    pub mode: String,
 }
 
 /// One assignment of a `SET` statement.
@@ -303,7 +314,16 @@ pub fn lower_statement(stmt: &ast::Stmt, sql: &str) -> Result<Lowered, SqlError>
         ast::Stmt::Select(s) => Statement::Select(Box::new(cx.select(s)?)),
         ast::Stmt::Use(u) => Statement::Use(u.db_name.clone()),
         ast::Stmt::Set(s) => Statement::Set(cx.set(s)?),
-        ast::Stmt::Begin(_) => Statement::Begin,
+        ast::Stmt::Begin(b) => {
+            // A stale-read transaction (D05.4 part 2) is not supported, like the prototype's
+            // other stale reads.
+            if b.as_of.is_some() {
+                return Err(unsupported("AS OF TIMESTAMP (stale reads)"));
+            }
+            Statement::Begin(Begin {
+                mode: b.mode.to_owned(),
+            })
+        }
         ast::Stmt::Commit(_) => Statement::Commit,
         ast::Stmt::Rollback(r) => {
             if !r.savepoint_name.is_empty() {
@@ -345,6 +365,39 @@ pub fn lower_statement(stmt: &ast::Stmt, sql: &str) -> Result<Lowered, SqlError>
         stmt,
         param_count: offsets.len(),
     })
+}
+
+/// Whether `stmt` writes or takes locks in a transaction: a DML write (`INSERT`, `REPLACE`,
+/// `UPDATE`, `DELETE`, `LOAD DATA`) or a `SELECT ... FOR UPDATE`. Inside a transaction (or
+/// with `autocommit = 0`) the read-only node answers such a statement with 1792 (N11 D8,
+/// approved in #146; D05.4 spec §6.2). `FOR SHARE` is not one: Go's shared lock is a noop
+/// function that takes no lock. DDL and the other statements Go TiDB runs for the cluster are
+/// not either: they keep the delegation fence's 1235.
+// glue: N11 D8 (writes and locking reads in a transaction are rejected), the prototype's statement check
+pub fn writes_in_txn(stmt: &ast::Stmt) -> bool {
+    match stmt {
+        ast::Stmt::Select(s) => s.lock_info.as_ref().is_some_and(|l| {
+            matches!(
+                l.lock_type,
+                ast::SelectLockType::ForUpdate
+                    | ast::SelectLockType::ForUpdateNoWait
+                    | ast::SelectLockType::ForUpdateWaitN
+                    | ast::SelectLockType::ForUpdateSkipLocked
+            )
+        }),
+        ast::Stmt::Unported(n) => matches!(
+            n.kind.split('#').next().unwrap_or(""),
+            "InsertIntoStmt"
+                | "ReplaceIntoStmt"
+                | "UpdateStmt"
+                | "UpdateStmtNoWith"
+                | "DeleteFromStmt"
+                | "DeleteWithoutUsingStmt"
+                | "DeleteWithUsingStmt"
+                | "LoadDataStmt"
+        ),
+        _ => false,
+    }
 }
 
 fn statement_kind(kind: &str) -> &str {
@@ -878,11 +931,75 @@ mod tests {
         assert_eq!(exprs[5], Expr::Literal(Literal::Bool(true)));
     }
 
+    /// The statements a transaction on the read-only node answers with 1792 (N11 D8): DML
+    /// writes and `FOR UPDATE`; not `FOR SHARE` (a noop lock in Go), reads, session
+    /// statements or DDL (the delegation fence).
+    #[test]
+    fn writes_in_a_transaction() {
+        let check =
+            |sql: &str| writes_in_txn(&parse_one(sql).unwrap_or_else(|e| panic!("{sql}: {e}")));
+        for sql in [
+            "INSERT INTO t VALUES (1)",
+            "INSERT INTO t SELECT * FROM u",
+            "REPLACE INTO t VALUES (1)",
+            "UPDATE t SET a = 1",
+            "UPDATE t, u SET t.a = u.a",
+            "WITH c AS (SELECT 1) UPDATE t SET a = 1",
+            "DELETE FROM t",
+            "DELETE t FROM t, u",
+            "DELETE FROM t USING t, u",
+            "WITH c AS (SELECT 1) DELETE FROM t",
+            "LOAD DATA INFILE 'f' INTO TABLE t",
+            "SELECT * FROM t FOR UPDATE",
+            "SELECT * FROM t WHERE id = 1 FOR UPDATE NOWAIT",
+            "SELECT * FROM t FOR UPDATE WAIT 5",
+            "SELECT * FROM t FOR UPDATE SKIP LOCKED",
+            "SELECT * FROM t FOR UPDATE OF t",
+        ] {
+            assert!(check(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT * FROM t",
+            "SELECT * FROM t FOR SHARE",
+            "SELECT * FROM t LOCK IN SHARE MODE",
+            "SELECT 1",
+            "SET autocommit = 0",
+            "BEGIN",
+            "COMMIT",
+            "CREATE TABLE t (a INT)",
+            "ALTER TABLE t ADD COLUMN b INT",
+            "TRUNCATE TABLE t",
+            "USE d",
+            "SHOW WARNINGS",
+        ] {
+            assert!(!check(sql), "{sql}");
+        }
+    }
+
     #[test]
     fn session_statements() {
         assert_eq!(lower("USE `sbtest`").stmt, Statement::Use("sbtest".into()));
-        assert_eq!(lower("BEGIN").stmt, Statement::Begin);
-        assert_eq!(lower("START TRANSACTION READ ONLY").stmt, Statement::Begin);
+        let begin = |mode: &str| {
+            Statement::Begin(Begin {
+                mode: mode.to_owned(),
+            })
+        };
+        assert_eq!(lower("BEGIN").stmt, begin(""));
+        assert_eq!(lower("START TRANSACTION READ ONLY").stmt, begin(""));
+        assert_eq!(
+            lower("START TRANSACTION WITH CONSISTENT SNAPSHOT").stmt,
+            begin("")
+        );
+        assert_eq!(lower("BEGIN PESSIMISTIC").stmt, begin("PESSIMISTIC"));
+        assert_eq!(lower("begin optimistic").stmt, begin("OPTIMISTIC"));
+        let e = err("START TRANSACTION READ ONLY AS OF TIMESTAMP NOW()");
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (
+                1235,
+                "This version of TiDB doesn't yet support 'AS OF TIMESTAMP (stale reads)'"
+            )
+        );
         assert_eq!(lower("COMMIT").stmt, Statement::Commit);
         assert_eq!(lower("rollback").stmt, Statement::Rollback);
         assert_eq!(

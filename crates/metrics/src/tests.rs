@@ -13,7 +13,8 @@ fn facts() -> ServerFacts {
 #[test]
 fn exposition_matches_go_definitions() {
     init(&facts());
-    command_started(Duration::from_millis(3));
+    command_started(Duration::from_millis(3), false);
+    command_started(Duration::from_millis(3), true);
     token_acquired(Duration::from_nanos(900));
     packet_in(10);
     packet_out(20);
@@ -22,6 +23,9 @@ fn exposition_matches_go_definitions() {
     compile_duration(Duration::from_micros(40));
     execute_duration(Duration::from_micros(500));
     transaction(Duration::from_millis(1), true);
+    transaction_ended(Duration::from_millis(1), true, TxnEnd::Rollback);
+    transaction_ended(Duration::from_millis(1), true, TxnEnd::Commit);
+    transaction_ended(Duration::from_millis(1), false, TxnEnd::Abort);
     slow_query(Duration::from_millis(400));
     plan_cache_miss_prepared();
     expensive(ExpensiveExec::Sort);
@@ -50,7 +54,11 @@ fn exposition_matches_go_definitions() {
         r#"tidb_distsql_handle_query_duration_seconds_count{copr_type="paging",sql_type="general",type="dag"} 1"#,
         r#"tidb_distsql_handle_query_duration_seconds_count{copr_type="common",sql_type="internal",type="dag"} 1"#,
         r#"tidb_distsql_partial_num_count 1"#,
+        r#"tidb_session_transaction_duration_seconds_count{scope="general",txn_mode="pessimistic",type="rollback"} 1"#,
+        r#"tidb_session_transaction_duration_seconds_count{scope="general",txn_mode="pessimistic",type="commit"} 1"#,
+        r#"tidb_session_transaction_duration_seconds_count{scope="general",txn_mode="optimistic",type="abort"} 1"#,
         r#"tidb_server_conn_idle_duration_seconds_count{in_txn="0"} 1"#,
+        r#"tidb_server_conn_idle_duration_seconds_count{in_txn="1"} 1"#,
         r#"tidb_server_get_token_duration_seconds_bucket{le="1"} 1"#,
         r#"tidb_server_info{hash="0123456789abcdef",version="v8.5.8-tidb-rs-test"}"#,
         "tidb_server_maxprocs 12",

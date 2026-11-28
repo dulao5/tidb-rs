@@ -440,3 +440,136 @@ async fn prepared_uncacheable_statements_warn_as_go() {
     let (_, r) = rows(session.query("SHOW WARNINGS").await.unwrap());
     assert!(r.is_empty());
 }
+
+/// Read-only transactions on the prototype (#547; the transaction context block (D05.4) spec
+/// §6): the statements of a transaction read one snapshot while Go TiDB inserts rows between
+/// them, as Go v8.5.8's start-ts rules say. `BEGIN` reads its start ts (pessimistic
+/// repeatable read), `autocommit = 0` starts the transaction at its first read and `SET
+/// autocommit = 1` commits it, pessimistic read committed reads a new ts per statement,
+/// optimistic read committed the start ts. A write in a transaction is 1792 and keeps it; the
+/// status flags follow. Needs Go TiDB for the inserts.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_only_transactions_read_one_snapshot() {
+    use tidb_mysql_protocol::constants::status::{AUTOCOMMIT, IN_TRANS};
+    const TXN_DB: &str = "tidb_rs_session_txn_it";
+    let (Ok(pd), Ok(port)) = (
+        std::env::var("TIDB_RS_PD"),
+        std::env::var("TIDB_RS_TIDB_PORT"),
+    ) else {
+        eprintln!("TIDB_RS_PD / TIDB_RS_TIDB_PORT not set; skipping");
+        return;
+    };
+    go_sql(
+        &port,
+        &format!(
+            "DROP DATABASE IF EXISTS {TXN_DB}; CREATE DATABASE {TXN_DB}; \
+             CREATE TABLE {TXN_DB}.t(id INT PRIMARY KEY); INSERT INTO {TXN_DB}.t VALUES (1);"
+        ),
+    );
+    let kv = KvClient::connect(vec![pd]).await.unwrap();
+    let schema = SchemaCache::new(kv.clone());
+    let factory = Factory::new(Shared {
+        kv,
+        schema,
+        dag: DagContext::select_utc(),
+        user: "root".to_owned(),
+        credential: Credential::native_from_password(""),
+        server_version: "8.0.11-TiDB-tidb-rs".to_owned(),
+        tls_enabled: false,
+        sync: None,
+        privileges: None,
+    });
+    let mut session = factory
+        .open_session(&ConnectionInfo {
+            connection_id: 3,
+            user: "root".to_owned(),
+            peer: "127.0.0.1:1".to_owned(),
+            auth_user: None,
+            auth_host: None,
+            database: None,
+            collation: 255,
+            capability: 0,
+            tls_cipher: None,
+        })
+        .unwrap();
+    let select = format!("SELECT id FROM {TXN_DB}.t ORDER BY id");
+    let insert = |id: i64| go_sql(&port, &format!("INSERT INTO {TXN_DB}.t VALUES ({id})"));
+    macro_rules! ids {
+        () => {{
+            let (_, r) = rows(session.query(&select).await.unwrap());
+            r.into_iter()
+                .map(|row| match &row[..] {
+                    [Value::Int(id)] => *id,
+                    other => panic!("unexpected row {other:?}"),
+                })
+                .collect::<Vec<i64>>()
+        }};
+    }
+    macro_rules! ok {
+        ($sql:expr) => {
+            session
+                .query($sql)
+                .await
+                .unwrap_or_else(|e| panic!("{}: {e:?}", $sql));
+        };
+    }
+    assert_eq!(session.status_flags() & (AUTOCOMMIT | IN_TRANS), AUTOCOMMIT);
+
+    // BEGIN: one snapshot until COMMIT; a write is 1792 and the transaction goes on.
+    ok!("BEGIN");
+    assert_eq!(session.status_flags() & IN_TRANS, IN_TRANS);
+    assert_eq!(ids!(), [1]);
+    insert(2);
+    assert_eq!(ids!(), [1]);
+    let e = session
+        .query(&format!("INSERT INTO {TXN_DB}.t VALUES (9)"))
+        .await
+        .unwrap_err();
+    assert_eq!((e.code, e.state), (1792, "25006"), "{e:?}");
+    let e = session
+        .query(&format!("{select} FOR UPDATE"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, 1792, "{e:?}");
+    assert_eq!(ids!(), [1]);
+    ok!("COMMIT");
+    assert_eq!(session.status_flags() & IN_TRANS, 0);
+    assert_eq!(ids!(), [1, 2]);
+
+    // autocommit = 0: SET does not start a transaction, the first read does; SET autocommit
+    // = 1 commits it.
+    ok!("SET autocommit = 0");
+    assert_eq!(session.status_flags() & (AUTOCOMMIT | IN_TRANS), 0);
+    let (_, r) = rows(session.query("SELECT @@autocommit").await.unwrap());
+    assert_eq!(r, vec![vec![Value::Int(0)]]);
+    assert_eq!(session.status_flags() & IN_TRANS, 0);
+    assert_eq!(ids!(), [1, 2]);
+    assert_eq!(session.status_flags() & IN_TRANS, IN_TRANS);
+    insert(3);
+    assert_eq!(ids!(), [1, 2]);
+    ok!("SET autocommit = 1");
+    assert_eq!(session.status_flags() & (AUTOCOMMIT | IN_TRANS), AUTOCOMMIT);
+    assert_eq!(ids!(), [1, 2, 3]);
+
+    // Pessimistic read committed: every statement reads a new ts.
+    ok!("SET transaction_isolation = 'READ-COMMITTED'");
+    ok!("BEGIN PESSIMISTIC");
+    assert_eq!(ids!(), [1, 2, 3]);
+    insert(4);
+    assert_eq!(ids!(), [1, 2, 3, 4]);
+    ok!("ROLLBACK");
+
+    // Optimistic read committed reads the start ts.
+    ok!("START TRANSACTION READ ONLY");
+    ok!("ROLLBACK");
+    ok!("BEGIN OPTIMISTIC");
+    assert_eq!(ids!(), [1, 2, 3, 4]);
+    insert(5);
+    assert_eq!(ids!(), [1, 2, 3, 4]);
+    // BEGIN commits the transaction before it and starts a new one.
+    ok!("BEGIN");
+    assert_eq!(ids!(), [1, 2, 3, 4, 5]);
+    ok!("COMMIT");
+
+    go_sql(&port, &format!("DROP DATABASE {TXN_DB}"));
+}

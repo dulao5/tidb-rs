@@ -35,7 +35,6 @@ pub struct ConstEnv<'a> {
     pub current_user: &'a str,
     pub connection_id: u64,
     pub have_ssl: &'a str,
-    pub autocommit: bool,
     /// `@@last_plan_from_cache` / `@@last_plan_from_binding`: the previous statement's, as
     /// the router recorded it (VS1 plan §4.5; the PoC's own statements never use a cache).
     pub last_plan_from_cache: bool,
@@ -55,6 +54,7 @@ pub struct ConstEnv<'a> {
 pub const READ_FROM_SESSION: &[&str] = &[
     "auto_increment_increment",
     "auto_increment_offset",
+    "autocommit",
     "character_set_client",
     "character_set_connection",
     "character_set_database",
@@ -117,7 +117,6 @@ impl ConstEnv<'_> {
         match name {
             "version_comment" => return Ok(string(VERSION_COMMENT)),
             "version" => return Ok(string(self.server_version)),
-            "autocommit" => return Ok(boolean(self.autocommit)),
             "last_plan_from_cache" => return Ok(boolean(self.last_plan_from_cache)),
             "last_plan_from_binding" => return Ok(boolean(self.last_plan_from_binding)),
             "have_ssl" | "have_openssl" => return Ok(string(self.have_ssl)),
@@ -395,7 +394,6 @@ mod tests {
                 current_user: "root@%",
                 connection_id: 9,
                 have_ssl: "YES",
-                autocommit: true,
                 last_plan_from_cache: true,
                 last_plan_from_binding: false,
                 vars: self.session.vars_mut(),
@@ -421,6 +419,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rs.rows, vec![vec![Value::Int(1), Value::Int(0)]]);
+    }
+
+    /// `@@autocommit` is the session's value (#547: `SET autocommit = 0` is accepted), read
+    /// as Go's `rewriteSystemVariable` reads it; the global value stays.
+    #[test]
+    fn autocommit_is_the_sessions() {
+        let mut f = fixture();
+        let sv = tidb_sessionctx::variable::get_sys_var("autocommit").unwrap();
+        sv.set_session_from_hook(f.session.vars_mut(), "OFF")
+            .unwrap();
+        let r = f
+            .run("SELECT @@autocommit, @@session.autocommit, @@global.autocommit")
+            .unwrap();
+        assert_eq!(r.rows[0], vec![Value::Int(0), Value::Int(0), Value::Int(1)]);
+        assert_eq!(r.columns[0].column_type, ColumnType::LongLong);
     }
 
     fn run(sql: &str, params: &[Literal]) -> Result<ResultSet, SqlError> {
