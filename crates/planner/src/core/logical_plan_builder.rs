@@ -698,16 +698,14 @@ impl<'ast> PlanBuilder<'ast> {
         // We will construct a "Join" node for some statements like "INSERT",
         // "DELETE", "UPDATE", "REPLACE". For this scenario "joinNode.Right" is nil
         // and we only build the left "ResultSetNode".
-        let Some(right) = &join_node.right else {
-            let Some(left) = &join_node.left else {
-                // glue: blocked-by:D02.2 (a join without a left side from the Rust parser)
-                return Err(blocked("D02.2", "a join without a left side"));
-            };
-            return self.build_result_set_node(ctx, ResultSetRef::Node(left), false);
-        };
+        // (Go's `Left` is never nil; the Rust AST's is an `Option`, checked once here for both
+        // cases.)
         let Some(left) = &join_node.left else {
             // glue: blocked-by:D02.2 (a join without a left side from the Rust parser)
             return Err(blocked("D02.2", "a join without a left side"));
+        };
+        let Some(right) = &join_node.right else {
+            return self.build_result_set_node(ctx, ResultSetRef::Node(left), false);
         };
 
         // Detect whether the right subtree contains any LATERAL table source.

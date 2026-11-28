@@ -736,7 +736,7 @@ mod tests {
 
         // Each case is built lazily: an unported builtin fails while building.
         type Build<'a> = Box<dyn Fn() -> Result<ExprRef, Error> + 'a>;
-        let gt_inner_a_zero = || f(ast_funcs::GT, tiny(), vec![inner_a.clone(), zero()]);
+        let gt_inner_a_zero = || f(ast_funcs::GT, tiny(), vec![Arc::clone(&inner_a), zero()]);
         let not_null = |e: Result<ExprRef, Error>| -> Result<ExprRef, Error> {
             let is_null = f(ast_funcs::IsNull, tiny(), vec![e?])?;
             f(ast_funcs::UnaryNot, tiny(), vec![is_null])
@@ -745,15 +745,15 @@ mod tests {
             f(
                 ast_funcs::Coalesce,
                 new_field_type(TypeLonglong),
-                vec![inner_a.clone(), int_c(2)],
+                vec![Arc::clone(&inner_a), int_c(2)],
             )
         };
         let cases: Vec<(&str, Build<'_>, bool)> = vec![
             (
                 "or_needs_both_sides_non_true",
                 Box::new(|| {
-                    let eq = f(ast_funcs::EQ, tiny(), vec![inner_a.clone(), zero()])?;
-                    let gt_c = f(ast_funcs::GT, tiny(), vec![outer_c.clone(), zero()])?;
+                    let eq = f(ast_funcs::EQ, tiny(), vec![Arc::clone(&inner_a), zero()])?;
+                    let gt_c = f(ast_funcs::GT, tiny(), vec![Arc::clone(&outer_c), zero()])?;
                     let and = f(ast_funcs::LogicAnd, tiny(), vec![eq, gt_c])?;
                     f(ast_funcs::LogicOr, tiny(), vec![gt_inner_a_zero()?, and])
                 }),
@@ -766,24 +766,33 @@ mod tests {
             ),
             (
                 "is_null_accepts_null",
-                Box::new(|| f(ast_funcs::IsNull, tiny(), vec![inner_a.clone()])),
+                Box::new(|| f(ast_funcs::IsNull, tiny(), vec![Arc::clone(&inner_a)])),
                 false,
             ),
             (
                 "is_true_rejects_null",
-                Box::new(|| f(ast_funcs::IsTruthWithNull, tiny(), vec![inner_a.clone()])),
+                Box::new(|| {
+                    f(
+                        ast_funcs::IsTruthWithNull,
+                        tiny(),
+                        vec![Arc::clone(&inner_a)],
+                    )
+                }),
                 true,
             ),
             (
                 "not_is_null_rejects_null",
-                Box::new(|| not_null(Ok(inner_a.clone()))),
+                Box::new(|| not_null(Ok(Arc::clone(&inner_a)))),
                 true,
             ),
             (
                 "null_preserving_wrapper_propagates_must_null",
                 Box::new(|| {
-                    let cast =
-                        build_cast_function(ectx, inner_a.clone(), new_field_type(TypeVarString))?;
+                    let cast = build_cast_function(
+                        ectx,
+                        Arc::clone(&inner_a),
+                        new_field_type(TypeVarString),
+                    )?;
                     let trim = f(ast_funcs::Trim, new_field_type(TypeVarString), vec![cast])?;
                     f(ast_funcs::Like, tiny(), vec![trim, str_c("1%"), int_c(92)])
                 }),
@@ -806,7 +815,7 @@ mod tests {
                     let c = f(
                         ast_funcs::Coalesce,
                         new_field_type(TypeLonglong),
-                        vec![inner_a.clone(), one()],
+                        vec![Arc::clone(&inner_a), one()],
                     )?;
                     f(ast_funcs::GT, tiny(), vec![c, zero()])
                 }),
@@ -818,19 +827,25 @@ mod tests {
                     f(
                         ast_funcs::In,
                         tiny(),
-                        vec![one(), inner_a.clone(), inner_b.clone()],
+                        vec![one(), Arc::clone(&inner_a), Arc::clone(&inner_b)],
                     )
                 }),
                 true,
             ),
             (
                 "in_with_non_null_candidate_is_not_proven",
-                Box::new(|| f(ast_funcs::In, tiny(), vec![one(), inner_a.clone(), one()])),
+                Box::new(|| {
+                    f(
+                        ast_funcs::In,
+                        tiny(),
+                        vec![one(), Arc::clone(&inner_a), one()],
+                    )
+                }),
                 false,
             ),
             (
                 "null_safe_eq_with_non_null_constant_rejects_null",
-                Box::new(|| f(ast_funcs::NullEQ, tiny(), vec![inner_a.clone(), one()])),
+                Box::new(|| f(ast_funcs::NullEQ, tiny(), vec![Arc::clone(&inner_a), one()])),
                 true,
             ),
             (
@@ -839,7 +854,7 @@ mod tests {
                     let fmt = f(
                         ast_funcs::Format,
                         new_field_type(TypeVarString),
-                        vec![int_c(12345), int_c(0), inner_s.clone()],
+                        vec![int_c(12345), int_c(0), Arc::clone(&inner_s)],
                     )?;
                     f(ast_funcs::EQ, tiny(), vec![fmt, str_c("12,345")])
                 }),
@@ -851,7 +866,7 @@ mod tests {
                     let field = f(
                         ast_funcs::Field,
                         new_field_type(TypeLonglong),
-                        vec![inner_a.clone(), one()],
+                        vec![Arc::clone(&inner_a), one()],
                     )?;
                     let gt = f(ast_funcs::GT, tiny(), vec![field, zero()])?;
                     f(ast_funcs::UnaryNot, tiny(), vec![gt])
@@ -864,7 +879,7 @@ mod tests {
                     let quote = f(
                         ast_funcs::Quote,
                         new_field_type(TypeVarString),
-                        vec![inner_s.clone()],
+                        vec![Arc::clone(&inner_s)],
                     )?;
                     let like = f(ast_funcs::Like, tiny(), vec![quote, str_c("A%"), int_c(92)])?;
                     f(ast_funcs::UnaryNot, tiny(), vec![like])
@@ -875,11 +890,11 @@ mod tests {
                 "comparison_over_non_true_and_is_not_null_rejected",
                 Box::new(|| {
                     let null = Expr::Constant(new_null()).into_ref();
-                    let or = f(ast_funcs::LogicOr, tiny(), vec![inner_a.clone(), null])?;
+                    let or = f(ast_funcs::LogicOr, tiny(), vec![Arc::clone(&inner_a), null])?;
                     let ne = f(
                         ast_funcs::NE,
                         tiny(),
-                        vec![outer_c.clone(), outer_c.clone()],
+                        vec![Arc::clone(&outer_c), Arc::clone(&outer_c)],
                     )?;
                     let and = f(ast_funcs::LogicAnd, tiny(), vec![or, ne])?;
                     f(ast_funcs::GE, tiny(), vec![one(), and])
@@ -889,11 +904,11 @@ mod tests {
             (
                 "if_condition_folded_after_nullification_stays_provable",
                 Box::new(|| {
-                    let is_null = f(ast_funcs::IsNull, tiny(), vec![inner_a.clone()])?;
+                    let is_null = f(ast_funcs::IsNull, tiny(), vec![Arc::clone(&inner_a)])?;
                     let iff = f(
                         ast_funcs::If,
                         new_field_type(TypeLonglong),
-                        vec![is_null, zero(), outer_c.clone()],
+                        vec![is_null, zero(), Arc::clone(&outer_c)],
                     )?;
                     f(ast_funcs::GT, tiny(), vec![iff, zero()])
                 }),
@@ -907,7 +922,7 @@ mod tests {
                         uint_ft(TypeLonglong),
                         vec![
                             cons(new_uint_datum(123), uint_ft(TypeLonglong)),
-                            inner_unsigned_d.clone(),
+                            Arc::clone(&inner_unsigned_d),
                         ],
                     )?;
                     f(ast_funcs::GT, tiny(), vec![t, zero()])
@@ -920,7 +935,7 @@ mod tests {
                     not_null(f(
                         ast_funcs::AesEncrypt,
                         new_field_type(TypeVarString),
-                        vec![str_c("pingcap"), str_c("123"), inner_s.clone()],
+                        vec![str_c("pingcap"), str_c("123"), Arc::clone(&inner_s)],
                     ))
                 }),
                 false,
@@ -936,7 +951,7 @@ mod tests {
                     not_null(f(
                         ast_funcs::AesDecrypt,
                         new_field_type(TypeVarString),
-                        vec![unhex, str_c("123"), inner_s.clone()],
+                        vec![unhex, str_c("123"), Arc::clone(&inner_s)],
                     ))
                 }),
                 false,
@@ -947,7 +962,7 @@ mod tests {
                     not_null(f(
                         ast_funcs::JSONSet,
                         new_field_type(TypeJSON),
-                        vec![json_c("{}"), str_c("$.a"), inner_s.clone()],
+                        vec![json_c("{}"), str_c("$.a"), Arc::clone(&inner_s)],
                     ))
                 }),
                 false,
@@ -958,7 +973,7 @@ mod tests {
                     not_null(f(
                         ast_funcs::JSONInsert,
                         new_field_type(TypeJSON),
-                        vec![json_c("{}"), str_c("$.a"), inner_s.clone()],
+                        vec![json_c("{}"), str_c("$.a"), Arc::clone(&inner_s)],
                     ))
                 }),
                 false,
@@ -969,7 +984,7 @@ mod tests {
                     not_null(f(
                         ast_funcs::JSONReplace,
                         new_field_type(TypeJSON),
-                        vec![json_c(r#"{"a": 1}"#), str_c("$.a"), inner_s.clone()],
+                        vec![json_c(r#"{"a": 1}"#), str_c("$.a"), Arc::clone(&inner_s)],
                     ))
                 }),
                 false,
@@ -980,7 +995,7 @@ mod tests {
                     not_null(f(
                         ast_funcs::JSONArrayAppend,
                         new_field_type(TypeJSON),
-                        vec![json_c("[]"), str_c("$"), inner_s.clone()],
+                        vec![json_c("[]"), str_c("$"), Arc::clone(&inner_s)],
                     ))
                 }),
                 false,
@@ -991,7 +1006,7 @@ mod tests {
                     not_null(f(
                         ast_funcs::JSONArrayInsert,
                         new_field_type(TypeJSON),
-                        vec![json_c("[]"), str_c("$[0]"), inner_s.clone()],
+                        vec![json_c("[]"), str_c("$[0]"), Arc::clone(&inner_s)],
                     ))
                 }),
                 false,
@@ -1000,7 +1015,7 @@ mod tests {
                 "json_merge_patch_nullable_argument_can_still_return_document",
                 Box::new(|| {
                     let cast =
-                        build_cast_function(ectx, inner_s.clone(), new_field_type(TypeJSON))?;
+                        build_cast_function(ectx, Arc::clone(&inner_s), new_field_type(TypeJSON))?;
                     not_null(f(
                         ast_funcs::JSONMergePatch,
                         new_field_type(TypeJSON),
@@ -1024,7 +1039,7 @@ mod tests {
                             json_c(r#"["abc"]"#),
                             str_c("one"),
                             str_c("abc"),
-                            inner_s.clone(),
+                            Arc::clone(&inner_s),
                         ],
                     ))
                 }),
@@ -1036,7 +1051,7 @@ mod tests {
                     let w = f(
                         ast_funcs::Week,
                         new_field_type(TypeLonglong),
-                        vec![str_c("2024-01-08"), inner_a.clone()],
+                        vec![str_c("2024-01-08"), Arc::clone(&inner_a)],
                     )?;
                     f(ast_funcs::GE, tiny(), vec![w, zero()])
                 }),
@@ -1048,7 +1063,7 @@ mod tests {
                     let w = f(
                         ast_funcs::YearWeek,
                         new_field_type(TypeLonglong),
-                        vec![str_c("2024-01-08"), inner_a.clone()],
+                        vec![str_c("2024-01-08"), Arc::clone(&inner_a)],
                     )?;
                     f(ast_funcs::GE, tiny(), vec![w, zero()])
                 }),
@@ -1060,7 +1075,7 @@ mod tests {
                     let w = f(
                         ast_funcs::Week,
                         new_field_type(TypeLonglong),
-                        vec![inner_date.clone(), outer_c.clone()],
+                        vec![Arc::clone(&inner_date), Arc::clone(&outer_c)],
                     )?;
                     f(ast_funcs::GE, tiny(), vec![w, zero()])
                 }),
@@ -1072,7 +1087,7 @@ mod tests {
                     let w = f(
                         ast_funcs::YearWeek,
                         new_field_type(TypeLonglong),
-                        vec![inner_date.clone(), outer_c.clone()],
+                        vec![Arc::clone(&inner_date), Arc::clone(&outer_c)],
                     )?;
                     f(ast_funcs::GE, tiny(), vec![w, zero()])
                 }),
