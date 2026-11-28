@@ -71,7 +71,7 @@ TiKV 的做法（`release-8.5` 分支）可以直接作为模板：
 | 准入控制 | `max_tasks_per_worker`，超过时报 busy | `src/read_pool.rs` |
 
 1. **算子接口**：`Executor` trait 的 `open` / `next` / `close` 是 async，方法与 Go 的 `Executor` 接口一一对应；trait 对象上的调用每次 `Next` 一个装箱 future。一次 `Next` 产出一个 chunk（默认最多 1024 行），一次小分配可以忽略；TiKV 的 batch executor 同样按 batch 动态分派。`Executor: Send`，不要求 `Sync`。
-2. **只有一个运行时，语句不交接**（2026-11-06 修订）：进程只有一个 tokio 运行时，网络、语句执行、KV 客户端都在上面，不再有"网络运行时 → ExecPool"的交接。连接 task 就是语句 task：规划和根执行器都在接收这条连接的 task 里跑完，只有计划里带并行 worker（Go 起 goroutine 的地方）时才 `pool.spawn`。PoC 就是零交接的，这是它点查能到 Go 1.0–1.2 倍的原因之一；原稿的两次跨运行时交接对点查是纯开销。"CPU 工作卡住网络"由第 5 条的按时间片让出解决。
+2. **数据面只有一个运行时（语句不交接），控制面独立隔离**（2026-11-06 修订；2026-11-28 由负责人 `zhigang-du` 确认修订，见 `#542` / `#545` [runtime-control.md](runtime-control.md) §3.6、§7.1 决策 8）：数据面只有一个 `ExecPool` tokio 运行时，MySQL 网络、语句执行、数据面 KV 客户端都在上面，不再有"网络运行时 → ExecPool"的交接。连接 task 就是语句 task：规划和根执行器都在接收这条连接的 task 里跑完，只有计划里带并行 worker（Go 起 goroutine 的地方）时才 `pool.spawn`。PoC 就是零交接的，这是它点查能到 Go 1.0–1.2 倍的原因之一；原稿的两次跨运行时交接对点查是纯开销。"CPU 工作卡住网络"由第 5 条的按时间片让出解决。集群控制面与后台看门狗（`SchemaSync`/`PrivilegeSync`/`SysVarSync` 及其独立轻量 `ctrl_kv`、`/status` HTTP + gRPC、`ExpensiveQueryHandle`、`ServerMemoryLimitHandle`、`client-rust` `StoreLiveness`）则隔离到专用的 2 线程控制面 tokio 运行时（`ControlRuntime`，`tidb-rs-ctrl`），避免重 SQL 压满 `ExecPool` 时饿死 lease 续约、健康检查与 OOM 强杀。
    - `ExecPool` trait 保留，实现暴露两种拓扑：**Steal**（tokio `multi_thread`，工作窃取，默认）和 **NoSteal**（N 个 tokio `current_thread` 运行时各占一个线程，accept 后挑一个运行时，连接之后留在那个线程；设计参照 pingora-runtime 的 NoSteal，不引 pingora 依赖，约百行）。数据库连接比代理连接更长、负载更不均，所以 NoSteal 只作可选项。两种拓扑跑同一套测试（第 5 节），这是"调度器可替换"的机器证明。
    - 所有执行器代码和 future 必须 `Send`、不依赖线程局部状态。这是同时保留两种拓扑的前提：`!Send` 的 `Rc` future 会把代码永远锁在单线程模式。行和 chunk 的处理路径上不 clone `Arc`（worker 按 `&ExecCtx` 借用）作为编码约定写进 plan 模板，由基准兜底；clippy 无法机械判断哪段代码属于这条路径，不做 lint。
    - 多级队列仍是计划中的升级：若"大扫描并发时的点查 p99"基准不达标，换成 yatp，并按宪章登记为来自 TiKV 的 L3 和 ADR。`tikv-client` 依赖 tokio，所以第一步用 tokio。
@@ -94,17 +94,17 @@ TiKV 的做法（`release-8.5` 分支）可以直接作为模板：
 #### 3.3 取消：`SqlKiller` + 唤醒
 
 1. `SQLKiller` 按 L1 移植（信号取值、`SendKillSignal` 的 CAS、`HandleSignal` 的错误映射、连接存活检查、`FinishResultSet`/`Reset`），放在 `Arc` 里，KILL、内存控制器、expensivequery 都能拿到。
-2. **增加一个唤醒通道（`M-GOCTX`，Go 里由 `ctx.Done()`、`closeCh` 分担）**：`SendKillSignal` 成功后同时触发一个 `CancelToken`（tokio `CancellationToken`）。所有等待都经过 `ctx.send` / `ctx.recv`，内部是 `select!{ data, token.cancelled() }`；直接调用 channel 的 `send` / `recv` 被 lint 禁止。这样被 kill 的语句不会卡在 channel 上等到下一个检查点，关闭时也不会因为某个 worker 卡在没人读的 channel 上而 join 不返回。
+2. **增加一个可复位的会话级唤醒通道（`M-GOCTX`，2026-11-28 由负责人 `zhigang-du` 确认修订，见 [runtime-control.md](runtime-control.md) §3.2、§7.1 决策 9）**：`SendKillSignal` 成功后通过 `KillCancel`（绑定 `SqlKiller.signal` + `watch` 通知，随 `SqlKiller::reset()` 同步清除，唤醒后必须二次校验 `signal != 0` 以兼容 `SLEEP()`/`Detach`/`Reset` 的合法复位，避免假唤醒）唤醒阻塞中的等待。所有等待都经过 `ctx.send` / `ctx.recv`（或存储层 `select!`），内部监听 `KillCancel` 与算子子令牌；直接调用无取消的 channel `send` / `recv` 被 lint 禁止。这样被 kill 的语句不会卡在 channel 上等到下一个检查点，关闭时也不会因为某个 worker 卡在没人读的 channel 上而 join 不返回。
 3. **检查点保持 Go 的位置**：`exec::next` 前后（`HandleSQLKillerSignal`）、`HandleKillSignal` 调用点、内存检查点（第二部分 3.3）、KV 层读取 `Killed`。不新增检查点，除非某个长循环在 Go 中依赖 `Consume` 的 panic 来中断（这种情况在该块 plan 中登记）。
-4. 每个算子自己的 `closeCh/finishCh` 继续存在（关闭语义不同于 kill：比如 Limit 提前结束），映射为算子私有的 `CancelToken`，并作为语句级 token 的子 token。
-5. `max_execution_time`（`M-TICK`）：Go 靠 expensivequery 每 100ms 扫一遍进程表。Rust 改为每条语句一个 deadline 定时器，到期调用与 Go 相同的 `Server::kill(id, query=true, max_execution_time=true, …)`。判断逻辑、日志按 L1 移植；比扫表精确，也没有 O(会话数) 的扫描。Go 约 100ms 的粒度不是用户契约。SQLKiller 每秒检查一次连接存活、`servermemorylimit` 每 100ms 读堆用量（第二部分）同理改为定时器。
+4. **算子级不可复位子令牌（2026-11-28 修订，见 [runtime-control.md](runtime-control.md) §3.2、§7.1 决策 9）**：每个算子自己的 `closeCh/finishCh` 继续存在（关闭语义不同于 kill：比如 Limit 提前结束），映射为算子私有的不可复位 `ChildToken`，与会话级可复位的 `KillCancel` 分层（`ChildToken` 取消不伪造 `1317`）。
+5. **周期巡检沿用 Go L1（2026-11-28 由负责人 `zhigang-du` 确认修订，取代原 `M-TICK` 独立定时器方案，见 [runtime-control.md](runtime-control.md) §3.5、§7.1 决策 9）**：三个周期巡检均按 Go L1 实现——`max_execution_time` 随 `ExpensiveQueryHandle` 100ms 巡检统一触发（避免与 60s/600s 慢查巡检产生双路径竞态和日志时机偏差）、`SQLKiller` 按 1s 节流执行连接存活探活、`servermemorylimit` 按 100ms 采样 jemalloc `resident`（底层 `memstats` 300ms TTL 刷新）。不再另起每语句独立 deadline 定时器。
 
 #### 3.4 错误边界
 
 1. **Go 中"当作控制流"的 panic 一律改成 `Result`**：`Tracker::consume`、`HandleKillSignal`、`PanicOnExceed::action` 都返回 `Result`。调用点加 `?`。Go 的函数签名没有 error 而内部会因 Consume panic 时，Rust 签名加上 `Result`，统一登记为 L2（"panic→Result"）。
 2. **`catch_unwind` 只在 task 边界**（`M-PANIC`）：ExecPool 任务入口（转换成 `GetRecoverError` 等价的错误，经 `on_exit` 送入结果 channel）、语句入口（对应 `ExecStmt.Exec` / `recordSet.Next` 的 recover，保持 "execute sql panic" 日志和 `%v` 形式的报错文本）、连接循环（对应 `clientConn.Run`）。算子内部不写 `catch_unwind`。这些 panic 只来自 bug（越界、`unwrap`），release 构建保持 `panic = "unwind"`。
 4. **锁一律用 `parking_lot`**（`M-LOCK`，无毒化）。std `Mutex` 被 panic 的 task 毒化后，同一语句的其他 worker 会全部报 `PoisonError`，用户看到的就不是 Go 的报错文本。
-3. 由于 OOM/kill 不再是 panic，`ExecStmt.Exec` 中"只吞四种错误，其余继续 panic"的分支在 Rust 中退化为：四种错误按普通错误返回；真正的 panic 照 Go 的层次继续上抛到连接层。报错文本与 Go 相同。
+3. 由于 OOM/kill 不再是 panic，`ExecStmt.Exec` 中"只吞四种错误，其余继续 panic"的分支在 Rust 中退化为：四种错误按普通错误返回；真正的 panic 照 Go 的层次继续上抛到连接层，报错文本与 Go 相同。为保持 `D00.3` 逐字节日志一致，在 `Compiler::compile`、`ExecStmt::exec`、`write_result_set` 三个边界遇到 `1317`/`3024`/`8175`/`8176` 时仍照 Go 原级别与字段补打三条 `* panic` 日志（2026-11-28 负责人 `zhigang-du` 确认，见 [runtime-control.md](runtime-control.md) §7.1 决策 10）。
 
 #### 3.5 Close 与 Drop
 
@@ -366,16 +366,19 @@ err?;
 4. **实例内存的度量**：限额判断用 jemalloc 的 `resident`（更接近 OOM 风险），归属用 `allocated`，两者都导出指标。
 5. **数值类测试**：改写为性质测试、允许重新标定配额（3.5）。
 6. **点查快速路径**：先不做；但把"是否经过 ExecPool"设计成调度上的选择，而不是另一套执行器，实测后切换不需要改算子代码。
+7. **（2026-11-28，项目负责人 `zhigang-du` 确认 `#542` / `#545`）数据面单一 `ExecPool` + 控制面独立 2 线程 `ControlRuntime`**：数据面保持单一运行时、语句不交接；集群控制面与后台看门狗（含独立轻量 `ctrl_kv`、`SchemaSync`/`PrivilegeSync`/`SysVarSync`、`/status`+gRPC、`ExpensiveQueryHandle`、`ServerMemoryLimitHandle`、`StoreLiveness`）隔离至专用 2 线程 `ControlRuntime`（修订 3.1 第 2 条，详见 [runtime-control.md](runtime-control.md) §7.1 决策 8）。
+8. **（2026-11-28，项目负责人 `zhigang-du` 确认 `#542` / `#545`）取消分层与周期巡检沿用 Go L1**：取消拆分为可复位会话级 `KillCancel` + 不可复位算子级 `ChildToken`；`max_execution_time`（100ms）、`SQLKiller` 断连探活（1s）、`servermemorylimit`（100ms）均沿用 Go L1 机制，不再另建每语句独立 deadline 定时器（修订 3.3 第 2、4、5 条，见 [runtime-control.md](runtime-control.md) §7.1 决策 9）。
+9. **（2026-11-28，项目负责人 `zhigang-du` 确认 `#542` / `#545`）Kill / OOM 路径补打 Go 三条 `* panic` 日志**：在 `Compiler::compile`、`ExecStmt::exec`、`write_result_set` 三个边界遇 `1317`/`3024`/`8175`/`8176` 时按 Go 原级别与字段补打三条日志（整行黄金测试钉住，不登记 `rulings.toml` 差异，见 [runtime-control.md](runtime-control.md) §7.1 决策 10）。
 
 待定：
 
-7. **优化器 arena、plan cache 等是否纳入语句 tracker**：Go 不记；纳入后 `Mem_max` 会变大，可能更早触发配额。建议只观测、不计入限额。
-8. **RowContainer 改为由持有者完成落盘**：Go 异步落盘时，读取方可以和落盘并发；改后落盘期间该算子停顿。性能是否需要另设指标？
-9. **数字门槛**（KILL 延迟、RSS 70%、记账开销 2% 等）：定稿前先在 Go 上实测基线并回填。
-10. **（2026-11-06）单运行时、语句不交接、Steal 默认 / NoSteal 可选**（3.1 第 2、9 条）。
-11. **（2026-11-06）checkpoint 按时间片让出**（3.1 第 5 条）。
-12. **（2026-11-06）Q1 / Q2 / Q3 与过载契约**（3.6）：默认全部等于 Go；Q1 按组份额与拒绝、Q2 的 AIMD 与按组份额是功能例外，默认关闭，由基准决定是否打开。
-13. **（2026-11-06）新观测字段不进慢日志**（3.6）。
+10. **优化器 arena、plan cache 等是否纳入语句 tracker**：Go 不记；纳入后 `Mem_max` 会变大，可能更早触发配额。建议只观测、不计入限额。
+11. **RowContainer 改为由持有者完成落盘**：Go 异步落盘时，读取方可以和落盘并发；改后落盘期间该算子停顿。性能是否需要另设指标？
+12. **数字门槛**（KILL 延迟、RSS 70%、记账开销 2% 等）：定稿前先在 Go 上实测基线并回填。
+13. **（2026-11-06）Steal 默认 / NoSteal 可选**（3.1 第 2 条；单数据面运行时、语句不交接与控制面独立隔离已于 2026-11-28 确认，见上第 7 条）。
+14. **（2026-11-06）checkpoint 按时间片让出**（3.1 第 5 条）。
+15. **（2026-11-06）Q1 / Q2 / Q3 与过载契约**（3.6）：默认全部等于 Go；Q1 按组份额与拒绝、Q2 的 AIMD 与按组份额是功能例外，默认关闭，由基准决定是否打开。
+16. **（2026-11-06）新观测字段不进慢日志**（3.6）。
 
 ## 附：我不确定的地方
 
