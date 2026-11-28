@@ -352,7 +352,10 @@ fn peek_mysql_table_lower_name(raw: &[u8]) -> Option<String> {
 
 /// Reads `TableInfo` entries for [`LOADED_MYSQL_TABLES`] under `mysql` DB metadata at `ts`.
 /// Fails hard on corrupted JSON for any target table rather than silently treating it as missing.
-async fn load_mysql_table_infos(kv: &KvClient, ts: u64) -> Result<HashMap<String, TableInfo>> {
+pub(crate) async fn load_mysql_table_infos(
+    kv: &KvClient,
+    ts: u64,
+) -> Result<HashMap<String, TableInfo>> {
     let prefix = meta_keys::hash_data_prefix(&meta_keys::db_key(MYSQL_DB_ID));
     let range = KeyRange::new(prefix.clone(), meta_keys::prefix_next(&prefix));
     let pairs = kv.snapshot(ts).scan_all(range).await?;
@@ -383,7 +386,7 @@ async fn load_mysql_table_infos(kv: &KvClient, ts: u64) -> Result<HashMap<String
 }
 
 /// Scans all record keys `t<table_id>_r...` of `table_id` at snapshot `ts`.
-async fn scan_table_records(
+pub(crate) async fn scan_table_records(
     kv: &KvClient,
     ts: u64,
     table_id: i64,

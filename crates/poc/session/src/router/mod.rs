@@ -379,8 +379,9 @@ pub struct Router {
     diverged: BTreeSet<String>,
     /// `tidb_txn_mode` when the session opened (step 0 compares with it).
     initial_txn_mode: String,
-    /// The new session's global variables were loaded when it opened (step 0 keeps a session
-    /// whose load failed on the PoC).
+    /// The new session's global variables were loaded from the cluster's
+    /// `mysql.global_variables` when it opened (step 0 keeps a session whose load failed on
+    /// the PoC: the fail-safe of D06.5 spec §8.3).
     globals_loaded: bool,
     /// `COM_STMT_EXECUTE` of the current command asked for a cursor.
     cursor: bool,
@@ -504,17 +505,20 @@ impl Router {
     pub fn new(mode: NewStackMode, mut new: Box<dyn NewStack>, poc: &PocValues) -> Router {
         // Go's session loads the global values of its variables at its first statement
         // (`loadCommonGlobalVariablesIfNeeded`); loaded now, step 0 compares
-        // `tidb_txn_mode` with the value the session has then (its default). Go's load skips
-        // the variables already set; the synced ones below are set after it and win the same
-        // way. The values are the compiled defaults, whose hooks do not fail; if loading
-        // does fail (a bug), the session's variables are only partly set, so the session is
-        // pinned to the PoC (step 0, `global variables not loaded`) instead of running
-        // statements on the new stack with them.
+        // `tidb_txn_mode` with the value the session has then (the cluster's global value).
+        // Go's load skips the variables already set; the synced ones below are set after it
+        // and win the same way. The values are the cluster's `mysql.global_variables`, from
+        // the loader's sysvar cache (D06.5 spec §8). If they cannot be read (the cache was
+        // never built: the loader has not read the table yet, or there is no loader) or a
+        // hook rejects one, the session's variables are not the cluster's, so the session is
+        // pinned to the PoC (step 0, `global variables not loaded`) for its lifetime (Go's
+        // load does not run twice either) instead of running statements on the new stack
+        // with them.
         let globals_loaded = match new.session_mut().load_common_global_variables_if_needed() {
             Ok(()) => true,
             Err(e) => {
-                tidb_base::log_error!(
-                    "VS1 router bug: loading the global variables of the new session failed, the session stays on the PoC",
+                tidb_base::log_warn!(
+                    "VS1 router: the global variables of the new session are not loaded, the session stays on the PoC",
                     "error" => &e,
                 );
                 false

@@ -15,8 +15,10 @@
 //! definitions) into packets the PoC's connection sends as they are; the parameters of
 //! `COM_STMT_EXECUTE` are decoded by Go's `parseBinaryParams` and `ExecBinaryParam`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_mysql_protocol::{
@@ -28,26 +30,108 @@ use tidb_server::conn::{ResultPackets, init_input_encoder, write_result_set};
 use tidb_server::resultset::ResultSet;
 use tidb_session::exec_result::ExecStmtResult;
 use tidb_session::{Dialect, Session};
-use tidb_sessionctx::variable::session::GlobalVarAccessor;
+use tidb_sessionctx::variable::error::ErrUnknownSystemVar;
+use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
+use tidb_sessionctx::variable::variable::ScopeGlobal;
+use tidb_systable::sysvar_cache::SysVarCache;
 
 use super::{BoxFut, NewPrepared, NewStack};
 
-/// The global values of system variables for the new session: the compiled defaults, as the
-/// PoC uses them (the PoC reads no `mysql.global_variables`).
-///
-/// TODO(VS1-17): the domain's sysvar cache (D06.5), so the new session sees `SET GLOBAL`s
-/// made on Go TiDB.
-pub struct DefaultGlobals;
+/// The global values of system variables for the new session (Go's `GlobalVarAccessor`,
+/// which the session itself implements over the domain's sysvar cache): the loader's
+/// [`SysVarCache`] of `mysql.global_variables` (`poc_domain::sysvar_loader`, D06.5 spec §8),
+/// so that the new session sees the `SET GLOBAL`s made on Go TiDB. With `--new-stack=off`
+/// the prototype's plan-cache decision reads it too; until the cache is first built it
+/// reads [`ClusterGlobals::compiled_defaults`] (a cache built from an empty table: every
+/// variable has its default; D13.1 spec known difference 13).
+pub struct ClusterGlobals {
+    cache: Arc<SysVarCache>,
+    /// The session the type validation of a global value runs on (Go validates on the
+    /// calling session, which the accessor cannot reach from inside it; made at the first
+    /// read, D06.5 spec §8.2).
+    scratch: Mutex<Option<Box<SessionVars>>>,
+}
 
-impl GlobalVarAccessor for DefaultGlobals {
-    // glue: stand-in for the domain's sysvar cache (D06.5)
-    fn get_global_sys_var(&self, name: &str) -> Result<String, Error> {
-        match tidb_sessionctx::variable::get_sys_var(name) {
-            Some(sv) => Ok(sv.value.clone()),
-            None => Err(tidb_base::errors::new(format!(
-                "unknown system variable '{name}'"
-            ))),
+impl ClusterGlobals {
+    /// The accessor over `cache` (shared by every session of the process).
+    pub fn new(cache: Arc<SysVarCache>) -> ClusterGlobals {
+        ClusterGlobals {
+            cache,
+            scratch: Mutex::new(None),
         }
+    }
+
+    /// The accessor over a cache built from an empty `mysql.global_variables`: every variable
+    /// has its compiled default (the off-mode plan-cache decision before the cache is first built,
+    /// and the unit tests).
+    pub fn compiled_defaults() -> ClusterGlobals {
+        ClusterGlobals::new(compiled_defaults_cache())
+    }
+
+    /// The error of a read while the cache was never built (the loader has not read
+    /// `mysql.global_variables` yet): the session that gets it stays on the PoC.
+    fn not_loaded() -> Error {
+        tidb_base::errors::new(
+            "the global variables of the cluster are not loaded yet (mysql.global_variables)",
+        )
+    }
+}
+
+/// The process's cache built from an empty table (built once; no SetGlobal hook runs).
+pub(crate) fn compiled_defaults_cache() -> Arc<SysVarCache> {
+    static CACHE: std::sync::LazyLock<Arc<SysVarCache>> = std::sync::LazyLock::new(|| {
+        let cache = SysVarCache::new();
+        cache
+            .rebuild(None, &mut || Ok(std::collections::HashMap::new()))
+            .expect("a rebuild from an empty table does not fail");
+        Arc::new(cache)
+    });
+    Arc::clone(&CACHE)
+}
+
+impl GlobalVarAccessor for ClusterGlobals {
+    /// GetGlobalSysVar implements GlobalVarAccessor.GetGlobalSysVar interface.
+    ///
+    /// Go's `GetGlobalVar` rebuilds a cache that was never built and, when that fails or
+    /// the variable has no entry, reads the table row (`getTableValue`), falling back to the
+    /// default. Here the new session cannot block on TiKV: a cache that was never built is
+    /// an error (the router keeps the session on the PoC), and a variable without an entry
+    /// (a variable without global scope; a built cache has every global one) has its
+    /// default, as Go's table read finds no row for it (D06.5 spec §8.2).
+    // go: pkg/session/session.go session.GetGlobalSysVar L2 (no bootstrap branch; no rebuild or table read from a session, see the doc comment)
+    fn get_global_sys_var(&self, name: &str) -> Result<String, Error> {
+        // log-skip: session.GetGlobalSysVar:1297 bootstrap/upgrade Initing branch does not apply to new session
+        let Some(sv) = tidb_sessionctx::variable::get_sys_var(name) else {
+            // It might be a recently unregistered sysvar. We should return unknown
+            // since GetSysVar is the canonical version, but we can update the cache
+            // so the next request doesn't attempt to load this.
+            tidb_base::log_info!("sysvar does not exist. sysvar cache may be stale", "name" => name);
+            return Err(ErrUnknownSystemVar.gen_with_stack_by_args(vec![name.to_owned().into()]));
+        };
+        if self.cache.needs_rebuild() {
+            return Err(ClusterGlobals::not_loaded());
+        }
+        let sys_var = match self.cache.global_var(name) {
+            Ok(v) => v,
+            Err(_) => {
+                // The sysvar exists, but there is no cache entry yet.
+                tidb_base::log_info!("sysvar not in cache yet. sysvar cache may be stale", "name" => name);
+                return Ok(sv.value.clone());
+            }
+        };
+        // It might have been written from an earlier TiDB version, so we should do type
+        // validation. If validation fails, we should return the default value.
+        let mut scratch = self.scratch.lock();
+        let vars = scratch.get_or_insert_with(|| {
+            Box::new(SessionVars::new(Box::new(ClusterGlobals::new(Arc::clone(
+                &self.cache,
+            )))))
+        });
+        let (sys_var, err) = sv.validate_from_type(vars, &sys_var, ScopeGlobal);
+        if err.is_err() {
+            return Ok(sv.value.clone());
+        }
+        Ok(sys_var)
     }
     // glue: stand-in (the read-only node never writes global variables)
     fn set_global_sys_var_only(&mut self, _: &str, _: &str, _: bool) -> Result<(), Error> {
@@ -60,6 +144,13 @@ impl GlobalVarAccessor for DefaultGlobals {
     // glue: stand-in (the read-only node never writes mysql.tidb)
     fn set_tidb_table_value(&mut self, _: &str, _: &str, _: &str) -> Result<(), Error> {
         Err(blocked("D06.5", "mysql.tidb in the new session"))
+    }
+    // glue: Domain.GetSessionCache through the accessor (after the loader's rebuild; a cache never built is an error, D06.5 spec §8.2)
+    fn session_cache(&self) -> Option<Result<HashMap<String, String>, Error>> {
+        if self.cache.needs_rebuild() {
+            return Some(Err(ClusterGlobals::not_loaded()));
+        }
+        Some(Ok(self.cache.session_cache()))
     }
 }
 
@@ -78,11 +169,13 @@ impl NewSession {
     /// the ported store driver when given (without one, the session's store is the
     /// stand-in whose every read is a boundary of the store driver). Its executors start
     /// their tasks on `pool`, the ExecPool the connection runs on (N3; without one, on the
-    /// current tokio runtime, uninstrumented).
+    /// current tokio runtime, uninstrumented). Its global variables come from `globals`,
+    /// the loader's sysvar cache ([`ClusterGlobals`]).
     pub fn new(
         domain: Option<Arc<tidb_domain::Domain>>,
         store: Option<Arc<tidb_store::driver::TikvStore>>,
         pool: Option<tidb_runtime::pool::ExecPool>,
+        globals: Arc<SysVarCache>,
     ) -> NewSession {
         if let Some(d) = &domain {
             // Go's bootstrap (`InitMDLVariable`); idempotent, so done with each session.
@@ -95,9 +188,10 @@ impl NewSession {
         let mut session = match store {
             Some(store) => {
                 let oracle = Arc::new(tidb_session::glue::StoreOracle(store.get_oracle()));
-                Session::with_store(Dialect::MySQL, Box::new(DefaultGlobals), store, oracle)
+                let globals = Box::new(ClusterGlobals::new(globals));
+                Session::with_store(Dialect::MySQL, globals, store, oracle)
             }
-            None => Session::new(Dialect::MySQL, Box::new(DefaultGlobals)),
+            None => Session::new(Dialect::MySQL, Box::new(ClusterGlobals::new(globals))),
         };
         session.set_instance_plan_cache(domain.as_ref().and_then(|d| d.get_instance_plan_cache()));
         session.set_exec_pool(pool);
@@ -111,7 +205,7 @@ impl NewSession {
 
 impl Default for NewSession {
     fn default() -> Self {
-        NewSession::new(None, None, None)
+        NewSession::new(None, None, None, compiled_defaults_cache())
     }
 }
 

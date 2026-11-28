@@ -27,7 +27,7 @@ use tidb_sessionctx::variable::session_state::TxnReadTS;
 use tidb_sql::ir::SetAssignment;
 use tidb_sql::{Lowered, Statement};
 
-use super::newstack::{DefaultGlobals, NewSession};
+use super::newstack::{ClusterGlobals, NewSession, compiled_defaults_cache};
 use super::*;
 
 // ---------------------------------------------------------------------------------------------
@@ -346,7 +346,10 @@ fn scripted(mode: NewStackMode, poc: &FakePoc) -> (Router, Arc<Mutex<Script>>) {
         ..Script::default()
     }));
     let new = FakeNew {
-        session: Session::new(Dialect::MySQL, Box::new(DefaultGlobals)),
+        session: Session::new(
+            Dialect::MySQL,
+            Box::new(ClusterGlobals::compiled_defaults()),
+        ),
         script: script.clone(),
     };
     let r = Router::new(mode, Box::new(new), &poc.values());
@@ -400,7 +403,7 @@ fn sbtest_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
 fn real(mode: NewStackMode, poc: &FakePoc) -> Router {
     // `tidb_enable_metadata_lock` on, as on a cluster (Go's default).
     tidb_session::session::init_mdl_variable();
-    let mut new = NewSession::new(None, None, None);
+    let mut new = NewSession::new(None, None, None, compiled_defaults_cache());
     new.session_mut()
         .set_domain_info_schema(sbtest_info_schema());
     Router::new(mode, Box::new(new), &poc.values())
@@ -1163,6 +1166,153 @@ fn failed_global_variable_load_pins_the_session_to_the_poc() {
     assert!(script.lock().unwrap().log.is_empty());
 }
 
+/// A sysvar cache built from these rows of `mysql.global_variables` (the loader's rebuild,
+/// without SetGlobal hooks).
+fn cluster_cache(rows: &[(&str, &str)]) -> Arc<tidb_systable::sysvar_cache::SysVarCache> {
+    let table: std::collections::HashMap<String, String> = rows
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    let cache = tidb_systable::sysvar_cache::SysVarCache::new();
+    cache.rebuild(None, &mut || Ok(table.clone())).unwrap();
+    Arc::new(cache)
+}
+
+/// A scripted router whose new session reads its global values from `cache`.
+fn scripted_over(
+    mode: NewStackMode,
+    poc: &FakePoc,
+    cache: Arc<tidb_systable::sysvar_cache::SysVarCache>,
+) -> (Router, Arc<Mutex<Script>>) {
+    let script = Arc::new(Mutex::new(Script {
+        columns: vec![col("c")],
+        ..Script::default()
+    }));
+    let new = FakeNew {
+        session: Session::new(Dialect::MySQL, Box::new(ClusterGlobals::new(cache))),
+        script: script.clone(),
+    };
+    (Router::new(mode, Box::new(new), &poc.values()), script)
+}
+
+/// #521: after `SET GLOBAL sql_mode = 'ANSI_QUOTES'` (and the two SET validation switches)
+/// on Go TiDB, a new session starts with the cluster's values, not the compiled defaults:
+/// the `sql_mode` guard of step 0 keeps candidates on the PoC, and `SET sql_mode = DEFAULT`
+/// goes back to the cluster's global value (Go `SetExecutor.getVarValue` →
+/// `GetGlobalSystemVar`), not to the compiled default.
+#[test]
+fn cluster_global_values_reach_a_new_session() {
+    let mut p = poc();
+    let cache = cluster_cache(&[
+        ("sql_mode", "ANSI_QUOTES"),
+        ("tidb_skip_isolation_level_check", "ON"),
+        ("tidb_enable_noop_functions", "ON"),
+    ]);
+    let (mut r, script) = scripted_over(NewStackMode::Strict, &p, cache);
+    assert_eq!(r.session_condition(&p), None);
+    assert_eq!(get(&mut r, "sql_mode"), "ANSI_QUOTES");
+    assert_eq!(get(&mut r, "tidb_skip_isolation_level_check"), "ON");
+    assert_eq!(get(&mut r, "tidb_enable_noop_functions"), "ON");
+    assert_eq!(
+        r.route(&parse(POINT), &p, false),
+        Route::Poc(Reason::SqlMode("ANSI_QUOTES"))
+    );
+    // The global value as the new session reads it (`@@global.sql_mode`).
+    assert_eq!(
+        r.new
+            .session_mut()
+            .vars_mut()
+            .get_global_system_var("sql_mode")
+            .unwrap(),
+        "ANSI_QUOTES"
+    );
+    // A session value without the bit: a candidate again.
+    block_on(r.query(&mut p, "SET sql_mode = ''")).unwrap();
+    assert_eq!(get(&mut r, "sql_mode"), "");
+    assert_eq!(r.route(&parse(POINT), &p, false), Route::New);
+    // DEFAULT is the cluster's global value.
+    block_on(r.query(&mut p, "SET sql_mode = DEFAULT")).unwrap();
+    assert_eq!(get(&mut r, "sql_mode"), "ANSI_QUOTES");
+    assert_eq!(r.session_condition(&p), None);
+    assert_eq!(
+        r.route(&parse(POINT), &p, false),
+        Route::Poc(Reason::SqlMode("ANSI_QUOTES"))
+    );
+    assert!(script.lock().unwrap().log.is_empty());
+}
+
+/// #521, fail safe: while the cluster's global values cannot be read (the loader's cache was
+/// never built: TiKV unreachable at start, or no loader), a new session is pinned to the PoC,
+/// even in strict mode, and the new stack is never called.
+#[test]
+fn unreadable_cluster_global_values_pin_the_session_to_the_poc() {
+    let mut p = poc();
+    let unbuilt = Arc::new(tidb_systable::sysvar_cache::SysVarCache::new());
+    let (mut r, script) = scripted_over(NewStackMode::Strict, &p, Arc::clone(&unbuilt));
+    script.lock().unwrap().answer = Some(Answer::Rows);
+    assert_eq!(r.session_condition(&p), Some("global variables not loaded"));
+    assert_eq!(
+        r.route(&parse(POINT), &p, false),
+        Route::Poc(Reason::Session("global variables not loaded"))
+    );
+    let res = block_on(r.query(&mut p, POINT));
+    assert_eq!(rows(&res).map(|r| r.0), Some(3));
+    assert!(script.lock().unwrap().log.is_empty());
+    // The cache is built later: this session stays on the PoC (Go loads once per session),
+    // a session opened now runs on the new stack.
+    unbuilt
+        .rebuild(None, &mut || Ok(std::collections::HashMap::new()))
+        .unwrap();
+    assert_eq!(r.session_condition(&p), Some("global variables not loaded"));
+    let (r2, _) = scripted_over(NewStackMode::Strict, &p, unbuilt);
+    assert_eq!(r2.session_condition(&p), None);
+    assert_eq!(r2.route(&parse(POINT), &p, false), Route::New);
+}
+
+/// Go's `session.GetGlobalSysVar` over the cache: the cached value, type-validated (a value
+/// that does not validate reads as the default, `ValidateFromType`); an unknown variable is
+/// `ErrUnknownSystemVar`; a variable without global scope has its default; a cache that was
+/// never built is an error (the read-only node does not rebuild from a session).
+#[test]
+fn cluster_globals_read_the_cache_as_go_reads_the_domain() {
+    use tidb_sessionctx::variable::session::GlobalVarAccessor;
+    let acc = ClusterGlobals::new(cluster_cache(&[
+        ("max_execution_time", "1500"),
+        ("tidb_enable_noop_functions", "not-a-value"),
+        ("div_precision_increment", "abc"),
+    ]));
+    assert_eq!(
+        acc.get_global_sys_var("max_execution_time").unwrap(),
+        "1500"
+    );
+    let noop = tidb_sessionctx::variable::get_sys_var("tidb_enable_noop_functions").unwrap();
+    assert_eq!(
+        acc.get_global_sys_var("tidb_enable_noop_functions")
+            .unwrap(),
+        noop.value
+    );
+    assert_eq!(
+        acc.get_global_sys_var("div_precision_increment").unwrap(),
+        "4"
+    );
+    let e = acc.get_global_sys_var("no_such_variable").unwrap_err();
+    assert!(
+        tidb_sessionctx::variable::error::ErrUnknownSystemVar.equal(&e),
+        "{e}"
+    );
+    // `warning_count`: session scope only, no entry in the global cache.
+    assert_eq!(acc.get_global_sys_var("warning_count").unwrap(), "0");
+    let unbuilt = ClusterGlobals::new(Arc::new(tidb_systable::sysvar_cache::SysVarCache::new()));
+    assert!(unbuilt.get_global_sys_var("sql_mode").is_err());
+    assert!(matches!(unbuilt.session_cache(), Some(Err(_))));
+    let defaults = ClusterGlobals::compiled_defaults();
+    let sql_mode = tidb_sessionctx::variable::get_sys_var("sql_mode").unwrap();
+    assert_eq!(
+        defaults.get_global_sys_var("sql_mode").unwrap(),
+        sql_mode.value
+    );
+}
+
 /// PoC, then new stack: the PoC's statement is written into the new session, where Go's
 /// system variables read it.
 #[test]
@@ -1585,7 +1735,10 @@ const REAL_EXECUTE_BLOCK: &str = "D09.13";
 /// switched on, `GetSessionPlanCache` is `None`, otherwise the (empty) stand-in cache.
 #[test]
 fn real_session_prepared_lookup() {
-    let mut s = Session::new(Dialect::MySQL, Box::new(DefaultGlobals));
+    let mut s = Session::new(
+        Dialect::MySQL,
+        Box::new(ClusterGlobals::compiled_defaults()),
+    );
     let e = block_on(s.execute_prepared_stmt(7, vec![])).err().unwrap();
     assert_eq!(e.code(), 8111, "{e}");
     let e = s.drop_prepared_stmt(7).unwrap_err();

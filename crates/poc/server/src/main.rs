@@ -483,6 +483,10 @@ fn main() {
         let priv_sync = poc_domain::PrivilegeSync::start(kv.clone(), args.pd.clone())
             .await
             .map_err(|e| std::io::Error::other(format!("load mysql.* privilege tables: {e}")))?;
+        // The sessions read the cluster's global variables (`mysql.global_variables`) from
+        // the sysvar cache the loader keeps in step with the cluster, as Go's domain does
+        // (D06.5 spec §8), in every `--new-stack` mode.
+        let sys_vars = poc_domain::SysVarSync::start(kv.clone(), args.pd.clone());
         let factory = Factory::new(Shared {
             kv,
             schema,
@@ -498,6 +502,7 @@ fn main() {
         })
         .with_new_stack(new_stack)
         .map_err(std::io::Error::other)?;
+        let factory = factory.with_sys_var_cache(std::sync::Arc::clone(sys_vars.cache()));
         if new_stack != poc_session::router::NewStackMode::Off {
             let mode_str = format!("{new_stack:?}");
             tidb_base::log_info!(
@@ -576,6 +581,7 @@ fn main() {
             }
             // Leave the cluster before draining clients, so DDL stops waiting for this node at once.
             priv_sync.shutdown();
+            sys_vars.shutdown();
             if let Some(sync) = &sync {
                 sync.shutdown().await;
             }

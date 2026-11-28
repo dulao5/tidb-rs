@@ -77,7 +77,9 @@ fn rebuild_takes_table_values_and_runs_set_global_hooks() {
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
     .collect();
-    let errs = cache.rebuild(&mut vars, &mut || Ok(table.clone())).unwrap();
+    let errs = cache
+        .rebuild(Some(&mut vars), &mut || Ok(table.clone()))
+        .unwrap();
     assert!(errs.is_empty(), "{errs:?}");
     assert!(!cache.needs_rebuild());
     assert_eq!(cache.global_var("sql_mode").unwrap(), "ANSI_QUOTES");
@@ -107,15 +109,47 @@ fn rebuild_keeps_the_old_cache_when_the_fetch_fails() {
     let cache = SysVarCache::new();
     let mut vars = SessionVars::new(Box::new(Acc));
     let t: HashMap<String, String> = [("sql_mode".to_owned(), "".to_owned())].into();
-    cache.rebuild(&mut vars, &mut || Ok(t.clone())).unwrap();
+    cache
+        .rebuild(Some(&mut vars), &mut || Ok(t.clone()))
+        .unwrap();
     assert!(
         cache
-            .rebuild(&mut vars, &mut || Err(tidb_base::errors::new(
+            .rebuild(Some(&mut vars), &mut || Err(tidb_base::errors::new(
                 "scan failed"
             )))
             .is_err()
     );
     assert_eq!(cache.global_var("sql_mode").unwrap(), "");
+}
+
+/// Without a hook session (the read-only node's loader) the two maps are built from the
+/// table as with one, and no SetGlobal hook runs: no callback is needed and the process-wide
+/// value a hook would set is not touched.
+#[test]
+fn rebuild_without_a_hook_session_builds_the_maps_only() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = SysVarCache::new();
+    let before = MaxPreparedStmtCountValue.load(SeqCst);
+    let table: HashMap<String, String> = [
+        ("sql_mode", "ANSI_QUOTES"),
+        ("max_prepared_stmt_count", "5"),
+        ("tidb_skip_isolation_level_check", "ON"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect();
+    let errs = cache.rebuild(None, &mut || Ok(table.clone())).unwrap();
+    assert!(errs.is_empty(), "{errs:?}");
+    assert!(!cache.needs_rebuild());
+    assert_eq!(cache.global_var("sql_mode").unwrap(), "ANSI_QUOTES");
+    assert_eq!(cache.global_var("max_prepared_stmt_count").unwrap(), "5");
+    assert_eq!(MaxPreparedStmtCountValue.load(SeqCst), before);
+    let sess = cache.session_cache();
+    assert_eq!(
+        sess.get("tidb_skip_isolation_level_check")
+            .map(String::as_str),
+        Some("ON")
+    );
 }
 
 /// The rows a REPLACE writes decode back to the name and value (fetchTableValues over the

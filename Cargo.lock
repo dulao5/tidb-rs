@@ -2629,6 +2629,7 @@ dependencies = [
  "tidb-sessiontxn",
  "tidb-sql",
  "tidb-store",
+ "tidb-systable",
  "tokio",
 ]
 
