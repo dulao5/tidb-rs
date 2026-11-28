@@ -12,8 +12,8 @@ use tidb_mysql_protocol::constants::{auth_plugin, capability::*, command};
 use tidb_mysql_protocol::packet::PacketIo;
 use tidb_mysql_protocol::tls::{generate_self_signed, tls_config_from_pem};
 use tidb_mysql_protocol::{
-    ColumnDef, ColumnType, ConnectionInfo, Credential, Param, PreparedInfo, Response, ResultSet,
-    Server, ServerConfig, SessionFactory, SessionHandler, SqlError, Value,
+    AccountAuth, ColumnDef, ColumnType, ConnectionInfo, Credential, Param, PreparedInfo, Response,
+    ResultSet, Server, ServerConfig, SessionFactory, SessionHandler, SqlError, Value,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -27,7 +27,28 @@ impl SessionFactory for Factory {
     type Session = Session;
 
     async fn lookup_user(&self, user: &str, _host: &str) -> Option<Credential> {
-        (user == "alice").then(|| Credential::native_from_password(PASSWORD))
+        self.lookup_account(user, _host).await.map(|a| a.credential)
+    }
+
+    async fn lookup_account(&self, user: &str, _host: &str) -> Option<AccountAuth> {
+        match user {
+            "alice" => Some(AccountAuth::from(Credential::native_from_password(
+                PASSWORD,
+            ))),
+            "bob" => Some(AccountAuth::from(Credential::caching_sha2_from_password(
+                PASSWORD,
+            ))),
+            "bob_nopass" => Some(AccountAuth::from(Credential::caching_sha2_from_password(
+                "",
+            ))),
+            "bob_locked" => Some(AccountAuth {
+                credential: Credential::caching_sha2_from_password(PASSWORD),
+                auth_user: Some("bob_locked".to_owned()),
+                auth_host: Some("%".to_owned()),
+                account_locked: true,
+            }),
+            _ => None,
+        }
     }
 
     fn open_session(&self, info: &ConnectionInfo) -> Result<Session, SqlError> {
@@ -337,4 +358,219 @@ async fn ssl_request_without_tls_is_rejected() {
     let err = io.read_packet().await.unwrap();
     assert_eq!(err[0], 0xff);
     assert_eq!(u16::from_le_bytes([err[1], err[2]]), 1235);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn caching_sha2_password_over_tls_and_plain_tcp() {
+    for default_plugin in [
+        auth_plugin::MYSQL_NATIVE_PASSWORD,
+        auth_plugin::CACHING_SHA2_PASSWORD,
+    ] {
+        let generated = generate_self_signed(&["localhost"]).unwrap();
+        let tls = tls_config_from_pem(generated.cert_pem.as_bytes(), generated.key_pem.as_bytes())
+            .unwrap();
+        let config = ServerConfig {
+            tls: Some(tls),
+            default_auth_plugin: default_plugin.to_owned(),
+            ..ServerConfig::default()
+        };
+        let addr = start(config).await;
+        let ssl = SslOpts::default().with_danger_accept_invalid_certs(true);
+
+        // 1. Right password over TLS -> succeeds (exercises AuthSwitchRequest when default is
+        //    mysql_native_password and direct AuthMoreData [0x01, 0x04] when default is caching_sha2).
+        let mut conn = mysql_async::Conn::new(
+            OptsBuilder::default()
+                .ip_or_hostname(addr.ip().to_string())
+                .tcp_port(addr.port())
+                .user(Some("bob"))
+                .pass(Some(PASSWORD))
+                .prefer_socket(false)
+                .ssl_opts(Some(ssl.clone())),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("bob TLS login failed (default={default_plugin}): {e}"));
+        let one: Option<i64> = conn.query_first("select 1").await.unwrap();
+        assert_eq!(one, Some(1));
+        conn.disconnect().await.unwrap();
+
+        // 2. Wrong password over TLS -> 1045.
+        let err = mysql_async::Conn::new(
+            OptsBuilder::default()
+                .ip_or_hostname(addr.ip().to_string())
+                .tcp_port(addr.port())
+                .user(Some("bob"))
+                .pass(Some("wrong-pw"))
+                .prefer_socket(false)
+                .ssl_opts(Some(ssl.clone())),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, mysql_async::Error::Server(ref e) if e.code == 1045),
+            "default={default_plugin}: {err:?}"
+        );
+
+        // 3. Empty password against non-empty caching_sha2 account over TLS -> 1045 (using password: NO).
+        let err = mysql_async::Conn::new(
+            OptsBuilder::default()
+                .ip_or_hostname(addr.ip().to_string())
+                .tcp_port(addr.port())
+                .user(Some("bob"))
+                .prefer_socket(false)
+                .ssl_opts(Some(ssl.clone())),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, mysql_async::Error::Server(ref e) if e.code == 1045 && e.message.contains("using password: NO")),
+            "default={default_plugin}: {err:?}"
+        );
+
+        // 4. Locked caching_sha2 account: right password -> 3118, wrong password -> 1045.
+        let err = mysql_async::Conn::new(
+            OptsBuilder::default()
+                .ip_or_hostname(addr.ip().to_string())
+                .tcp_port(addr.port())
+                .user(Some("bob_locked"))
+                .pass(Some(PASSWORD))
+                .prefer_socket(false)
+                .ssl_opts(Some(ssl.clone())),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, mysql_async::Error::Server(ref e) if e.code == 3118),
+            "locked right pw (default={default_plugin}): {err:?}"
+        );
+        let err = mysql_async::Conn::new(
+            OptsBuilder::default()
+                .ip_or_hostname(addr.ip().to_string())
+                .tcp_port(addr.port())
+                .user(Some("bob_locked"))
+                .pass(Some("wrong-pw"))
+                .prefer_socket(false)
+                .ssl_opts(Some(ssl.clone())),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, mysql_async::Error::Server(ref e) if e.code == 1045),
+            "locked wrong pw (default={default_plugin}): {err:?}"
+        );
+
+        // 5. Passwordless caching_sha2 account succeeds over both TLS and plain TCP, and rejects non-empty password.
+        for use_ssl in [Some(ssl.clone()), None] {
+            let mut conn = mysql_async::Conn::new(
+                OptsBuilder::default()
+                    .ip_or_hostname(addr.ip().to_string())
+                    .tcp_port(addr.port())
+                    .user(Some("bob_nopass"))
+                    .prefer_socket(false)
+                    .ssl_opts(use_ssl),
+            )
+            .await
+            .unwrap();
+            let one: Option<i64> = conn.query_first("select 1").await.unwrap();
+            assert_eq!(one, Some(1));
+            conn.disconnect().await.unwrap();
+        }
+        let err = mysql_async::Conn::new(
+            OptsBuilder::default()
+                .ip_or_hostname(addr.ip().to_string())
+                .tcp_port(addr.port())
+                .user(Some("bob_nopass"))
+                .pass(Some("unexpected"))
+                .prefer_socket(false)
+                .ssl_opts(Some(ssl)),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, mysql_async::Error::Server(ref e) if e.code == 1045),
+            "nopass with wrong pw (default={default_plugin}): {err:?}"
+        );
+
+        // 6. Plain TCP (no TLS) must NEVER accept cleartext password or RSA pubkey request (0x02).
+        for full_auth_payload in [format!("{PASSWORD}\0").into_bytes(), vec![0x02]] {
+            let mut tcp = TcpStream::connect(addr).await.unwrap();
+            let _ = read_handshake(&mut tcp).await;
+            let mut io = PacketIo::new(tcp, 1 << 20);
+            io.set_sequence(1);
+            let caps = CLIENT_PROTOCOL_41
+                | CLIENT_SECURE_CONNECTION
+                | CLIENT_PLUGIN_AUTH
+                | CLIENT_LONG_PASSWORD;
+            let resp = tidb_mysql_protocol::handshake::encode_handshake_response(
+                caps,
+                "bob",
+                &[0x11; 32],
+                None,
+                auth_plugin::CACHING_SHA2_PASSWORD,
+            );
+            io.write_packet(&resp).await.unwrap();
+            io.flush().await.unwrap();
+            let mut pkt = io.read_packet().await.unwrap();
+            if pkt[0] == 0xfe {
+                io.write_packet(&[0x11; 32]).await.unwrap();
+                io.flush().await.unwrap();
+                pkt = io.read_packet().await.unwrap();
+            }
+            assert_eq!(pkt, [0x01, 0x04], "expected AuthMoreData full auth request");
+            io.write_packet(&full_auth_payload).await.unwrap();
+            io.flush().await.unwrap();
+            let final_pkt = io.read_packet().await.unwrap();
+            assert_eq!(
+                final_pkt[0], 0xff,
+                "plain TCP must reject caching_sha2 full auth"
+            );
+            assert_eq!(u16::from_le_bytes([final_pkt[1], final_pkt[2]]), 1045);
+        }
+
+        // 7. libmysqlclient (MySQL 8.0 CLI) sends a single NUL byte `[0x00]` for empty passwords
+        //    under caching_sha2_password: bob_nopass must succeed (OK) and bob must fail with
+        //    1045 `(using password: NO)` without triggering AuthMoreData.
+        for (user, expect_ok) in [("bob_nopass", true), ("bob", false)] {
+            let mut tcp = TcpStream::connect(addr).await.unwrap();
+            let _ = read_handshake(&mut tcp).await;
+            let mut io = PacketIo::new(tcp, 1 << 20);
+            io.set_sequence(1);
+            let caps = CLIENT_PROTOCOL_41
+                | CLIENT_SECURE_CONNECTION
+                | CLIENT_PLUGIN_AUTH
+                | CLIENT_LONG_PASSWORD;
+            let resp = tidb_mysql_protocol::handshake::encode_handshake_response(
+                caps,
+                user,
+                &[0x00],
+                None,
+                auth_plugin::CACHING_SHA2_PASSWORD,
+            );
+            io.write_packet(&resp).await.unwrap();
+            io.flush().await.unwrap();
+            let mut pkt = io.read_packet().await.unwrap();
+            if pkt[0] == 0xfe {
+                io.write_packet(&[0x00]).await.unwrap();
+                io.flush().await.unwrap();
+                pkt = io.read_packet().await.unwrap();
+            }
+            if expect_ok {
+                assert_eq!(
+                    pkt[0], 0x00,
+                    "libmysqlclient [0x00] empty auth for {user} (default={default_plugin}) must succeed: {pkt:?}"
+                );
+            } else {
+                assert_eq!(
+                    pkt[0], 0xff,
+                    "libmysqlclient [0x00] empty auth for {user} (default={default_plugin}) must fail immediately: {pkt:?}"
+                );
+                assert_eq!(u16::from_le_bytes([pkt[1], pkt[2]]), 1045);
+                let msg = std::str::from_utf8(&pkt[9..]).unwrap();
+                assert!(
+                    msg.contains("using password: NO"),
+                    "expected using password: NO, got {msg}"
+                );
+            }
+        }
+    }
 }

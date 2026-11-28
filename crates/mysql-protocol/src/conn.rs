@@ -513,20 +513,17 @@ where
             return Err(HandshakeError::Other(err_str));
         };
 
-        // Only mysql_native_password is verified; any other plugin the client picked (typically
-        // caching_sha2_password, libmysqlclient 8.x's default) is switched to it, which is what
-        // TiDB does for accounts using mysql_native_password. Like TiDB (`checkAuthPlugin`), also
-        // switch when the handshake advertised another plugin: libmysqlclient then answers
-        // mysql_native_password with *empty* data, since the salt was offered to another plugin.
-        if resp.auth_plugin.as_deref() != Some(auth_plugin::MYSQL_NATIVE_PASSWORD)
-            || config.default_auth_plugin != auth_plugin::MYSQL_NATIVE_PASSWORD
+        // Match Go `checkAuthPlugin` (`pkg/server/conn.go:886-930`): switch to the account's
+        // auth plugin whenever the client picked another plugin OR the server advertised another
+        // default plugin in InitialHandshake (e.g. libmysqlclient answers mysql_native_password
+        // with empty data if InitialHandshake advertised caching_sha2_password).
+        let target_plugin = account.credential.plugin_name();
+        if resp.auth_plugin.as_deref() != Some(target_plugin)
+            || config.default_auth_plugin != target_plugin
         {
             // Go pkg/server/conn.go:287-306 + 686.
             if let Err(e) = io
-                .write_packet(&auth_switch_request(
-                    auth_plugin::MYSQL_NATIVE_PASSWORD,
-                    salt,
-                ))
+                .write_packet(&auth_switch_request(target_plugin, salt))
                 .await
             {
                 let err_str = e.to_string();
@@ -583,14 +580,79 @@ where
         factory.lookup_account(&resp.user, &host).await
     };
 
-    let verified = match &account {
+    let (verified, using_password) = match &account {
         Some(acc) => match &acc.credential {
-            cred @ Credential::NativePassword(_) => cred.verify_native(salt, &auth),
+            cred @ Credential::NativePassword(_) => {
+                (cred.verify_native(salt, &auth), !auth.is_empty())
+            }
+            Credential::CachingSha2Password(None) => {
+                // `libmysqlclient` (MySQL 8.0 CLI) sends a single NUL byte `[0]` for an empty
+                // `caching_sha2_password` response, while drivers like `mysql_async` send `[]`.
+                let empty = auth.is_empty() || auth == [0];
+                (empty, !empty)
+            }
+            cred @ Credential::CachingSha2Password(Some(_)) => {
+                let empty = auth.is_empty() || auth == [0];
+                // Clients without CLIENT_PLUGIN_AUTH cannot participate in caching_sha2_password
+                // AuthMoreData exchanges; an empty initial auth (`[]` or libmysqlclient's `[0]`)
+                // against a non-empty hash is rejected immediately with `using password: NO`.
+                if resp.capability & CLIENT_PLUGIN_AUTH == 0 || empty {
+                    (false, !empty)
+                } else {
+                    // Go TiDB v8.5.8 (`authSha`, pkg/server/conn.go:722-756) always requests full
+                    // authentication (`[0x01, 0x04]`) because it has no fast-auth cache; plaintext
+                    // verification is permitted only over TLS (never over unencrypted TCP).
+                    if let Err(e) = io
+                        .write_packet(&[
+                            header::AUTH_MORE_DATA,
+                            auth_plugin::CACHING_SHA2_PERFORM_FULL_AUTH,
+                        ])
+                        .await
+                    {
+                        let err_str = e.to_string();
+                        tidb_base::log_warn!(
+                            "authSha packet write failed",
+                            "conn" => connection_id,
+                            "error" => err_str.as_str(),
+                        );
+                        return Err(HandshakeError::from(e));
+                    }
+                    if let Err(e) = io.flush().await {
+                        let err_str = e.to_string();
+                        tidb_base::log_warn!(
+                            "authSha packet flush failed",
+                            "conn" => connection_id,
+                            "error" => err_str.as_str(),
+                        );
+                        return Err(HandshakeError::from(e));
+                    }
+                    let full_auth = io.read_packet().await.map_err(|e| {
+                        let err_str = e.log_string();
+                        tidb_base::log_warn!(
+                            "authSha packet read failed",
+                            "conn" => connection_id,
+                            "error" => err_str.as_str(),
+                        );
+                        HandshakeError::from(e)
+                    })?;
+                    if io.get_ref().cipher().is_none() {
+                        // Never accept cleartext passwords or RSA pubkey requests (0x02) over
+                        // plain TCP (Go TiDB v8.5.8 also rejects 0x02 with 1045).
+                        (false, true)
+                    } else {
+                        let plaintext = full_auth.strip_suffix(&[0]).unwrap_or(&full_auth);
+                        (
+                            cred.verify_caching_sha2_plaintext(plaintext),
+                            !plaintext.is_empty() || !empty,
+                        )
+                    }
+                }
+            }
         },
-        None => false,
+        None => (false, !auth.is_empty()),
     };
     if !verified {
-        let e = SqlError::access_denied(&resp.user, &host, !auth.is_empty());
+        let e = SqlError::access_denied(&resp.user, &host, using_password);
         let err_str = e.error_for_log();
         tidb_base::log_warn!(
             "open new session or authentication failure",

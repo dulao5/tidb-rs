@@ -51,10 +51,14 @@ impl PrivilegeSource {
 
 /// Resolves an account from a [`MySQLPrivilege`] snapshot for MySQL handshake authentication.
 ///
+/// Supports `mysql_native_password` (including empty plugin, normalized on load) and
+/// `caching_sha2_password` (`$A$NNN$<20-byte-salt><43-byte-crypt-b64>` or empty password).
+///
 /// Fails closed (`None` -> `1045`) for any account that relies on an unported authentication or
 /// login-restriction feature:
-/// - `mysql.user.plugin` other than `mysql_native_password` (or `""`, normalized on load),
-///   preventing empty-password bypass on `auth_socket`, `tidb_auth_token`, LDAP, etc.
+/// - `mysql.user.plugin` other than `mysql_native_password` (or `""`) and `caching_sha2_password`,
+///   preventing empty-password bypass on `auth_socket`, `tidb_auth_token`, LDAP, `tidb_sm3_password`, etc.
+/// - Malformed `authentication_string` for the account's plugin.
 /// - `mysql.global_priv` rows with `REQUIRE SSL/X509/CIPHER/SAN` or broken JSON.
 /// - `mysql.user.password_expired = 'Y'` or non-zero `password_lifetime`.
 /// - `mysql.user.User_attributes` failed-login lockout policy or auto-lock state.
@@ -68,9 +72,15 @@ pub fn authenticate_user_record(
     host: &str,
 ) -> Option<AccountAuth> {
     let rec = snap.match_user(user, host)?;
-    if !rec.auth_plugin.is_empty() && rec.auth_plugin != "mysql_native_password" {
-        return None;
-    }
+    let credential = match rec.auth_plugin.as_str() {
+        "" | "mysql_native_password" => {
+            Credential::native_from_authentication_string(&rec.auth_string)?
+        }
+        "caching_sha2_password" => {
+            Credential::caching_sha2_from_authentication_string(&rec.auth_string)?
+        }
+        _ => return None,
+    };
     let lifetime_active = match rec.password_lifetime {
         // `PASSWORD EXPIRE NEVER` explicitly overrides global `default_password_lifetime`.
         Some(0) => false,
@@ -86,7 +96,6 @@ pub fn authenticate_user_record(
     {
         return None;
     }
-    let credential = Credential::native_from_authentication_string(&rec.auth_string)?;
     Some(AccountAuth {
         credential,
         auth_user: Some(rec.base.user.clone()),
@@ -569,6 +578,26 @@ mod tests {
             UserRecord::new("%", "u_ldap", SelectPriv)
                 .with_auth_plugin("authentication_ldap_simple"),
         );
+        mp.add_user(
+            UserRecord::new("%", "u_sm3", SelectPriv).with_auth_plugin("tidb_sm3_password"),
+        );
+        let sha2_auth_str = Credential::caching_sha2_from_password("secret123")
+            .to_caching_sha2_authentication_string()
+            .unwrap();
+        mp.add_user(
+            UserRecord::new("%", "u_sha2_valid", SelectPriv)
+                .with_auth_plugin("caching_sha2_password")
+                .with_auth_string(sha2_auth_str),
+        );
+        mp.add_user(
+            UserRecord::new("%", "u_sha2_empty", SelectPriv)
+                .with_auth_plugin("caching_sha2_password"),
+        );
+        mp.add_user(
+            UserRecord::new("%", "u_sha2_bad", SelectPriv)
+                .with_auth_plugin("caching_sha2_password")
+                .with_auth_string("$A$005$broken"),
+        );
         mp.add_user(UserRecord::new("%", "u_expired", SelectPriv).with_password_expired(true));
         mp.add_user(
             UserRecord::new("%", "u_lifetime", SelectPriv).with_password_lifetime(Some(30)),
@@ -593,11 +622,22 @@ mod tests {
         let locked = authenticate_user_record(&mp, "u_locked", "127.0.0.1").unwrap();
         assert!(locked.account_locked);
 
-        // Every unported auth plugin / login restriction fails closed (None -> 1045).
+        // Valid caching_sha2_password accounts (hashed and empty-password) are accepted.
+        let sha2_valid = authenticate_user_record(&mp, "u_sha2_valid", "127.0.0.1").unwrap();
+        assert!(matches!(
+            sha2_valid.credential,
+            Credential::CachingSha2Password(Some(_))
+        ));
+        let sha2_empty = authenticate_user_record(&mp, "u_sha2_empty", "127.0.0.1").unwrap();
+        assert_eq!(sha2_empty.credential, Credential::CachingSha2Password(None));
+
+        // Every unported auth plugin / malformed hash / login restriction fails closed (None -> 1045).
         for denied in [
             "u_token",
             "u_socket",
             "u_ldap",
+            "u_sm3",
+            "u_sha2_bad",
             "u_expired",
             "u_lifetime",
             "u_lockpol",
