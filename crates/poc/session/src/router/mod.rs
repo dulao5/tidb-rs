@@ -44,7 +44,7 @@ pub mod sync;
 mod tests;
 pub mod trace;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -269,6 +269,11 @@ pub trait PocEngine: Send {
     fn set_prev_stmt(&mut self, last: &LastStmtInfo) {
         let _ = last;
     }
+    /// Appends an error warning (such as a parse error) to the PoC's current statement warning
+    /// list without clearing prior warnings (`session.Parse`, `session.go:1591`).
+    fn append_error_warning(&mut self, warn: tidb_base::contextutil::SQLWarn) {
+        let _ = warn;
+    }
 }
 
 /// The scope of `ADMIN FLUSH <scope> PLAN_CACHE` (`AdminStmt#30` of the grammar; the Rust AST
@@ -340,10 +345,19 @@ pub struct Router {
     mode: NewStackMode,
     new: Box<dyn NewStack>,
     owners: HashMap<u32, Owner>,
+    /// Prepared statement ids whose lowered statement is a `SELECT` (used to set `ROW_COUNT()`
+    /// `-1` vs `0` when the PoC executes or falls back to execute).
+    select_stmts: HashSet<u32>,
+    /// True after a PoC statement ran so the next new-stack statement seeds `ResetContextOfStmt`
+    /// inputs from `last` before compiling/executing.
+    poc_dirty: bool,
     /// The previous statement's state (§4.5): the PoC's copy, and what was last written.
     last: LastStmtInfo,
     /// Synced variables the new session rejected (step 0).
     diverged: BTreeSet<String>,
+    /// `SET x = DEFAULT` (or `SET CHARACTER SET`) issued while globals were not loaded yet,
+    /// deferred until `ensure_globals()` loads `mysql.global_variables`.
+    pending_defaults: BTreeMap<String, &'static str>,
     /// `tidb_txn_mode` when the session opened (step 0 compares with it).
     initial_txn_mode: String,
     /// The new session's global variables were loaded from the cluster's
@@ -409,8 +423,8 @@ pub(crate) fn sql_error(e: &Error) -> SqlError {
 }
 
 /// Emit Go `session.go:1590` `WARN` `"parse SQL failed"` (preserving raw `\n`, applying
-/// `redact::string`) and attach a `[parser:1064]` `source_err` on `SqlError` for
-/// `command dispatched failed`.
+/// `redact::string`) and attach a `[parser:1064]` (or semantic parse error code) `source_err` on
+/// `SqlError` for `command dispatched failed`.
 pub(crate) fn log_and_wrap_parse_error(
     conn_id: u64,
     session_alias: &str,
@@ -418,13 +432,10 @@ pub(crate) fn log_and_wrap_parse_error(
     sql: &str,
     err: SqlError,
 ) -> SqlError {
-    let src = err.source_err.clone().unwrap_or_else(|| {
-        // `err.message` is already formatted by the parser; use "%s" instead of ErrParse's
-        // "%s %s" template so we do not append an extra trailing space.
-        tidb_base::terror::ClassParser
-            .new_std(tidb_base::errno::ErrParse)
-            .fast_gen("%s", tidb_base::go_args![&err.message])
-    });
+    let src = err
+        .source_err
+        .clone()
+        .unwrap_or_else(|| parse_error_warn(&err));
     let sql_log = tidb_base::redact::string(redact_mode, sql);
     tidb_base::log_warn!(
         "parse SQL failed",
@@ -434,6 +445,28 @@ pub(crate) fn log_and_wrap_parse_error(
         "SQL" => &sql_log,
     );
     err.with_source_err(src)
+}
+
+/// Builds the `tidb_base::Error` recorded in `StmtCtx.AppendError` for a SQL parse failure.
+pub(crate) fn parse_error_warn(err: &SqlError) -> Error {
+    if let Some(src) = &err.source_err {
+        return src.clone();
+    }
+    let code = if err.code != 0 {
+        err.code
+    } else {
+        tidb_base::errno::ErrParse
+    };
+    let class = if code == tidb_base::errno::ErrUnknownCollation {
+        tidb_base::terror::ClassDDL
+    } else {
+        tidb_base::terror::ClassParser
+    };
+    // `err.message` is already formatted by the parser; use "%s" instead of ErrParse's
+    // "%s %s" template so we do not append an extra trailing space.
+    class
+        .new_std(code)
+        .fast_gen("%s", tidb_base::go_args![&err.message])
 }
 
 /// The 1235 error of a statement only the new stack can run when it cannot (§4.7, row 3).
@@ -520,8 +553,11 @@ impl Router {
             mode,
             new,
             owners: HashMap::new(),
+            select_stmts: HashSet::new(),
+            poc_dirty: false,
             last: LastStmtInfo::default(),
             diverged: BTreeSet::new(),
+            pending_defaults: BTreeMap::new(),
             initial_txn_mode,
             globals_loaded: false,
             globals_failed: false,
@@ -538,8 +574,16 @@ impl Router {
             charset: None,
             collation: None,
         }];
+        let globals_loaded = r.globals_loaded;
         let vars = r.new.session_mut().vars_mut();
-        sync::sync_set(vars, &mut r.diverged, &names, poc);
+        sync::sync_set(
+            vars,
+            &mut r.diverged,
+            &mut r.pending_defaults,
+            globals_loaded,
+            &names,
+            poc,
+        );
         sync::sync_db(vars, poc);
         r
     }
@@ -567,6 +611,16 @@ impl Router {
         {
             Ok(()) => {
                 self.globals_loaded = true;
+                let pending = std::mem::take(&mut self.pending_defaults);
+                let vars = self.new.session_mut().vars_mut();
+                for (target, source) in pending {
+                    match vars.get_global_system_var(source) {
+                        Ok(v) => sync::set(vars, &mut self.diverged, &target, &v),
+                        Err(_) => {
+                            self.diverged.insert(target);
+                        }
+                    }
+                }
                 self.initial_txn_mode = self.new.session().vars().txn_mode.clone();
             }
             Err(e) => {
@@ -704,6 +758,7 @@ impl Router {
     /// The new stack finished a statement: record its state and copy it to the PoC side.
     fn finish_new(&mut self) {
         self.last = LastStmtInfo::from_new(self.new.session().vars());
+        self.poc_dirty = false;
         self.stmt_ended = true;
     }
 
@@ -721,6 +776,7 @@ impl Router {
         }
         self.new.txn_ended_elsewhere();
         for stmt_id in std::mem::take(&mut self.closed) {
+            self.select_stmts.remove(&stmt_id);
             match self.owners.remove(&stmt_id) {
                 Some(Owner::Both { .. }) | Some(Owner::Poc(_)) => poc.close(stmt_id),
                 Some(Owner::New { .. }) | None => {}
@@ -730,9 +786,15 @@ impl Router {
 
     /// The PoC finished a statement with `result`: record its state and copy it into the new
     /// session.
-    fn finish_poc(&mut self, result: &Result<Response, SqlError>) {
-        self.last = LastStmtInfo::from_poc(&self.last, result);
+    fn finish_poc(&mut self, result: &Result<Response, SqlError>, is_select: bool) {
+        self.record_poc_stmt(LastStmtInfo::from_poc_stmt(&self.last, result, is_select));
+    }
+
+    /// Records `info` from the PoC and mirrors it into the new session's `SessionVars`.
+    fn record_poc_stmt(&mut self, info: LastStmtInfo) {
+        self.last = info;
         self.last.apply_to(self.new.session_mut().vars_mut());
+        self.poc_dirty = true;
         self.stmt_ended = true;
     }
 
@@ -764,6 +826,10 @@ impl Router {
             return Err(NotRun::NotIdle);
         }
         let cp = self.new.session().checkpoint();
+        if self.poc_dirty {
+            self.last
+                .apply_reset_inputs(self.new.session_mut().vars_mut());
+        }
         let executed = self.new.executed_stmts();
         let r = match op {
             NewOp::Query(stmt, sql) => self.new.execute(stmt, sql).await,
@@ -854,7 +920,7 @@ impl Router {
     /// to fall back to): recorded as the previous statement's state like the PoC's errors.
     fn fail(&mut self, e: SqlError) -> Result<Response, SqlError> {
         let r = Err(e);
-        self.finish_poc(&r);
+        self.finish_poc(&r, false);
         self.poc_warnings_stale = true;
         r
     }
@@ -881,6 +947,7 @@ impl Router {
         r
     }
 
+    /// Parser options synced with the session's `tidb_enable_window_function`.
     /// [`Router::query`] before the transaction-end check.
     async fn query_inner(
         &mut self,
@@ -894,17 +961,48 @@ impl Router {
         let stmt = match tidb_sql::ir::parse_one_with(sql, &opts) {
             Ok(s) => s,
             Err(e) => {
-                let vars = self.new.session().vars();
-                if !vars.in_restricted_sql {
-                    return Err(log_and_wrap_parse_error(
+                // Go `session.Parse` (`session.go:1583-1592`) appends syntax/semantic parse errors
+                // (`ErrParse` 1064, `ErrUnknownCharacterSet` 1115, `ErrUnknownCollation` 1273) to
+                // the previous statement context without calling `ResetContextOfStmt`. Other
+                // prototype parser rejections (empty query 1065, multi-stmt 1235) use `self.fail`.
+                if !matches!(e.code, 1064 | 1115 | 1273) {
+                    return self.fail(e);
+                }
+                let restricted = self.new.session().vars().in_restricted_sql;
+                let wrapped = if !restricted {
+                    let vars = self.new.session().vars();
+                    log_and_wrap_parse_error(
                         self.conn_id,
                         &vars.session_alias,
                         &vars.enable_redact_log,
                         sql,
                         e,
-                    ));
+                    )
+                } else {
+                    e
+                };
+                if !restricted {
+                    let err_warn = parse_error_warn(&wrapped);
+                    match self.last.engine {
+                        Engine::New => {
+                            self.new
+                                .session_mut()
+                                .vars_mut()
+                                .stmt_ctx()
+                                .append_error(err_warn);
+                        }
+                        Engine::Poc => {
+                            poc.append_error_warning(tidb_base::contextutil::SQLWarn {
+                                level: tidb_base::contextutil::WarnLevelError.into(),
+                                err: err_warn,
+                            });
+                            self.poc_dirty = true;
+                        }
+                    }
                 }
-                return Err(e);
+                self.last = LastStmtInfo::from_parse_error(&self.last, !restricted);
+                self.last.apply_to(self.new.session_mut().vars_mut());
+                return Err(wrapped);
             }
         };
         let parse = start.elapsed();
@@ -970,14 +1068,22 @@ impl Router {
         }
         // §4.5: SHOW WARNINGS / SHOW ERRORS go to the engine that ran the previous
         // statement. Go's SHOW WARNINGS keeps the previous statement's warnings (its
-        // `ResetContextOfStmt` copies them), so the previous statement stays the new stack's.
+        // `ResetContextOfStmt` copies them), so the previous statement stays the new stack's
+        // while `ROW_COUNT()` resets to `0` and `FOUND_ROWS()` updates to the warning rows.
         if let Statement::ShowWarnings { errors } = &lowered.stmt
             && self.last.engine == Engine::New
         {
-            return Ok(Response::ResultSet(self.new_stack_warnings(*errors)));
+            let rs = self.new_stack_warnings(*errors);
+            self.last.affected_rows = 0;
+            self.last.found_rows = rs.rows.len() as u64;
+            let vars = self.new.session_mut().vars_mut();
+            self.last.apply_to(vars);
+            vars.stmt_ctx_mut().in_select_stmt = false;
+            return Ok(Response::ResultSet(rs));
         }
         poc.set_prev_stmt(&self.last);
         let result = poc.run(&lowered).await;
+        let globals_loaded = self.globals_loaded;
         let vars = self.new.session_mut().vars_mut();
         match &lowered.stmt {
             // A failing SET keeps the assignments before the failing one (Go's
@@ -991,6 +1097,8 @@ impl Router {
                 sync::sync_set(
                     vars,
                     &mut self.diverged,
+                    &mut self.pending_defaults,
+                    globals_loaded,
                     &assignments[..applied],
                     &poc.values(),
                 )
@@ -998,7 +1106,12 @@ impl Router {
             Statement::Use(_) if result.is_ok() => sync::sync_db(vars, &poc.values()),
             _ => {}
         }
-        self.finish_poc(&result);
+        if matches!(lowered.stmt, Statement::ShowWarnings { .. }) {
+            self.record_poc_stmt(LastStmtInfo::from_poc_show_warnings(&self.last, &result));
+        } else {
+            let is_select = matches!(lowered.stmt, Statement::Select(_));
+            self.finish_poc(&result, is_select);
+        }
         result
     }
 
@@ -1072,7 +1185,14 @@ impl Router {
             Err(reason) => Err(reason),
         };
         let old = match tidb_sql::ir::lower_statement(&stmt, sql) {
-            Ok(lowered) => poc.prepare(stmt_id, lowered).await,
+            Ok(lowered) => {
+                if matches!(lowered.stmt, Statement::Select(_)) {
+                    self.select_stmts.insert(stmt_id);
+                } else {
+                    self.select_stmts.remove(&stmt_id);
+                }
+                poc.prepare(stmt_id, lowered).await
+            }
             Err(e) => {
                 // Go would have started the PREPARE: the PoC's older warnings go.
                 poc.clear_warnings();
@@ -1204,7 +1324,10 @@ impl Router {
         let owner = self.owners.get(&stmt_id).cloned();
         let result = match owner {
             // Unknown here: the PoC reports Go's error for an unknown statement.
-            None => poc.execute(stmt_id, params).await,
+            None => {
+                poc.set_prev_stmt(&self.last);
+                poc.execute(stmt_id, params).await
+            }
             Some(Owner::Poc(reason)) => match reason {
                 Reason::Blocked(block) if self.mode == NewStackMode::Strict => {
                     self.note(NOWHERE, &block);
@@ -1216,15 +1339,18 @@ impl Router {
                 }
                 reason => {
                     self.note(Engine::Poc.label(), reason.label());
+                    poc.set_prev_stmt(&self.last);
                     poc.execute(stmt_id, params).await
                 }
             },
             Some(Owner::Both { new_id, columns }) => {
                 if let Some(c) = self.session_condition(poc) {
                     self.note(Engine::Poc.label(), Reason::Session(c).label());
+                    poc.set_prev_stmt(&self.last);
                     poc.execute(stmt_id, params).await
                 } else if let Err(reason) = self.schema_check(poc) {
                     self.note(Engine::Poc.label(), reason.label());
+                    poc.set_prev_stmt(&self.last);
                     poc.execute(stmt_id, params).await
                 } else {
                     // The statement is started (metrics) only once it is known which engine
@@ -1254,6 +1380,7 @@ impl Router {
                             )));
                         }
                         Err(_) => {
+                            poc.set_prev_stmt(&self.last);
                             let r = poc.execute(stmt_id, params).await;
                             match r {
                                 Ok(resp) => check_columns(&columns, &resp).map(|()| resp),
@@ -1303,7 +1430,8 @@ impl Router {
             }
         };
         self.cursor = false;
-        self.finish_poc(&result);
+        let is_select = self.select_stmts.contains(&stmt_id);
+        self.finish_poc(&result, is_select);
         result
     }
 

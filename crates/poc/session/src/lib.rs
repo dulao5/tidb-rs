@@ -26,6 +26,7 @@ pub mod constant;
 pub mod plan_cache;
 pub mod privilege;
 pub mod router;
+mod show;
 pub mod timing;
 
 use std::cell::Cell;
@@ -111,6 +112,8 @@ pub struct Factory {
     /// on the PoC (step 0, "global variables not loaded"); with `off`, the plan-cache
     /// decision uses the compiled defaults.
     new_globals: Option<Arc<tidb_systable::sysvar_cache::SysVarCache>>,
+    /// Shared snapshot of `mysql.tidb` (`tidb_gc_*`), updated alongside `new_globals`.
+    tidb_table: Option<Arc<parking_lot::RwLock<HashMap<String, String>>>>,
 }
 
 impl Factory {
@@ -120,6 +123,7 @@ impl Factory {
             new_stack: NewStackMode::Off,
             new_store: None,
             new_globals: None,
+            tidb_table: None,
         }
     }
 
@@ -146,6 +150,15 @@ impl Factory {
         cache: Arc<tidb_systable::sysvar_cache::SysVarCache>,
     ) -> Factory {
         self.new_globals = Some(cache);
+        self
+    }
+
+    /// Attach the synced `mysql.tidb` snapshot (`tidb_gc_*`) for both stacks.
+    pub fn with_tidb_table(
+        mut self,
+        tidb_table: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    ) -> Factory {
+        self.tidb_table = Some(tidb_table);
         self
     }
 
@@ -252,6 +265,7 @@ impl SessionFactory for Factory {
                 )])
                 .collect(),
             globals: self.new_globals.clone(),
+            tidb_table: self.tidb_table.clone(),
             default_vars_loaded: false,
             timer: Timer::default(),
             mdl: None,
@@ -266,7 +280,7 @@ impl SessionFactory for Factory {
                 .sync
                 .as_ref()
                 .and_then(|s| s.ported_domain().cloned());
-            let mut new = Box::new(router::newstack::NewSession::new(
+            let mut new = Box::new(router::newstack::NewSession::with_globals(
                 domain,
                 self.new_store.clone(),
                 self.shared.kv.exec_pool(),
@@ -275,6 +289,7 @@ impl SessionFactory for Factory {
                 self.new_globals
                     .clone()
                     .unwrap_or_else(|| Arc::new(tidb_systable::sysvar_cache::SysVarCache::new())),
+                self.tidb_table.clone(),
             ));
             if let Some(pm) = privilege_manager {
                 let ns = router::NewStack::session_mut(&mut *new);
@@ -345,6 +360,8 @@ pub struct Session {
     /// The sysvar cache `default_vars` takes the cluster's global values from (the
     /// factory's; D06.5 spec §8).
     globals: Option<Arc<tidb_systable::sysvar_cache::SysVarCache>>,
+    /// Shared snapshot of `mysql.tidb` (`tidb_gc_*`), updated alongside `globals`.
+    tidb_table: Option<Arc<parking_lot::RwLock<HashMap<String, String>>>>,
     /// `default_vars` holds the cluster's global values (not the compiled defaults).
     default_vars_loaded: bool,
     /// Phase timing (`timing`), off by default.
@@ -378,6 +395,7 @@ struct StmtMetrics {
     /// A statement got past parsing; cleared once recorded.
     active: bool,
     stmt_type: Option<StmtType>,
+    show_warnings: bool,
     parse: Duration,
     /// Planning time (a `Cell`: `plan` takes `&self`).
     compile: Cell<Duration>,
@@ -429,7 +447,7 @@ pub(crate) fn stmt_type(stmt: &Statement) -> StmtType {
         Statement::Begin => StmtType::Begin,
         Statement::Commit => StmtType::Commit,
         Statement::Rollback => StmtType::Rollback,
-        Statement::ShowWarnings { .. } => StmtType::Show,
+        Statement::ShowWarnings { .. } | Statement::ShowVariables { .. } => StmtType::Show,
     }
 }
 
@@ -519,48 +537,12 @@ fn txn_fence(stmt: &Statement) -> Option<SqlError> {
 }
 
 /// `SET autocommit = value`, after Go's validation turned the value into `ON` / `OFF`
-/// ([`validated_session_value`]): on is accepted, off is the explicit-transaction fence
-/// (1235).
+/// (`check_set`): on is accepted, off is the explicit-transaction fence (1235).
 fn autocommit_fence(normalized: &str) -> Result<(), SqlError> {
     if normalized == tidb_sessionctx::variable::Off {
         return Err(not_in_txn("autocommit=0"));
     }
     Ok(())
-}
-
-/// `SET name = value` of a session variable as Go's `SessionVars.SetSystemVar` checks it before
-/// storing it: `SysVar.Validate` with the session scope (the ported sysvar layer, D05.1), on
-/// the text Go's `SetExecutor.getVarValue` makes of the value ([`router::sync::value_text`]).
-/// Returns the normalized value (`ON` / `OFF` for a boolean, the formatted `sql_mode`, ...),
-/// or the validation error as Go's `writeError` sends it: for example `SET autocommit = 'abc'`
-/// is `1231 (42000) Variable 'autocommit' can't be set to the value of 'abc'`, and
-/// `SET sql_mode = 'NOSUCHMODE'` is `1105 (HY000)` with the text of the parser's
-/// `ErrWrongValueForVar` (`mysql.NewErr` is not a TiDB error). `None` when the prototype
-/// cannot make the text (an expression other than a negated literal).
-///
-/// The SET executor (`SetExecutor.setSysVariable`) is D12.12 and not ported: the prototype
-/// runs SET, so the validation runs here, against `vars`: the prototype's session variables
-/// (`Session::default_session`), over the cluster's global values (the loader's sysvar
-/// cache, D06.5 spec §8), or the compiled defaults while the cache is not built yet.
-/// Validations that read another variable (`tidb_skip_isolation_level_check` for
-/// `transaction_isolation`, `tidb_enable_noop_functions` for `transaction_read_only`) read
-/// the cluster's value, as Go's session does; the prototype accepts no session SET of those
-/// switches, so the session value is the global one. Warnings a validation appends (a
-/// truncated number) stay in `vars`'s statement context, where [`run_set`] takes them for
-/// the statement's warnings, as Go's `StmtCtx` keeps them.
-// glue: the validation step of SetExecutor.setSysVariable → SessionVars.SetSystemVar (D12.12) on the prototype's SET
-fn validated_session_value(
-    vars: &mut tidb_sessionctx::variable::session::SessionVars,
-    sys_var: &tidb_sessionctx::variable::SysVar,
-    value: &SetValue,
-) -> Result<Option<String>, SqlError> {
-    let Some(text) = router::sync::value_text(vars, sys_var.name, value) else {
-        return Ok(None);
-    };
-    let (normalized, validated) =
-        sys_var.validate(vars, &text, tidb_sessionctx::variable::ScopeSession);
-    validated.map_err(|e| router::sql_error(&e))?;
-    Ok(Some(normalized))
 }
 
 /// Go's `SetExecutor.setCharset(cs, co, isSetName)` (`set.go:257`) for `SET NAMES` and
@@ -627,9 +609,10 @@ fn prototype_charset(cs: &str) -> bool {
 }
 
 /// Session variables the prototype accepts in a session `SET` and keeps in its session
-/// variables (so `@@name` reads them back) without anything else to do: they cannot change the
-/// results of anything this node runs. The router syncs them into the new session
-/// ([`router::sync::SYNCED_SYSVARS`]), which applies them with Go's semantics.
+/// variables (so `@@name` reads them back) without anything else to do: they are provably
+/// result-neutral for anything this node executes on the PoC path, and the router syncs them
+/// into the new session ([`router::sync::SYNCED_SYSVARS`]), which applies them with Go's
+/// semantics.
 const IGNORED_SYSVARS: &[&str] = &[
     "wait_timeout",
     "interactive_timeout",
@@ -641,17 +624,17 @@ const IGNORED_SYSVARS: &[&str] = &[
     "tx_read_only",
     "time_zone",
     "max_execution_time",
-    // Connect-time SETs of drivers and pools (#505). Only DML and DDL read these, and this
-    // node runs neither (they are delegated to Go TiDB).
+    // Connect-time SETs of drivers and pools (#505). Only DML/DDL or unported functions read these.
     "sql_safe_updates",
     "foreign_key_checks",
     "unique_checks",
-    // The lock wait of pessimistic locking reads, which this node does not run (FOR UPDATE
-    // is rejected).
     "innodb_lock_wait_timeout",
-    // Only GROUP_CONCAT reads it: the prototype has no GROUP_CONCAT, and the new stack reads
-    // the synced value.
     "group_concat_max_len",
+    // Safe/validated switches explicitly allowed on PoC and synced into the new session (#541).
+    "div_precision_increment",
+    "tidb_enable_noop_functions",
+    "tidb_skip_isolation_level_check",
+    "tidb_enable_prepared_plan_cache",
 ];
 
 /// `sql_select_limit`'s default (`math.MaxUint64`): no limit, the only value the prototype
@@ -659,10 +642,23 @@ const IGNORED_SYSVARS: &[&str] = &[
 const NO_SELECT_LIMIT: &str = "18446744073709551615";
 
 impl Session {
+    /// Syncs the prototype's live connection fields (`connection_id`, `current_db`,
+    /// `prev_stmt`) onto `default_session`'s `SessionVars` before reading system variables.
+    fn sync_poc_context_to_default_vars(&mut self) -> Result<(), SqlError> {
+        let connection_id = self.connection_id;
+        let current_db = self.current_db.clone().unwrap_or_default();
+        let prev_stmt = self.prev_stmt.clone();
+        let vars = self.default_session()?.vars_mut();
+        vars.connection_id = connection_id;
+        vars.current_db = current_db;
+        prev_stmt.apply_to(vars);
+        Ok(())
+    }
+
     /// A SELECT without FROM ([`constant`]), over the prototype's session variables; the
     /// warnings it appends go to the statement's.
     fn const_select(&mut self, sel: &Select, params: &[Literal]) -> Result<ResultSet, SqlError> {
-        self.default_session()?;
+        self.sync_poc_context_to_default_vars()?;
         let vars = self
             .default_vars
             .as_deref_mut()
@@ -679,13 +675,46 @@ impl Session {
             } else {
                 "DISABLED"
             },
-            autocommit: true,
-            last_plan_from_cache: self.prev_stmt.plan_from_cache,
-            last_plan_from_binding: self.prev_stmt.plan_from_binding,
             vars,
             warnings: &mut self.warnings,
         };
         env.select(sel, params)
+    }
+
+    /// `SHOW [GLOBAL|SESSION] VARIABLES [LIKE ... | WHERE ...]` over live `SessionVars` and
+    /// cluster globals.
+    fn show_variables_stmt(
+        &mut self,
+        global: bool,
+        like: Option<&tidb_sql::ir::ShowExpr>,
+        where_: Option<&tidb_sql::ir::ShowExpr>,
+        params: &[Literal],
+    ) -> Result<ResultSet, SqlError> {
+        self.sync_poc_context_to_default_vars()?;
+        let vars = self
+            .default_vars
+            .as_deref_mut()
+            .expect("made by default_session")
+            .vars_mut();
+        let have_ssl = if self.shared.tls_enabled {
+            "YES"
+        } else {
+            "DISABLED"
+        };
+        let mut rs = show::show_variables(
+            vars,
+            global,
+            like,
+            where_,
+            params,
+            &self.shared.server_version,
+            have_ssl,
+            &mut self.warnings,
+        )?;
+        for c in &mut rs.columns {
+            apply_result_charset(c, self.results_charset.as_deref());
+        }
+        Ok(rs)
     }
 
     /// Whether statements may currently run in synced mode (no early TSO is requested then).
@@ -732,6 +761,7 @@ impl Session {
         ts: Option<TsFuture>,
     ) -> Result<Response, SqlError> {
         let mut r = self.run_stmt(lowered, params, ts).await;
+        self.stmt.show_warnings = matches!(lowered.stmt, Statement::ShowWarnings { .. });
         let n = u16::try_from(self.warnings.len()).unwrap_or(u16::MAX);
         match &mut r {
             Ok(Response::ResultSet(rs)) => rs.warnings = n,
@@ -774,6 +804,13 @@ impl Session {
                 &self.warnings,
                 *errors,
             ))),
+            Statement::ShowVariables {
+                global,
+                like,
+                where_,
+            } => self
+                .show_variables_stmt(*global, like.as_ref(), where_.as_ref(), params)
+                .map(Response::ResultSet),
         }
     }
 
@@ -1036,7 +1073,11 @@ fn record_session_values(
     from_default: bool,
 ) {
     for (name, value) in written {
-        values.retain(|(n, _)| *n != name);
+        if let Some(sv) = tidb_sessionctx::variable::get_sys_var(&name) {
+            values.retain(|(n, _)| n != sv.name && !sv.aliases.contains(&n.as_str()));
+        } else {
+            values.retain(|(n, _)| *n != name);
+        }
         values.push((name, (!from_default).then_some(value)));
     }
 }
@@ -1148,7 +1189,7 @@ fn write_vars(
 
 /// The checks of one `SET` assignment on the prototype, in Go's order, before anything is
 /// written: the change to make, or the assignment's error. `vars` is the prototype's session
-/// the values are validated against ([`validated_session_value`]).
+/// the values are validated against (`sys_var.validate`).
 fn check_set(
     vars: &mut tidb_sessionctx::variable::session::SessionVars,
     a: &SetAssignment,
@@ -1198,18 +1239,53 @@ fn check_set(
                         .gen_with_stack_by_args(tidb_base::go_args![name.to_owned()]),
                 ));
             };
-            if *global {
+            let mut is_global = *global;
+            let mut legacy_instance_warning = false;
+            if sys_var.has_instance_scope() && !is_global && vars.enable_legacy_instance_scope {
+                is_global = true;
+                legacy_instance_warning = true;
+            }
+            let scope = if is_global {
+                tidb_sessionctx::variable::ScopeGlobal
+            } else {
+                tidb_sessionctx::variable::ScopeSession
+            };
+            // Go `SetExecutor.setSysVariable` evaluates `getVarValue` (`set.go:151,188`) before
+            // `SetGlobalSysVar` / `SetSystemVar` validates scope, type, and value hooks.
+            let text = if is_global || (*value == SetValue::Default && sys_var.has_none_scope()) {
+                match value {
+                    SetValue::Default => Some(sys_var.value.clone()),
+                    _ => router::sync::value_text(vars, sys_var.name, value),
+                }
+            } else if *value == SetValue::Default {
+                match router::sync::value_text(vars, sys_var.name, value) {
+                    Some(v) => Some(v),
+                    None => {
+                        sys_var
+                            .validate_scope(scope)
+                            .map_err(|e| router::sql_error(&e))?;
+                        None
+                    }
+                }
+            } else {
+                router::sync::value_text(vars, sys_var.name, value)
+            };
+            let Some(text) = text else {
+                // Non-literal expressions on `SET` cannot yet be evaluated by the prototype.
+                return Err(SqlError::not_supported("this SET value"));
+            };
+            let (normalized, validated) = sys_var.validate(vars, &text, scope);
+            validated.map_err(|e| router::sql_error(&e))?;
+            if is_global {
+                if legacy_instance_warning {
+                    vars.stmt_ctx().append_warning(
+                        tidb_base::dbterror::exeerrors::ErrInstanceScope
+                            .fast_gen_by_args(tidb_base::go_args![sys_var.name.to_owned()]),
+                    );
+                }
                 return Err(SqlError::not_supported("SET GLOBAL"));
             }
-            if !router::sync::is_synced(name) {
-                return Err(SqlError::not_supported(format!(
-                    "setting system variable '{name}'"
-                )));
-            }
-            if sys_var.is_noop
-                && !tidb_sessionctx::variable::tidb_vars::EnableNoopVariables
-                    .load(std::sync::atomic::Ordering::SeqCst)
-            {
+            if sys_var.is_noop && !vars.is_noop_variables_enabled() {
                 // The variable is a noop. For compatibility we allow it to still
                 // be changed, but we append a warning since users might be expecting
                 // something that's not going to happen.
@@ -1218,21 +1294,17 @@ fn check_set(
                         .fast_gen_by_args(tidb_base::go_args![sys_var.name.to_owned()]),
                 );
             }
-            // Go validates the value before anything uses it (`SetSystemVar`).
-            let Some(normalized) = validated_session_value(vars, &sys_var, value)? else {
-                // Not supported until the rewriter's part 2 (D09.2) ports `rewriteSystemVariable`
-                // (`CONCAT(@@sql_mode, ...)`; maintainer decision on #505). A known difference of
-                // the prototype (ADR 0004).
-                return Err(SqlError::not_supported("this SET value"));
-            };
             let mut change = SetChange::default();
-            match name.as_str() {
+            match sys_var.name {
                 "autocommit" => autocommit_fence(&normalized)?,
                 // NULL is the empty value (`getVarValue`): columns keep their charset.
                 "character_set_results" => {
                     change.results = Some((!normalized.is_empty()).then(|| normalized.clone()));
                 }
-                "character_set_client" | "character_set_connection" | "collation_connection" => {}
+                "character_set_client"
+                | "character_set_connection"
+                | "collation_connection"
+                | "tidb_enable_window_function" => {}
                 // The validated value is upper case (`FormatSQLModeStr`).
                 "sql_mode" if normalized.contains("PAD_CHAR_TO_FULL_LENGTH") => {
                     return Err(SqlError::not_supported(
@@ -1321,7 +1393,23 @@ impl SessionHandler for Session {
         let r = match self.router.take() {
             None => {
                 router::trace::record(self.connection_id, "poc", "new_stack_off");
-                self.query_inner(sql).await
+                let r = self.query_inner(sql).await;
+                self.prev_stmt = match &r {
+                    Err(e)
+                        if self.stmt.stmt_type.is_none()
+                            && matches!(e.code, 1064 | 1115 | 1273) =>
+                    {
+                        router::LastStmtInfo::from_parse_error(&self.prev_stmt, true)
+                    }
+                    _ if self.stmt.show_warnings => {
+                        router::LastStmtInfo::from_poc_show_warnings(&self.prev_stmt, &r)
+                    }
+                    _ => {
+                        let is_select = self.stmt.stmt_type == Some(StmtType::Select);
+                        router::LastStmtInfo::from_poc_stmt(&self.prev_stmt, &r, is_select)
+                    }
+                };
+                r
             }
             Some(mut router) => {
                 let r = router.query(self, sql).await;
@@ -1335,6 +1423,7 @@ impl SessionHandler for Session {
 
     async fn prepare(&mut self, stmt_id: u32, sql: &str) -> Result<PreparedInfo, SqlError> {
         self.stmt.stmt_type = None;
+        self.stmt.show_warnings = false;
         match self.router.take() {
             None => self.prepare_inner(stmt_id, sql).await,
             Some(mut router) => {
@@ -1349,7 +1438,14 @@ impl SessionHandler for Session {
         let r = match self.router.take() {
             None => {
                 router::trace::record(self.connection_id, "poc", "new_stack_off");
-                self.execute_inner(stmt_id, params).await
+                let r = self.execute_inner(stmt_id, params).await;
+                self.prev_stmt = if self.stmt.show_warnings {
+                    router::LastStmtInfo::from_poc_show_warnings(&self.prev_stmt, &r)
+                } else {
+                    let is_select = self.stmt.stmt_type == Some(StmtType::Select);
+                    router::LastStmtInfo::from_poc_stmt(&self.prev_stmt, &r, is_select)
+                };
+                r
             }
             Some(mut router) => {
                 let r = router.execute(self, stmt_id, params).await;
@@ -1481,20 +1577,27 @@ impl Session {
         self.timer.begin();
         self.mdl = None;
         self.stmt.stmt_type = None;
+        self.stmt.show_warnings = false;
         let opts = self.parse_options()?;
         let start = Instant::now();
         let lowered = match tidb_sql::parse_and_lower_with(sql, &opts) {
             Ok(l) => l,
             Err(e) => {
-                if e.code == tidb_base::errno::ErrParse {
-                    // Go fails before `ResetContextOfStmt`: the warnings stay.
-                    return Err(router::log_and_wrap_parse_error(
+                if matches!(e.code, 1064 | 1115 | 1273) {
+                    // Go fails before `ResetContextOfStmt`: the warnings stay and the parse error
+                    // is appended to the previous statement context.
+                    let wrapped = router::log_and_wrap_parse_error(
                         self.connection_id,
                         "",
                         tidb_base::errors::redact_log_enabled_load(),
                         sql,
                         e,
-                    ));
+                    );
+                    self.warnings.push(SQLWarn {
+                        level: tidb_base::contextutil::WarnLevelError.into(),
+                        err: router::parse_error_warn(&wrapped),
+                    });
+                    return Err(wrapped);
                 }
                 // A statement the prototype does not lower: Go would have started it.
                 self.warnings.clear();
@@ -1504,6 +1607,7 @@ impl Session {
         let parse = start.elapsed();
         tidb_metrics::parse_duration(parse);
         self.stmt.start(stmt_type(&lowered.stmt), parse);
+        self.stmt.show_warnings = matches!(lowered.stmt, Statement::ShowWarnings { .. });
         self.timer.mark(Phase::Parse);
         self.reset_warnings(&lowered.stmt);
         if lowered.param_count > 0 {
@@ -1585,7 +1689,8 @@ impl Session {
         if self.default_vars.is_none() {
             self.default_vars_loaded = built;
             let globals = match &self.globals {
-                Some(cache) if built => router::newstack::ClusterGlobals::new(Arc::clone(cache)),
+                Some(cache) if built => router::newstack::ClusterGlobals::new(Arc::clone(cache))
+                    .with_tidb_table_opt(self.tidb_table.clone()),
                 _ => {
                     static WARNED: std::sync::Once = std::sync::Once::new();
                     WARNED.call_once(|| {
@@ -1594,6 +1699,7 @@ impl Session {
                         );
                     });
                     router::newstack::ClusterGlobals::compiled_defaults()
+                        .with_tidb_table_opt(self.tidb_table.clone())
                 }
             };
             let s = build_default_session(globals, &self.session_values)?;
@@ -1612,8 +1718,8 @@ impl Session {
             SqlError::new(1390, "Prepared statement contains too many placeholders")
         })?;
         let mut columns = Vec::new();
-        if let Statement::Select(sel) = &lowered.stmt {
-            if sel.from.is_some() {
+        match &lowered.stmt {
+            Statement::Select(sel) if sel.from.is_some() => {
                 // Resolve names now, like Go's prepare: preprocess missing-table R31 check,
                 // then plan build (unknown tables/columns & semantic checks), then privilege check.
                 let is = self.name_schema().await?;
@@ -1652,9 +1758,21 @@ impl Session {
                 for c in &mut columns {
                     apply_result_charset(c, self.results_charset.as_deref());
                 }
-            } else if param_count == 0 {
-                columns = self.const_select(sel, &[])?.columns;
             }
+            Statement::Select(sel) if param_count == 0 => {
+                columns = self.const_select(sel, &[])?.columns;
+                for c in &mut columns {
+                    apply_result_charset(c, self.results_charset.as_deref());
+                }
+            }
+            Statement::ShowVariables { like, where_, .. } => {
+                show::validate_show_filters(like.as_ref(), where_.as_ref())?;
+                columns = show::show_variables_columns().to_vec();
+                for c in &mut columns {
+                    apply_result_charset(c, self.results_charset.as_deref());
+                }
+            }
+            _ => {}
         }
         self.stmts.insert(
             stmt_id,
@@ -1676,6 +1794,7 @@ impl Session {
         params: Vec<Param>,
     ) -> Result<Response, SqlError> {
         self.stmt.stmt_type = None;
+        self.stmt.show_warnings = false;
         let (lowered, reason) = self
             .stmts
             .get(&stmt_id)
@@ -1755,6 +1874,8 @@ impl router::PocEngine for Session {
         self.timer.begin();
         self.mdl = None;
         self.stmt.stmt_type = None;
+        self.stmt.show_warnings = false;
+        self.stmt.show_warnings = false;
     }
 
     fn start_statement(&mut self, kind: StmtType, parse: Duration) {
@@ -1802,6 +1923,10 @@ impl router::PocEngine for Session {
 
     fn set_prev_stmt(&mut self, last: &router::LastStmtInfo) {
         self.prev_stmt = last.clone();
+    }
+
+    fn append_error_warning(&mut self, warn: SQLWarn) {
+        self.warnings.push(warn);
     }
 }
 
@@ -2493,9 +2618,6 @@ mod fence_tests {
                         current_user: "root@%",
                         connection_id: 1,
                         have_ssl: "NO",
-                        autocommit: true,
-                        last_plan_from_cache: false,
-                        last_plan_from_binding: false,
                         vars: session.vars_mut(),
                         warnings: &mut warnings,
                     }
@@ -2558,6 +2680,364 @@ mod fence_tests {
         ] {
             assert_eq!(vars.get_system_var(name).0, want, "{name}");
         }
+    }
+
+    /// #541: allowed session variables (`div_precision_increment`, `group_concat_max_len`,
+    /// `max_execution_time`, `tidb_enable_noop_functions`, `tidb_skip_isolation_level_check`,
+    /// `tidb_enable_prepared_plan_cache`, `tidb_enable_window_function`, `transaction_isolation`,
+    /// `tx_isolation`, ...) work in session `SET` and `SET ... = DEFAULT`; scope/unknown/type
+    /// errors match Go before any 1235 fence; result-affecting unported variables stay rejected
+    /// with 1235 so they are never silently ignored on the PoC path.
+    #[test]
+    fn issue_541_variables_and_scope_errors() {
+        let mut session = validation_session(&[
+            ("div_precision_increment", "7"),
+            ("group_concat_max_len", "8192"),
+            ("max_execution_time", "5000"),
+            ("sql_mode", "STRICT_TRANS_TABLES"),
+            ("time_zone", "+02:00"),
+            ("tidb_enable_noop_functions", "OFF"),
+            ("tidb_skip_isolation_level_check", "OFF"),
+            ("tidb_enable_prepared_plan_cache", "ON"),
+            ("tidb_enable_window_function", "ON"),
+        ]);
+        // Session SET + dependent validation switches + alias sync.
+        let Statement::Set(a) = tidb_sql::parse_and_lower(
+            "SET div_precision_increment = 9, group_concat_max_len = 4096, \
+             max_execution_time = 2500, tidb_enable_noop_functions = ON, \
+             transaction_read_only = 1, tidb_skip_isolation_level_check = ON, \
+             tx_isolation = 'SERIALIZABLE', tidb_enable_prepared_plan_cache = OFF, \
+             tidb_enable_window_function = OFF, sql_mode = 'ANSI', time_zone = '+08:00'",
+        )
+        .unwrap()
+        .stmt
+        else {
+            unreachable!()
+        };
+        run_set(session.vars_mut(), &a, |_| {}).1.unwrap();
+        assert!(!session.vars().enable_window_function);
+        for (name, want) in [
+            ("div_precision_increment", "9"),
+            ("group_concat_max_len", "4096"),
+            ("max_execution_time", "2500"),
+            ("tidb_enable_noop_functions", "ON"),
+            ("transaction_read_only", "ON"),
+            ("tx_read_only", "ON"),
+            ("tidb_skip_isolation_level_check", "ON"),
+            ("transaction_isolation", "SERIALIZABLE"),
+            ("tx_isolation", "SERIALIZABLE"),
+            ("tidb_enable_prepared_plan_cache", "OFF"),
+            ("tidb_enable_window_function", "OFF"),
+            ("time_zone", "+08:00"),
+        ] {
+            assert_eq!(session.vars_mut().get_system_var(name).0, want, "{name}");
+        }
+        // SET DEFAULT returns to cluster global values.
+        let Statement::Set(def) = tidb_sql::parse_and_lower(
+            "SET div_precision_increment = DEFAULT, group_concat_max_len = DEFAULT, \
+             max_execution_time = DEFAULT, tidb_enable_prepared_plan_cache = DEFAULT, \
+             tidb_enable_window_function = DEFAULT, sql_mode = DEFAULT, time_zone = DEFAULT",
+        )
+        .unwrap()
+        .stmt
+        else {
+            unreachable!()
+        };
+        run_set(session.vars_mut(), &def, |_| {}).1.unwrap();
+        assert!(session.vars().enable_window_function);
+        for (name, want) in [
+            ("div_precision_increment", "7"),
+            ("group_concat_max_len", "8192"),
+            ("max_execution_time", "5000"),
+            ("tidb_enable_prepared_plan_cache", "ON"),
+            ("tidb_enable_window_function", "ON"),
+            ("sql_mode", "STRICT_TRANS_TABLES"),
+            ("time_zone", "+02:00"),
+        ] {
+            assert_eq!(session.vars_mut().get_system_var(name).0, want, "{name}");
+        }
+
+        // Alias default removal: `SET tx_isolation = DEFAULT; SET transaction_isolation = ...`
+        // keeps only the later override in `session_values`.
+        let mut values: Vec<SessionValue> = Vec::new();
+        let mut alias_sess = validation_session(&[]);
+        let Statement::Set(alias_set) = tidb_sql::parse_and_lower(
+            "SET tx_isolation = DEFAULT, transaction_isolation = 'READ-COMMITTED'",
+        )
+        .unwrap()
+        .stmt
+        else {
+            unreachable!()
+        };
+        run_set(alias_sess.vars_mut(), &alias_set, |c| {
+            record_session_values(&mut values, c.values, c.from_default);
+        })
+        .1
+        .unwrap();
+        assert_eq!(
+            values,
+            vec![(
+                "transaction_isolation".to_owned(),
+                Some("READ-COMMITTED".to_owned())
+            )]
+        );
+
+        // Scope, value-evaluation-order, and unknown variable errors match Go (code, SQLSTATE, message).
+        for (sql, want) in [
+            (
+                "SET port = 4001",
+                (1238, "HY000", "Variable 'port' is a read only variable"),
+            ),
+            (
+                "SET GLOBAL port = 4001",
+                (1238, "HY000", "Variable 'port' is a read only variable"),
+            ),
+            (
+                "SET port = 'bad'",
+                (1238, "HY000", "Variable 'port' is a read only variable"),
+            ),
+            (
+                "SET port = 1 + 1",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'this SET value'",
+                ),
+            ),
+            (
+                "SET GLOBAL version_comment = 'x'",
+                (
+                    1238,
+                    "HY000",
+                    "Variable 'version_comment' is a read only variable",
+                ),
+            ),
+            (
+                "SET tidb_gc_life_time = '20m'",
+                (
+                    1229,
+                    "HY000",
+                    "Variable 'tidb_gc_life_time' is a GLOBAL variable and should be set with SET GLOBAL",
+                ),
+            ),
+            (
+                "SET tidb_gc_life_time = DEFAULT",
+                (
+                    1229,
+                    "HY000",
+                    "Variable 'tidb_gc_life_time' is a GLOBAL variable and should be set with SET GLOBAL",
+                ),
+            ),
+            (
+                "SET GLOBAL timestamp = 1",
+                (
+                    1228,
+                    "HY000",
+                    "Variable 'timestamp' is a SESSION variable and can't be used with SET GLOBAL",
+                ),
+            ),
+            (
+                "SET GLOBAL max_execution_time = 'bad'",
+                (
+                    1232,
+                    "42000",
+                    "Incorrect argument type to variable 'max_execution_time'",
+                ),
+            ),
+            (
+                "SET tidb_general_log = 'bad'",
+                (
+                    1231,
+                    "42000",
+                    "Variable 'tidb_general_log' can't be set to the value of 'bad'",
+                ),
+            ),
+            (
+                "SET GLOBAL max_execution_time = 1",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'SET GLOBAL'",
+                ),
+            ),
+            (
+                "SET tidb_general_log = 1",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'SET GLOBAL'",
+                ),
+            ),
+            (
+                "SET nosuch = 1",
+                (1193, "HY000", "Unknown system variable 'nosuch'"),
+            ),
+        ] {
+            assert_eq!(
+                err(sql),
+                (want.0, want.1.to_owned(), want.2.to_owned()),
+                "{sql}"
+            );
+        }
+
+        // Unlisted / result-affecting variables are NEVER silently accepted on the PoC path.
+        for (sql, want) in [
+            (
+                "SET tidb_isolation_read_engines = 'tikv'",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_isolation_read_engines''",
+                ),
+            ),
+            (
+                "SET tidb_enable_ordered_result_mode = ON",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_enable_ordered_result_mode''",
+                ),
+            ),
+            (
+                "SET tidb_enable_external_ts_read = ON",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_enable_external_ts_read''",
+                ),
+            ),
+            (
+                "SET tidb_low_resolution_tso = ON",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_low_resolution_tso''",
+                ),
+            ),
+            (
+                "SET tidb_mem_quota_query = 1048576",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_mem_quota_query''",
+                ),
+            ),
+            (
+                "SET tidb_mem_oom_action = 'CANCEL'",
+                (
+                    1229,
+                    "HY000",
+                    "Variable 'tidb_mem_oom_action' is a GLOBAL variable and should be set with SET GLOBAL",
+                ),
+            ),
+            (
+                "SET GLOBAL tidb_mem_oom_action = 'CANCEL'",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'SET GLOBAL'",
+                ),
+            ),
+            (
+                "SET tidb_enforce_mpp = OFF",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tidb_enforce_mpp''",
+                ),
+            ),
+            (
+                "SET tidb_kv_read_timeout = 10",
+                (
+                    1193,
+                    "HY000",
+                    "Unknown system variable 'tidb_kv_read_timeout'",
+                ),
+            ),
+            (
+                "SET tx_isolation_one_shot = 'READ-COMMITTED'",
+                (
+                    1235,
+                    "42000",
+                    "This version of TiDB doesn't yet support 'setting system variable 'tx_isolation_one_shot''",
+                ),
+            ),
+        ] {
+            assert_eq!(
+                err(sql),
+                (want.0, want.1.to_owned(), want.2.to_owned()),
+                "{sql}"
+            );
+        }
+
+        // Fenced session variables stay rejected with 1235.
+        for var in router::sync::FENCED_SYSVARS {
+            let sql = match *var {
+                "tidb_snapshot" => "SET tidb_snapshot = '2020-01-01 00:00:00'".to_owned(),
+                "tidb_read_staleness" => "SET tidb_read_staleness = '-5'".to_owned(),
+                "tx_read_ts" => "SET tx_read_ts = '1'".to_owned(),
+                "tidb_txn_mode" => "SET tidb_txn_mode = 'optimistic'".to_owned(),
+                "tidb_replica_read" => "SET tidb_replica_read = 'follower'".to_owned(),
+                "tidb_read_consistency" => "SET tidb_read_consistency = 'weak'".to_owned(),
+                "tidb_rc_read_check_ts" => "SET tidb_rc_read_check_ts = ON".to_owned(),
+                other => format!("SET {other} = DEFAULT"),
+            };
+            assert_eq!(err(&sql).0, 1235, "{sql}");
+        }
+    }
+
+    /// `tidb_gc_life_time` reads through `ClusterGlobals::get_tidb_table_value` (`mysql.tidb`).
+    #[test]
+    fn tidb_table_vars_and_charset_results_null() {
+        let tidb_map: HashMap<String, String> =
+            [("tikv_gc_life_time".to_owned(), "24h0m0s".to_owned())]
+                .into_iter()
+                .collect();
+        let tidb_table = Arc::new(parking_lot::RwLock::new(tidb_map));
+        let globals = cluster_globals(&[]).with_tidb_table(tidb_table);
+        let mut s = build_default_session(globals, &[]).unwrap();
+        let Statement::Set(a) =
+            tidb_sql::parse_and_lower("SET NAMES latin1, character_set_results = NULL")
+                .unwrap()
+                .stmt
+        else {
+            unreachable!()
+        };
+        let mut results_cs = Some("utf8mb4".to_owned());
+        run_set(s.vars_mut(), &a, |c| {
+            if let Some(r) = c.results {
+                results_cs = r;
+            }
+        })
+        .1
+        .unwrap();
+        assert_eq!(results_cs, None);
+
+        let Statement::Select(sel) =
+            tidb_sql::parse_and_lower("SELECT @@version_comment, @@global.tidb_gc_life_time")
+                .unwrap()
+                .stmt
+        else {
+            unreachable!()
+        };
+        let mut warnings = Vec::new();
+        let mut rs = constant::ConstEnv {
+            server_version: "8.0.11-TiDB-tidb-rs",
+            current_db: None,
+            user: "root@127.0.0.1",
+            current_user: "root@%",
+            connection_id: 1,
+            have_ssl: "DISABLED",
+            vars: s.vars_mut(),
+            warnings: &mut warnings,
+        }
+        .select(&sel, &[])
+        .unwrap();
+        for c in &mut rs.columns {
+            apply_result_charset(c, results_cs.as_deref());
+        }
+        assert_eq!(rs.columns[0].charset, 47);
+        assert_eq!(rs.rows[0][1], Value::from("24h0m0s"));
     }
 
     /// `--new-stack=off` parses queries and prepares with the session's `sql_mode` (both after
@@ -2652,9 +3132,6 @@ mod fence_tests {
                     current_user: "root@%",
                     connection_id: 1,
                     have_ssl: "NO",
-                    autocommit: true,
-                    last_plan_from_cache: false,
-                    last_plan_from_binding: false,
                     vars: sess.vars_mut(),
                     warnings: &mut warnings,
                 }
@@ -2689,5 +3166,180 @@ mod fence_tests {
         let stmt4 = tidb_sql::parse_and_lower_with(r#"SELECT "abc""#, &opts(&s)).unwrap();
         let err = eval_const_select(&mut s, &stmt4).unwrap_err();
         assert_eq!(err.code, 1054, "{}", err.message);
+    }
+
+    /// Walks every registered system variable with a `GetGlobal` hook and verifies that
+    /// `ClusterGlobals` (which rebuilds `SysVarCache` without running `SetGlobal` hooks, #539)
+    /// returns the cluster value from `SysVarCache` for all `ScopeGlobal` (`!skip_sysvar_cache`)
+    /// variables instead of unpopulated process-wide atomics, while still applying Go redaction
+    /// (`authentication_ldap_*_bind_root_pwd`, `tidb_cloud_storage_uri`) and keeping `GetGlobal`
+    /// hooks for `skip_sysvar_cache` (`mysql.tidb` GC vars) and `ScopeInstance` variables.
+    #[test]
+    fn get_global_hooks_read_cluster_cache_not_process_state() {
+        use tidb_sessionctx::variable::{ScopeGlobal, get_sys_vars};
+
+        // 1. Default cluster cache (empty `mysql.global_variables`): every `ScopeGlobal`
+        //    variable with a `GetGlobal` hook (!skip_sysvar_cache) must match its validated
+        //    compiled default rather than tidb-rs's unpopulated process atomics.
+        let mut defaults = validation_session(&[]);
+        let mut global_cached_count = 0usize;
+        let mut skip_cache_count = 0usize;
+        let mut instance_count = 0usize;
+
+        for sv in get_sys_vars().filter(|sv| sv.get_global.is_some()) {
+            let got = defaults
+                .vars_mut()
+                .get_global_system_var(sv.name)
+                .unwrap_or_else(|e| panic!("get_global_system_var({}) failed: {e}", sv.name));
+            if sv.has_global_scope() && !sv.skip_sysvar_cache() {
+                global_cached_count += 1;
+                let want = sv.validate_with_relaxed_validation(
+                    defaults.vars_mut(),
+                    &sv.value,
+                    ScopeGlobal,
+                );
+                assert_eq!(
+                    got, want,
+                    "ScopeGlobal var `{}` read process state instead of cached default",
+                    sv.name
+                );
+            } else if sv.skip_sysvar_cache() {
+                skip_cache_count += 1;
+            } else {
+                instance_count += 1;
+            }
+        }
+        assert!(
+            global_cached_count >= 100,
+            "expected >=100 ScopeGlobal GetGlobal vars, saw {global_cached_count}"
+        );
+        assert_eq!(skip_cache_count, 6); // 5 tidb_gc_* + tidb_external_ts
+        assert!(
+            instance_count >= 25,
+            "expected >=25 ScopeInstance GetGlobal vars, saw {instance_count}"
+        );
+
+        // Pin every variable from Maya's Go v8.5.8 live comparison table on default cache.
+        for (name, want) in [
+            ("tidb_enable_resource_control", "ON"),
+            ("tidb_server_memory_limit", "80%"),
+            ("tidb_server_memory_limit_gc_trigger", "0.7"),
+            ("tidb_enable_instance_plan_cache", "ON"), // Ruling R14 (A3 default override)
+            ("tidb_enable_dist_task", "ON"),
+            ("tidb_ddl_enable_fast_reorg", "ON"),
+            ("authentication_ldap_sasl_auth_method_name", "SCRAM-SHA-1"),
+            ("authentication_ldap_sasl_server_port", "389"),
+            ("authentication_ldap_sasl_user_search_attr", "uid"),
+            ("authentication_ldap_sasl_init_pool_size", "10"),
+            ("authentication_ldap_sasl_max_pool_size", "1000"),
+            ("authentication_ldap_simple_server_port", "389"),
+            ("authentication_ldap_simple_user_search_attr", "uid"),
+            ("authentication_ldap_simple_init_pool_size", "10"),
+            ("authentication_ldap_simple_max_pool_size", "1000"),
+        ] {
+            assert_eq!(
+                defaults.vars_mut().get_global_system_var(name).unwrap(),
+                want,
+                "{name}"
+            );
+        }
+
+        // 2. Overridden cluster `mysql.global_variables` rows (never invoking `SetGlobal` hooks):
+        //    must reflect cluster values for `@@global.<var>`, `@@<var>`, `SHOW VARIABLES`,
+        //    and redact passwords/URIs matching Go's `GetGlobal` hooks.
+        let mut cluster = validation_session(&[
+            ("tidb_enable_dist_task", "OFF"),
+            ("tidb_ddl_enable_fast_reorg", "OFF"),
+            ("tidb_enable_instance_plan_cache", "OFF"),
+            ("tidb_enable_resource_control", "OFF"),
+            ("tidb_server_memory_limit", "4GiB"),
+            ("tidb_server_memory_limit_gc_trigger", "0.5"),
+            ("tidb_enable_noop_variables", "OFF"),
+            ("authentication_ldap_sasl_server_port", "636"),
+            ("authentication_ldap_sasl_bind_root_pwd", "top-secret-sasl"),
+            (
+                "authentication_ldap_simple_bind_root_pwd",
+                "top-secret-simple",
+            ),
+            (
+                "tidb_cloud_storage_uri",
+                "s3://bucket/prefix?access-key=AKIAEXAMPLE&secret-access-key=SECRET123",
+            ),
+        ]);
+        for (name, want) in [
+            ("tidb_enable_dist_task", "OFF"),
+            ("tidb_ddl_enable_fast_reorg", "OFF"),
+            ("tidb_enable_instance_plan_cache", "OFF"),
+            ("tidb_enable_resource_control", "OFF"),
+            ("tidb_server_memory_limit", "4GiB"),
+            ("tidb_server_memory_limit_gc_trigger", "0.5"),
+            ("tidb_enable_noop_variables", "OFF"),
+            ("authentication_ldap_sasl_server_port", "636"),
+            ("authentication_ldap_sasl_bind_root_pwd", "******"),
+            ("authentication_ldap_simple_bind_root_pwd", "******"),
+        ] {
+            assert_eq!(
+                cluster.vars_mut().get_global_system_var(name).unwrap(),
+                want,
+                "@@global.{name}"
+            );
+            assert_eq!(
+                cluster
+                    .vars_mut()
+                    .get_session_or_global_system_var(name)
+                    .unwrap(),
+                want,
+                "@@{name}"
+            );
+        }
+        let redacted_uri = cluster
+            .vars_mut()
+            .get_global_system_var("tidb_cloud_storage_uri")
+            .unwrap();
+        assert!(
+            redacted_uri.starts_with("s3://bucket/prefix"),
+            "unexpected redacted uri: {redacted_uri}"
+        );
+        assert!(
+            !redacted_uri.contains("SECRET123"),
+            "cloud storage secret leaked: {redacted_uri}"
+        );
+        assert!(!cluster.vars_mut().is_noop_variables_enabled());
+
+        // `SHOW GLOBAL VARIABLES LIKE 'tidb_server_memory_limit%'` sees the cluster values too.
+        let mut warnings = Vec::new();
+        let rs = show::show_variables(
+            cluster.vars_mut(),
+            true,
+            Some(&tidb_sql::ir::ShowExpr::Literal(Literal::Str(
+                "tidb_server_memory_limit%".into(),
+            ))),
+            None,
+            &[],
+            "8.0.11-TiDB-v8.5.8",
+            "DISABLED",
+            &mut warnings,
+        )
+        .unwrap();
+        let map: HashMap<String, String> = rs
+            .rows
+            .into_iter()
+            .map(|r| match (&r[0], &r[1]) {
+                (Value::Bytes(k), Value::Bytes(v)) => (
+                    String::from_utf8(k.clone()).unwrap(),
+                    String::from_utf8(v.clone()).unwrap(),
+                ),
+                other => panic!("unexpected row {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            map.get("tidb_server_memory_limit").map(String::as_str),
+            Some("4GiB")
+        );
+        assert_eq!(
+            map.get("tidb_server_memory_limit_gc_trigger")
+                .map(String::as_str),
+            Some("0.5")
+        );
     }
 }

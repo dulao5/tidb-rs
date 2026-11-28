@@ -34,6 +34,8 @@ use tidb_planner::core::expression_rewriter::rewrite_ast_expr_with_plan_ctx;
 use tidb_sessionctx::errctx::{self, Level, LevelMap};
 use tidb_sessionctx::exprctx::BuildContextRef;
 use tidb_sessionctx::exprstatic as es;
+use tidb_sessionctx::variable::error::ErrUnknownSystemVar;
+use tidb_sessionctx::variable::session::{GlobalVarAccessor, SessionVars};
 use tidb_types::MyDecimal;
 use tidb_types::collate;
 use tidb_types::context::Flags;
@@ -42,7 +44,7 @@ use tidb_types::datum::{self as dm, Datum};
 /// The records answered by each boundary stub (D09.2 spec §4).
 ///
 /// - D02.2: AST nodes the Rust parser does not model;
-/// - D09.2 (part 2): system variables; D08.9: user variables;
+/// - D08.9: user variables;
 /// - D09.4: GROUPING(); D09.6: subqueries; D09.15: DEFAULT() and VALUES().
 /// - D08.6 / D08.7 / D08.9: built-in function families whose classes are not ported yet
 ///   (LIKE, string functions; time functions; IN, CASE, IF / IFNULL / NULLIF, ROW, ...): the
@@ -52,10 +54,35 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D08.7", 20),
     ("D08.9", 473),
     ("D09.15", 4),
-    ("D09.2", 4),
     ("D09.4", 2),
     ("D09.6", 12),
 ];
+
+struct Acc;
+
+impl GlobalVarAccessor for Acc {
+    fn get_global_sys_var(&self, name: &str) -> Result<String, tidb_base::Error> {
+        tidb_sessionctx::variable::get_sys_var(name)
+            .map(|sv| sv.value.clone())
+            .ok_or_else(|| {
+                ErrUnknownSystemVar.fast_gen_by_args(tidb_base::go_args![name.to_owned()])
+            })
+    }
+    fn set_global_sys_var_only(
+        &mut self,
+        _: &str,
+        _: &str,
+        _: bool,
+    ) -> Result<(), tidb_base::Error> {
+        Ok(())
+    }
+    fn get_tidb_table_value(&self, _: &str) -> Result<String, tidb_base::Error> {
+        Ok(String::new())
+    }
+    fn set_tidb_table_value(&mut self, _: &str, _: &str, _: &str) -> Result<(), tidb_base::Error> {
+        Ok(())
+    }
+}
 
 /// Records that differ from Go only by a Go aliasing effect that is not emulated (D09.2
 /// spec §5 item 3): Go pushes the schema's `*Column` itself for every reference to a column,
@@ -317,9 +344,18 @@ fn run(rec: &Value) -> Outcome {
     let (schema, names) =
         table_info_to_schema_and_names(&ctx_ref, &CIStr::new("test"), &ti).unwrap();
     let names: Vec<Arc<_>> = names.into_iter().map(Arc::new).collect();
+    let mut vars = SessionVars::new(Box::new(Acc));
+    vars.stmt_ctx().set_warn_handler(Arc::clone(&wh) as _);
 
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rewrite_ast_expr_with_plan_ctx(&*ctx_ref, field, Some(&schema), &names, false)
+        rewrite_ast_expr_with_plan_ctx(
+            &*ctx_ref,
+            Some(&mut vars),
+            field,
+            Some(&schema),
+            &names,
+            false,
+        )
     }));
     match res {
         Err(_) => Outcome::Value(json!({"panic": true})),

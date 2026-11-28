@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 use tidb_mysql_protocol::{
@@ -46,6 +46,7 @@ use super::{BoxFut, NewPrepared, NewStack};
 /// variable has its default; D13.1 spec known difference 13).
 pub struct ClusterGlobals {
     cache: Arc<SysVarCache>,
+    tidb_table: Option<Arc<RwLock<HashMap<String, String>>>>,
     /// The session the type validation of a global value runs on (Go validates on the
     /// calling session, which the accessor cannot reach from inside it; made at the first
     /// read, D06.5 spec §8.2).
@@ -57,8 +58,24 @@ impl ClusterGlobals {
     pub fn new(cache: Arc<SysVarCache>) -> ClusterGlobals {
         ClusterGlobals {
             cache,
+            tidb_table: None,
             scratch: Mutex::new(None),
         }
+    }
+
+    /// Attach a shared `mysql.tidb` table snapshot (`tidb_gc_*`).
+    pub fn with_tidb_table(mut self, tidb_table: Arc<RwLock<HashMap<String, String>>>) -> Self {
+        self.tidb_table = Some(tidb_table);
+        self
+    }
+
+    /// Attach an optional shared `mysql.tidb` table snapshot (`tidb_gc_*`).
+    pub(crate) fn with_tidb_table_opt(
+        mut self,
+        tidb_table: Option<Arc<RwLock<HashMap<String, String>>>>,
+    ) -> Self {
+        self.tidb_table = tidb_table;
+        self
     }
 
     /// The accessor over a cache built from an empty `mysql.global_variables`: every variable
@@ -123,9 +140,10 @@ impl GlobalVarAccessor for ClusterGlobals {
         // validation. If validation fails, we should return the default value.
         let mut scratch = self.scratch.lock();
         let vars = scratch.get_or_insert_with(|| {
-            Box::new(SessionVars::new(Box::new(ClusterGlobals::new(Arc::clone(
-                &self.cache,
-            )))))
+            Box::new(SessionVars::new(Box::new(
+                ClusterGlobals::new(Arc::clone(&self.cache))
+                    .with_tidb_table_opt(self.tidb_table.clone()),
+            )))
         });
         let (sys_var, err) = sv.validate_from_type(vars, &sys_var, ScopeGlobal);
         if err.is_err() {
@@ -137,9 +155,14 @@ impl GlobalVarAccessor for ClusterGlobals {
     fn set_global_sys_var_only(&mut self, _: &str, _: &str, _: bool) -> Result<(), Error> {
         Err(blocked("D06.5", "SET GLOBAL in the new session"))
     }
-    // glue: stand-in (mysql.tidb is read by the domain, D06.5)
-    fn get_tidb_table_value(&self, _: &str) -> Result<String, Error> {
-        Err(blocked("D06.5", "mysql.tidb in the new session"))
+    // glue: reads synced mysql.tidb snapshot (returns empty-result error when missing so varsutil uses default)
+    fn get_tidb_table_value(&self, name: &str) -> Result<String, Error> {
+        if let Some(table) = &self.tidb_table
+            && let Some(val) = table.read().get(name).cloned()
+        {
+            return Ok(val);
+        }
+        Err(tidb_base::errors::new("empty result"))
     }
     // glue: stand-in (the read-only node never writes mysql.tidb)
     fn set_tidb_table_value(&mut self, _: &str, _: &str, _: &str) -> Result<(), Error> {
@@ -151,6 +174,10 @@ impl GlobalVarAccessor for ClusterGlobals {
             return Some(Err(ClusterGlobals::not_loaded()));
         }
         Some(Ok(self.cache.session_cache()))
+    }
+    // glue: SysVarSync::rebuild skips SetGlobal hooks (#539), so ScopeGlobal reads come from SysVarCache
+    fn uses_cached_globals(&self) -> bool {
+        true
     }
 }
 
@@ -179,6 +206,17 @@ impl NewSession {
         pool: Option<tidb_runtime::pool::ExecPool>,
         globals: Arc<SysVarCache>,
     ) -> NewSession {
+        Self::with_globals(domain, store, pool, globals, None)
+    }
+
+    /// Construct a [`NewSession`] backed by `globals` and an optional `mysql.tidb` table snapshot.
+    pub fn with_globals(
+        domain: Option<Arc<tidb_domain::Domain>>,
+        store: Option<Arc<tidb_store::driver::TikvStore>>,
+        pool: Option<tidb_runtime::pool::ExecPool>,
+        globals: Arc<SysVarCache>,
+        tidb_table: Option<Arc<RwLock<HashMap<String, String>>>>,
+    ) -> NewSession {
         if let Some(d) = &domain {
             // Go's bootstrap (`InitMDLVariable`); idempotent, so done with each session.
             tidb_session::session::init_mdl_variable();
@@ -187,16 +225,14 @@ impl NewSession {
             tidb_planner::core::plan_cache_instance::register_instance_plan_cache_factory();
             d.init_instance_plan_cache();
         }
+        let accessor =
+            Box::new(ClusterGlobals::new(Arc::clone(&globals)).with_tidb_table_opt(tidb_table));
         let mut session = match store {
             Some(store) => {
                 let oracle = Arc::new(tidb_session::glue::StoreOracle(store.get_oracle()));
-                let globals = Box::new(ClusterGlobals::new(Arc::clone(&globals)));
-                Session::with_store(Dialect::MySQL, globals, store, oracle)
+                Session::with_store(Dialect::MySQL, accessor, store, oracle)
             }
-            None => Session::new(
-                Dialect::MySQL,
-                Box::new(ClusterGlobals::new(Arc::clone(&globals))),
-            ),
+            None => Session::new(Dialect::MySQL, accessor),
         };
         session.set_instance_plan_cache(domain.as_ref().and_then(|d| d.get_instance_plan_cache()));
         session.set_exec_pool(pool);

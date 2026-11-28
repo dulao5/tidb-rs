@@ -720,6 +720,7 @@ impl<'ast> PlanBuilder<'ast> {
         for cond in conditions {
             let expr = self.rewrite(
                 &*ctx.expr_ctx,
+                Some(&mut *ctx.vars),
                 cond,
                 rewrite_plan(&ctx.arena, *p),
                 agg_mapper,
@@ -1040,6 +1041,7 @@ impl<'ast> PlanBuilder<'ast> {
             }
             let new_expr = self.rewrite_with_preprocess(
                 &*ctx.expr_ctx,
+                Some(&mut *ctx.vars),
                 fexpr,
                 rewrite_plan(&ctx.arena, p),
                 mapper,
@@ -1164,6 +1166,7 @@ impl<'ast> PlanBuilder<'ast> {
             let it = self
                 .rewrite_with_preprocess(
                     &*ctx.expr_ctx,
+                    Some(&mut *ctx.vars),
                     &item.expr,
                     rewrite_plan(&ctx.arena, p),
                     agg_mapper,
@@ -1302,6 +1305,7 @@ impl UserVarTypeProcessor<'_, '_> {
         }
         b.rewrite(
             &*ctx.expr_ctx,
+            Some(&mut *ctx.vars),
             e,
             rewrite_plan(&ctx.arena, self.plan),
             self.mapper,
@@ -1553,6 +1557,7 @@ impl<'ast> PlanBuilder<'ast> {
                 let new_arg = self
                     .rewrite_with_col_replacements(
                         &*ctx.expr_ctx,
+                        Some(&mut *ctx.vars),
                         arg,
                         rewrite_plan(&ctx.arena, p),
                         None,
@@ -1580,6 +1585,7 @@ impl<'ast> PlanBuilder<'ast> {
                     let new_by_item = self
                         .rewrite_with_col_replacements(
                             &*ctx.expr_ctx,
+                            Some(&mut *ctx.vars),
                             ret_expr,
                             rewrite_plan(&ctx.arena, p),
                             None,
@@ -3114,6 +3120,7 @@ impl<'ast> PlanBuilder<'ast> {
                         // correlated agg will be extracted completely latter.
                         self.rewrite(
                             &*ctx.expr_ctx,
+                            Some(&mut *ctx.vars),
                             &by_item.expr,
                             rewrite_plan(&ctx.arena, p),
                             None,
@@ -3567,6 +3574,7 @@ impl<'ast> PlanBuilder<'ast> {
             let expr = self
                 .rewrite_with_col_replacements(
                     &*ctx.expr_ctx,
+                    Some(&mut *ctx.vars),
                     expr_node,
                     rewrite_plan(&ctx.arena, p),
                     None,
@@ -4078,6 +4086,7 @@ fn build_window_specs<'ast>(
 // go-part: PlanBuilder.buildWindowFunctionFrameBound
 pub(crate) fn eval_window_range_bound_constant(
     ctx: &dyn BuildContext,
+    vars: Option<&mut tidb_sessionctx::variable::session::SessionVars>,
     bound_expr: &Expr,
     spec_name: &str,
     in_prepare_stmt: bool,
@@ -4092,7 +4101,7 @@ pub(crate) fn eval_window_range_bound_constant(
         val.set_value(gv, &ret_type);
         return Ok(Constant::new(val, ret_type));
     }
-    let val = match eval_ast_expr_with_plan_ctx(ctx, bound_expr) {
+    let val = match eval_ast_expr_with_plan_ctx(ctx, vars, bound_expr) {
         Ok(v) => v,
         Err(e) if blocked_by(&e).is_some() => return Err(e),
         Err(_) => {
@@ -4421,6 +4430,7 @@ impl<'ast> PlanBuilder<'ast> {
             let new_arg = self
                 .rewrite(
                     &*ctx.expr_ctx,
+                    Some(&mut *ctx.vars),
                     arg,
                     rewrite_plan(&ctx.arena, p),
                     agg_map,
@@ -4471,6 +4481,7 @@ impl<'ast> PlanBuilder<'ast> {
             let new_arg = self
                 .rewrite(
                     &*ctx.expr_ctx,
+                    Some(&mut *ctx.vars),
                     arg,
                     rewrite_plan(&ctx.arena, p),
                     agg_map,
@@ -4510,6 +4521,7 @@ impl<'ast> PlanBuilder<'ast> {
             let it = self
                 .rewrite(
                     &*ctx.expr_ctx,
+                    Some(&mut *ctx.vars),
                     &item.expr,
                     rewrite_plan(&ctx.arena, p),
                     agg_map,
@@ -4558,7 +4570,7 @@ impl<'ast> PlanBuilder<'ast> {
     // go: PlanBuilder.buildWindowFunctionFrameBound L1 [M-CTX]
     fn build_window_function_frame_bound(
         &self,
-        ctx: &PlanCtx<'_>,
+        ctx: &mut PlanCtx<'_>,
         spec: &WindowSpecW<'ast>,
         order_by_items: &[SortItem],
         bound_clause: &ast::FrameBound,
@@ -4608,6 +4620,7 @@ impl<'ast> PlanBuilder<'ast> {
 
         let expr = eval_window_range_bound_constant(
             &*ctx.expr_ctx,
+            Some(&mut *ctx.vars),
             bound_expr,
             &spec.name.o,
             checker.in_prepare_stmt,
@@ -4692,7 +4705,7 @@ impl<'ast> PlanBuilder<'ast> {
     // go: PlanBuilder.buildWindowFunctionFrame L1 [M-CTX]
     fn build_window_function_frame(
         &self,
-        ctx: &PlanCtx<'_>,
+        ctx: &mut PlanCtx<'_>,
         spec: &WindowSpecW<'ast>,
         order_by_items: &[SortItem],
     ) -> Result<Option<WindowFrame>, Error> {
@@ -6690,9 +6703,11 @@ mod tests {
         assert!(compound_is_iv && literal_is_iv);
 
         let compound_const =
-            eval_window_range_bound_constant(&*expr_ctx, &compound_expr, "", false, true).unwrap();
+            eval_window_range_bound_constant(&*expr_ctx, None, &compound_expr, "", false, true)
+                .unwrap();
         let literal_const =
-            eval_window_range_bound_constant(&*expr_ctx, &literal_expr, "", false, true).unwrap();
+            eval_window_range_bound_constant(&*expr_ctx, None, &literal_expr, "", false, true)
+                .unwrap();
 
         assert_eq!(
             compound_const.ret_type.get_type(),
@@ -6727,7 +6742,8 @@ mod tests {
         ] {
             let (expr, is_iv) = extract_start_bound(sql);
             assert!(is_iv);
-            let c = eval_window_range_bound_constant(&*expr_ctx, &expr, "", false, is_iv).unwrap();
+            let c = eval_window_range_bound_constant(&*expr_ctx, None, &expr, "", false, is_iv)
+                .unwrap();
             assert_eq!(
                 c.ret_type.get_type(),
                 tidb_base::mysql::TypeUnspecified,
@@ -6743,7 +6759,8 @@ mod tests {
         // Non-INTERVAL numeric RANGE bound (e.g. `1+1` or `1.0+0.5` with is_interval = false,
         // and SQL `RANGE BETWEEN ? PRECEDING`) keeps Go's zero FieldType.
         let non_interval_const =
-            eval_window_range_bound_constant(&*expr_ctx, &compound_expr, "", false, false).unwrap();
+            eval_window_range_bound_constant(&*expr_ctx, None, &compound_expr, "", false, false)
+                .unwrap();
         assert_eq!(
             non_interval_const.ret_type.get_type(),
             tidb_base::mysql::TypeUnspecified,
@@ -6758,6 +6775,7 @@ mod tests {
         let range_param_ctx = make_expr_ctx(vec![tidb_types::datum::new_decimal_datum(dec_0_3)]);
         let range_param_const = eval_window_range_bound_constant(
             &*range_param_ctx,
+            None,
             &range_param_expr,
             "",
             false,
@@ -6779,7 +6797,8 @@ mod tests {
         dec_1_5.from_string(b"1.5").unwrap();
         let param_ctx = make_expr_ctx(vec![tidb_types::datum::new_decimal_datum(dec_1_5)]);
         let param_const =
-            eval_window_range_bound_constant(&*param_ctx, &param_expr, "", false, true).unwrap();
+            eval_window_range_bound_constant(&*param_ctx, None, &param_expr, "", false, true)
+                .unwrap();
         assert_eq!(
             param_const.ret_type.get_type(),
             tidb_base::mysql::TypeUnspecified,
@@ -6845,6 +6864,36 @@ mod tests {
         let (stmt, rctx) = parse_and_preprocess_t(sql, &is);
         let err = build_stmt_once(&stmt, sql, &rctx, &is, 0, vec![], false).unwrap_err();
         assert_eq!(tidb_base::blocked::blocked_by(&err), Some("D08.7"));
+
+        // Verify system-variable INTERVAL RANGE bound evaluates cleanly when SessionVars is
+        // provided, and returns a non-constant error (no panic) when SessionVars is absent.
+        let (var_bound_expr, var_is_iv) = extract_start_bound(
+            "SELECT SUM(a) OVER (ORDER BY d RANGE BETWEEN INTERVAL @@div_precision_increment DAY PRECEDING AND CURRENT ROW) FROM t",
+        );
+        assert!(var_is_iv);
+        let mut vars = tidb_sessionctx::variable::session::SessionVars::new(Box::new(TestAcc));
+        vars.set_system_var("div_precision_increment", "6").unwrap();
+        let var_const = eval_window_range_bound_constant(
+            &*expr_ctx,
+            Some(&mut vars),
+            &var_bound_expr,
+            "",
+            false,
+            var_is_iv,
+        )
+        .unwrap();
+        assert_eq!(var_const.value.get_int64(), 6);
+        assert!(
+            eval_window_range_bound_constant(
+                &*expr_ctx,
+                None,
+                &var_bound_expr,
+                "",
+                false,
+                var_is_iv,
+            )
+            .is_err()
+        );
     }
 
     /// Emulation of Go's shared `*FieldType` mutation (`M-FT`, #402): `first_value` / `last_value` /

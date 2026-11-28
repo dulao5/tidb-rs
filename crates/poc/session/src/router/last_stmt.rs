@@ -71,6 +71,16 @@ impl LastStmtInfo {
     /// After the PoC ran a statement with `result`; `prev` is the state before it (what a
     /// statement leaves unchanged).
     pub fn from_poc(prev: &LastStmtInfo, result: &Result<Response, SqlError>) -> LastStmtInfo {
+        Self::from_poc_stmt(prev, result, true)
+    }
+
+    /// After the PoC ran a statement with `result`; `is_select` sets `ROW_COUNT()` (`-1` for
+    /// `SELECT`, `0` for `SHOW` / non-row-returning statements).
+    pub fn from_poc_stmt(
+        prev: &LastStmtInfo,
+        result: &Result<Response, SqlError>,
+        is_select: bool,
+    ) -> LastStmtInfo {
         let mut info = LastStmtInfo {
             engine: Engine::Poc,
             last_insert_id: prev.last_insert_id,
@@ -81,14 +91,14 @@ impl LastStmtInfo {
         match result {
             Ok(Response::ResultSet(rs)) => {
                 info.warning_count = i64::from(rs.warnings);
-                info.affected_rows = -1;
+                info.affected_rows = if is_select { -1 } else { 0 };
                 info.found_rows = rs.rows.len() as u64;
             }
             // Only the new stack answers with encoded rows, and its state is read from the
             // new session (`from_new`); kept for completeness.
             Ok(Response::Encoded(rs)) => {
                 info.warning_count = i64::from(rs.warnings);
-                info.affected_rows = -1;
+                info.affected_rows = if is_select { -1 } else { 0 };
                 info.found_rows = rs.rows.len() as u64;
             }
             Ok(Response::Ok(ok)) => {
@@ -102,6 +112,38 @@ impl LastStmtInfo {
             }
         }
         info
+    }
+
+    /// After the PoC ran `SHOW WARNINGS` or `SHOW ERRORS`: Go's `ResetContextOfStmt` copies
+    /// the previous statement's warnings into the `SHOW WARNINGS` context, so `@@warning_count`
+    /// and `@@error_count` stay unchanged while `ROW_COUNT()` resets to `0` and `FOUND_ROWS()`
+    /// reflects the returned warning rows.
+    pub fn from_poc_show_warnings(
+        prev: &LastStmtInfo,
+        result: &Result<Response, SqlError>,
+    ) -> LastStmtInfo {
+        let mut info = Self::from_poc_stmt(prev, result, false);
+        if result.is_ok() {
+            info.warning_count = prev.warning_count;
+            info.error_count = prev.error_count;
+        }
+        info
+    }
+
+    /// After a parse error (`session.Parse`, `session.go:1583-1592`): Go does not call
+    /// `ResetContextOfStmt`, appending the error to the previous statement context instead.
+    /// Thus `ROW_COUNT()`, `FOUND_ROWS()`, `LAST_INSERT_ID()`, active engine (for
+    /// `SHOW WARNINGS`), and the other previous-statement fields stay unchanged while
+    /// `@@warning_count` and `@@error_count` increase by 1.
+    pub fn from_parse_error(prev: &LastStmtInfo, append_error: bool) -> LastStmtInfo {
+        if !append_error {
+            return prev.clone();
+        }
+        LastStmtInfo {
+            warning_count: prev.warning_count.saturating_add(1),
+            error_count: prev.error_count.saturating_add(1),
+            ..prev.clone()
+        }
     }
 
     /// After the new session ran a statement: Go's `ResetContextOfStmt` computation on the
@@ -154,5 +196,55 @@ impl LastStmtInfo {
         let sc = vars.stmt_ctx_mut();
         sc.prev_affected_rows = self.affected_rows;
         sc.prev_last_insert_id = self.last_insert_id;
+    }
+
+    /// Seeds the `ResetContextOfStmt` inputs on `vars` before executing on the new stack after a
+    /// PoC statement ran, so `ResetContextOfStmt` carries over `@@warning_count`,
+    /// `@@error_count`, `ROW_COUNT()`, `FOUND_ROWS()`, `LAST_INSERT_ID()`,
+    /// `@@last_plan_from_cache`, `@@last_plan_from_binding`, and `@@last_sql_use_alloc` while
+    /// installing a fresh statement context.
+    pub(super) fn apply_reset_inputs(&self, vars: &mut SessionVars) {
+        use std::sync::Arc;
+        use tidb_base::contextutil::{SQLWarn, WarnLevelError, WarnLevelWarning};
+
+        vars.sys_warning_count = self.warning_count;
+        vars.sys_error_count = self.error_count;
+        vars.last_found_rows = self.found_rows;
+        vars.prev_found_in_plan_cache = self.plan_from_cache;
+        vars.prev_found_in_binding = self.plan_from_binding;
+        vars.pre_use_chunk_alloc = self.use_chunk_alloc;
+        vars.last_query_info = self.query_info.clone();
+        vars.last_txn_info = self.txn_info.clone();
+        vars.found_in_plan_cache = self.plan_from_cache;
+        vars.found_in_binding = self.plan_from_binding;
+
+        // Install a fresh StatementContext instead of mutating `vars.stmt_ctx_mut()` while a
+        // `StmtCheckpoint` holds an `Arc` clone of the previous one.
+        let mut sc = tidb_sessionctx::stmtctx::new_stmt_ctx();
+        sc.prev_affected_rows = self.affected_rows;
+        sc.prev_last_insert_id = self.last_insert_id;
+        sc.in_select_stmt = self.affected_rows == -1;
+        if self.use_chunk_alloc {
+            sc.set_use_chunk_alloc();
+        } else {
+            sc.clear_use_chunk_alloc();
+        }
+        let err_n = usize::from(self.error_count);
+        let warn_n = usize::try_from(self.warning_count).unwrap_or(0);
+        let total = err_n.max(warn_n);
+        let mut warns = Vec::with_capacity(total);
+        for i in 0..total {
+            let level = if i < err_n {
+                WarnLevelError
+            } else {
+                WarnLevelWarning
+            };
+            warns.push(SQLWarn {
+                level: level.into(),
+                err: tidb_base::errors::new(""),
+            });
+        }
+        sc.set_warnings(warns);
+        vars.set_stmt_ctx(Arc::new(sc));
     }
 }

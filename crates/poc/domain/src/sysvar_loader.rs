@@ -31,7 +31,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use etcd_client::{Client as EtcdClient, ConnectOptions};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use poc_kv::KvClient;
 use tidb_base::Error;
 use tidb_systable::session_io::{
@@ -60,6 +60,8 @@ pub struct SysVarSync {
 
 struct Inner {
     cache: Arc<SysVarCache>,
+    /// Cached key-value rows of `mysql.tidb` (`tidb_gc_*` variables).
+    tidb_table: Arc<RwLock<HashMap<String, String>>>,
     /// Wakes the loop (watch events come from the watch task's clone; `Exit` from here).
     events: Mutex<Sender<LoopEvent>>,
     /// Stops the watch task.
@@ -86,12 +88,19 @@ impl SysVarSync {
     pub fn start(kv: KvClient, pd_endpoints: Vec<String>) -> SysVarSync {
         let rt = tokio::runtime::Handle::current();
         let fetch_rt = rt.clone();
-        let fetch: Fetch = Box::new(move || fetch_rt.block_on(fetch_table_values(&kv)));
+        let tidb_table = Arc::new(RwLock::new(HashMap::new()));
+        let tidb_writer = Arc::clone(&tidb_table);
+        let fetch: Fetch = Box::new(move || {
+            let (globals, tidb) = fetch_rt.block_on(fetch_both_table_values(&kv))?;
+            *tidb_writer.write() = tidb;
+            Ok(globals)
+        });
         let notifier = EtcdNotifier {
             etcd: None,
             rt: rt.clone(),
         };
-        let (sync, events) = SysVarSync::start_with(fetch, notifier, SYS_VAR_CACHE_PERIOD);
+        let (sync, events) =
+            SysVarSync::start_with_tables(fetch, tidb_table, notifier, SYS_VAR_CACHE_PERIOD);
         if !pd_endpoints.is_empty() {
             let stop = sync.inner.stop.subscribe();
             rt.spawn(watch_loop(pd_endpoints, events, stop));
@@ -103,8 +112,23 @@ impl SysVarSync {
     /// The loop over `fetch`, waking every `period` without an event; returns the handle
     /// and a sender of loop events (the watch's).
     // glue: the loop's thread and its event channel (D06.5 spec §8.1)
+    #[cfg_attr(not(test), allow(dead_code))]
     fn start_with(
         fetch: Fetch,
+        notifier: EtcdNotifier,
+        period: Duration,
+    ) -> (SysVarSync, Sender<LoopEvent>) {
+        Self::start_with_tables(
+            fetch,
+            Arc::new(RwLock::new(HashMap::new())),
+            notifier,
+            period,
+        )
+    }
+
+    fn start_with_tables(
+        fetch: Fetch,
+        tidb_table: Arc<RwLock<HashMap<String, String>>>,
         notifier: EtcdNotifier,
         period: Duration,
     ) -> (SysVarSync, Sender<LoopEvent>) {
@@ -119,6 +143,7 @@ impl SysVarSync {
         let sync = SysVarSync {
             inner: Arc::new(Inner {
                 cache,
+                tidb_table,
                 events: Mutex::new(tx.clone()),
                 stop,
                 thread: Mutex::new(Some(thread)),
@@ -130,6 +155,11 @@ impl SysVarSync {
     /// The cache every new session reads its global values from.
     pub fn cache(&self) -> &Arc<SysVarCache> {
         &self.inner.cache
+    }
+
+    /// Shared snapshot of `mysql.tidb` (`tidb_gc_*`), updated alongside `cache`.
+    pub fn tidb_table(&self) -> Arc<RwLock<HashMap<String, String>>> {
+        Arc::clone(&self.inner.tidb_table)
     }
 
     /// Ends the loop and the watch (also done when the last handle is dropped).
@@ -202,13 +232,15 @@ fn run(
     tidb_base::log_info!("LoadSysVarCacheLoop exited.");
 }
 
-/// `fetchTableValues`: `SELECT variable_name, variable_value FROM mysql.global_variables`,
-/// as the records of the table scanned at a fresh TSO and decoded.
-// glue: the scan behind Domain.fetchTableValues (the decoding is tidb-systable's decode_global_variables)
-async fn fetch_table_values(kv: &KvClient) -> Result<HashMap<String, String>, Error> {
+/// `fetchTableValues` plus `mysql.tidb` (`tidb_gc_*`): scans both `mysql.global_variables`
+/// and `mysql.tidb` at a single fresh TSO and decodes them.
+// glue: the scan behind Domain.fetchTableValues and mysql.tidb reads (the decoding is tidb-systable's decode_global_variables)
+async fn fetch_both_table_values(
+    kv: &KvClient,
+) -> Result<(HashMap<String, String>, HashMap<String, String>), Error> {
     let err = |e: crate::Error| tidb_base::errors::new(e.to_string());
     let ts = kv.current_ts().await.map_err(|e| err(e.into()))?;
-    let tables = load_mysql_table_infos_filtered(kv, ts, &["global_variables"])
+    let tables = load_mysql_table_infos_filtered(kv, ts, &["global_variables", "tidb"])
         .await
         .map_err(err)?;
     let Some(tbl) = tables.get("global_variables") else {
@@ -216,8 +248,16 @@ async fn fetch_table_values(kv: &KvClient) -> Result<HashMap<String, String>, Er
             "mysql.global_variables not found in the cluster's metadata",
         ));
     };
-    let records = scan_table_records(kv, ts, tbl.id).await.map_err(err)?;
-    decode_global_variables(tbl, &records)
+    let globals =
+        decode_global_variables(tbl, &scan_table_records(kv, ts, tbl.id).await.map_err(err)?)?;
+    let tidb = match tables.get("tidb") {
+        Some(tidb_tbl) => decode_global_variables(
+            tidb_tbl,
+            &scan_table_records(kv, ts, tidb_tbl.id).await.map_err(err)?,
+        )?,
+        None => HashMap::new(),
+    };
+    Ok((globals, tidb))
 }
 
 /// The etcd watch of `/tidb/sysvars` (Go: `do.etcdClient.Watch(ctx, sysVarCacheKey)`): every

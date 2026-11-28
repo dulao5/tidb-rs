@@ -97,8 +97,6 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D09.13", 103),
     // The lock operator (SELECT ... FOR UPDATE).
     ("D09.14", 2),
-    // System variables in expressions.
-    ("D09.2", 2),
     // Joins.
     ("D09.3", 6),
     // GROUP BY ... WITH ROLLUP (D09.4 part C).
@@ -166,8 +164,10 @@ fn ft_out(ft: &FieldType) -> Value {
 struct Acc;
 
 impl GlobalVarAccessor for Acc {
-    fn get_global_sys_var(&self, _: &str) -> Result<String, Error> {
-        Ok(String::new())
+    fn get_global_sys_var(&self, name: &str) -> Result<String, Error> {
+        tidb_sessionctx::variable::get_sys_var(name)
+            .map(|sv| sv.value.clone())
+            .ok_or_else(|| tidb_base::errors::new(format!("unknown sysvar {name}")))
     }
     fn set_global_sys_var_only(&mut self, _: &str, _: &str, _: bool) -> Result<(), Error> {
         Ok(())

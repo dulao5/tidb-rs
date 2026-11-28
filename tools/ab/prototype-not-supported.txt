@@ -19,6 +19,7 @@ GROUP BY \.\.\. WITH ROLLUP
 GROUP BY an aggregate
 GROUP BY items other than columns
 HAVING
+ILIKE in SHOW VARIABLES
 IN
 IS NULL
 LIKE
@@ -34,7 +35,7 @@ SET CHARACTER SET .*
 SET GLOBAL
 SET INSTANCE
 SET NAMES .*
-SHOW statements other than SHOW WARNINGS/ERRORS
+SHOW statements other than SHOW VARIABLES/WARNINGS/ERRORS
 SQL_CALC_FOUND_ROWS
 SSL
 SUM over the non\-numeric column '.*'
@@ -70,11 +71,11 @@ negating a string
 non\-UTF\-8 string parameters
 non\-aggregated column '.*' outside GROUP BY \(only_full_group_by\)
 operator .*
+operator .* in SHOW VARIABLES
 optimizer hints
 origin default .* of column .* \(type .*\)
 pushed\-down Limit 0
 reading column '.*' of type .* \(TIMESTAMP/ENUM/SET/BIT/JSON/\.\.\. are not supported yet\)
-reading system variable '.*' \(the prototype answers only the variables clients read while connecting\)
 reading the virtual generated column '.*'
 returning value .*
 setting system variable '.*'
@@ -92,10 +93,12 @@ this SET value
 this aggregate function form
 this expression
 this expression as a constant
+this expression in SHOW VARIABLES
 this expression in a SELECT without FROM
 this prepared statement on the PoC, and the new stack cannot run it now \(.*\)
 this select field
 this sql_mode \(PAD_CHAR_TO_FULL_LENGTH changes CHAR results\)
 this unary operator
+this unary operator in SHOW VARIABLES
 this variable expression
 user variables

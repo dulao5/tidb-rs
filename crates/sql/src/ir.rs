@@ -22,6 +22,84 @@ pub enum Statement {
     ShowWarnings {
         errors: bool,
     },
+    /// `SHOW [GLOBAL|SESSION] VARIABLES [LIKE pattern | WHERE expr]`.
+    ShowVariables {
+        global: bool,
+        like: Option<ShowExpr>,
+        where_: Option<ShowExpr>,
+    },
+}
+
+/// Expression inside `SHOW VARIABLES` `LIKE` or `WHERE`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShowExpr {
+    Column(ColumnName),
+    Literal(Literal),
+    Param(usize),
+    /// Explicitly parenthesized expression (kept distinct from a bare literal for `SHOW VARIABLES LIKE`).
+    Paren(Box<ShowExpr>),
+    SysVar {
+        name: String,
+        global: bool,
+        explicit_scope: bool,
+    },
+    Unary {
+        op: ShowUnaryOp,
+        expr: Box<ShowExpr>,
+    },
+    Binary {
+        op: ShowBinaryOp,
+        left: Box<ShowExpr>,
+        right: Box<ShowExpr>,
+    },
+    Like {
+        not: bool,
+        expr: Box<ShowExpr>,
+        pattern: Box<ShowExpr>,
+        escape: u8,
+    },
+    In {
+        not: bool,
+        expr: Box<ShowExpr>,
+        list: Vec<ShowExpr>,
+    },
+    Between {
+        not: bool,
+        expr: Box<ShowExpr>,
+        low: Box<ShowExpr>,
+        high: Box<ShowExpr>,
+    },
+    IsNull {
+        not: bool,
+        expr: Box<ShowExpr>,
+    },
+    IsTruth {
+        not: bool,
+        true_val: bool,
+        expr: Box<ShowExpr>,
+    },
+}
+
+/// Unary operator inside `SHOW VARIABLES` filters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShowUnaryOp {
+    Plus,
+    Minus,
+    Not,
+}
+
+/// Binary operator inside `SHOW VARIABLES` filters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShowBinaryOp {
+    Eq,
+    Ne,
+    NullEq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
 }
 
 /// One assignment of a `SET` statement.
@@ -332,9 +410,16 @@ pub fn lower_statement(stmt: &ast::Stmt, sql: &str) -> Result<Lowered, SqlError>
                     errors: s.tp == ast::ShowStmtType::Errors,
                 }
             }
+            ast::ShowStmtType::Variables if s.unported.is_none() && !s.full && !s.extended => {
+                Statement::ShowVariables {
+                    global: s.global_scope,
+                    like: s.pattern.as_ref().map(|e| cx.show_expr(e)).transpose()?,
+                    where_: s.where_.as_ref().map(|e| cx.show_expr(e)).transpose()?,
+                }
+            }
             _ => {
                 return Err(unsupported(
-                    "SHOW statements other than SHOW WARNINGS/ERRORS",
+                    "SHOW statements other than SHOW VARIABLES/WARNINGS/ERRORS",
                 ));
             }
         },
@@ -684,6 +769,117 @@ impl Lowerer<'_> {
         }
         Ok(out)
     }
+
+    fn show_expr(&mut self, e: &ast::Expr) -> Result<ShowExpr, SqlError> {
+        use ast::Expr as A;
+        Ok(match e {
+            A::Column(c) => ShowExpr::Column(ColumnName {
+                schema: c.schema.o.clone(),
+                table: c.table.o.clone(),
+                name: c.name.o.clone(),
+            }),
+            A::Value(v) => ShowExpr::Literal(literal(&v.datum)?),
+            A::ParamMarker(p) => {
+                self.params.push(p.offset);
+                ShowExpr::Param(p.offset)
+            }
+            A::Paren(inner) => ShowExpr::Paren(Box::new(self.show_expr(inner)?)),
+            A::Variable(v) => {
+                if !v.is_system {
+                    return Err(unsupported("user variables"));
+                }
+                if v.value.is_some() || v.is_instance {
+                    return Err(unsupported("this variable expression"));
+                }
+                ShowExpr::SysVar {
+                    name: v.name.to_ascii_lowercase(),
+                    global: v.is_global,
+                    explicit_scope: v.explicit_scope,
+                }
+            }
+            A::Unary(u) => {
+                let op = match u.op {
+                    ast::Op::Plus => ShowUnaryOp::Plus,
+                    ast::Op::Minus => ShowUnaryOp::Minus,
+                    ast::Op::Not | ast::Op::Not2 => ShowUnaryOp::Not,
+                    _ => return Err(unsupported("this unary operator in SHOW VARIABLES")),
+                };
+                ShowExpr::Unary {
+                    op,
+                    expr: Box::new(self.show_expr(&u.v)?),
+                }
+            }
+            A::Binary(b) => {
+                let op = match b.op {
+                    ast::Op::EQ => ShowBinaryOp::Eq,
+                    ast::Op::NE => ShowBinaryOp::Ne,
+                    ast::Op::NullEQ => ShowBinaryOp::NullEq,
+                    ast::Op::LT => ShowBinaryOp::Lt,
+                    ast::Op::LE => ShowBinaryOp::Le,
+                    ast::Op::GT => ShowBinaryOp::Gt,
+                    ast::Op::GE => ShowBinaryOp::Ge,
+                    ast::Op::LogicAnd => ShowBinaryOp::And,
+                    ast::Op::LogicOr => ShowBinaryOp::Or,
+                    other => {
+                        return Err(unsupported(format!(
+                            "operator {} in SHOW VARIABLES",
+                            other.literal().0
+                        )));
+                    }
+                };
+                ShowExpr::Binary {
+                    op,
+                    left: Box::new(self.show_expr(&b.l)?),
+                    right: Box::new(self.show_expr(&b.r)?),
+                }
+            }
+            A::PatternLike(p) => {
+                if !p.is_like {
+                    return Err(unsupported("ILIKE in SHOW VARIABLES"));
+                }
+                ShowExpr::Like {
+                    not: p.not,
+                    expr: Box::new(self.show_expr(&p.expr)?),
+                    pattern: Box::new(self.show_expr(&p.pattern)?),
+                    escape: p.escape,
+                }
+            }
+            A::PatternIn(p) => {
+                if p.sel.is_some() {
+                    return Err(unsupported("subqueries"));
+                }
+                let list = p
+                    .list
+                    .iter()
+                    .map(|item| self.show_expr(item))
+                    .collect::<Result<Vec<_>, _>>()?;
+                ShowExpr::In {
+                    not: p.not,
+                    expr: Box::new(self.show_expr(&p.expr)?),
+                    list,
+                }
+            }
+            A::Between(b) => ShowExpr::Between {
+                not: b.not,
+                expr: Box::new(self.show_expr(&b.expr)?),
+                low: Box::new(self.show_expr(&b.left)?),
+                high: Box::new(self.show_expr(&b.right)?),
+            },
+            A::IsNull(i) => ShowExpr::IsNull {
+                not: i.not,
+                expr: Box::new(self.show_expr(&i.expr)?),
+            },
+            A::IsTruth(t) => ShowExpr::IsTruth {
+                not: t.not,
+                true_val: t.true_ != 0,
+                expr: Box::new(self.show_expr(&t.expr)?),
+            },
+            A::Subquery(_) | A::Exists(_) | A::CompareSubquery(_) => {
+                return Err(unsupported("subqueries"));
+            }
+            _ => return Err(unsupported("this expression in SHOW VARIABLES")),
+        })
+    }
 }
 
 fn literal(d: &ast::Datum) -> Result<Literal, SqlError> {
@@ -729,7 +925,56 @@ fn renumber_params(stmt: Statement, offsets: &[usize]) -> Statement {
             }
             Statement::Select(s)
         }
+        Statement::ShowVariables {
+            global,
+            mut like,
+            mut where_,
+        } => {
+            if let Some(l) = &mut like {
+                map_show_params(l, &rank);
+            }
+            if let Some(w) = &mut where_ {
+                map_show_params(w, &rank);
+            }
+            Statement::ShowVariables {
+                global,
+                like,
+                where_,
+            }
+        }
         other => other,
+    }
+}
+
+fn map_show_params(e: &mut ShowExpr, rank: &impl Fn(usize) -> usize) {
+    match e {
+        ShowExpr::Param(p) => *p = rank(*p),
+        ShowExpr::Paren(expr)
+        | ShowExpr::Unary { expr, .. }
+        | ShowExpr::IsNull { expr, .. }
+        | ShowExpr::IsTruth { expr, .. } => map_show_params(expr, rank),
+        ShowExpr::Binary { left, right, .. } => {
+            map_show_params(left, rank);
+            map_show_params(right, rank);
+        }
+        ShowExpr::Like { expr, pattern, .. } => {
+            map_show_params(expr, rank);
+            map_show_params(pattern, rank);
+        }
+        ShowExpr::In { expr, list, .. } => {
+            map_show_params(expr, rank);
+            for item in list {
+                map_show_params(item, rank);
+            }
+        }
+        ShowExpr::Between {
+            expr, low, high, ..
+        } => {
+            map_show_params(expr, rank);
+            map_show_params(low, rank);
+            map_show_params(high, rank);
+        }
+        ShowExpr::Column(_) | ShowExpr::Literal(_) | ShowExpr::SysVar { .. } => {}
     }
 }
 
@@ -1032,5 +1277,87 @@ mod tests {
             value("SET max_execution_time = -2e3"),
             SetValue::Literal(Literal::Float(-2000.0))
         );
+    }
+
+    #[test]
+    fn show_variables_lowering() {
+        assert_eq!(
+            lower("SHOW VARIABLES").stmt,
+            Statement::ShowVariables {
+                global: false,
+                like: None,
+                where_: None,
+            }
+        );
+        assert_eq!(
+            lower("SHOW SESSION VARIABLES").stmt,
+            Statement::ShowVariables {
+                global: false,
+                like: None,
+                where_: None,
+            }
+        );
+        assert_eq!(
+            lower("SHOW GLOBAL VARIABLES LIKE 'sql%'").stmt,
+            Statement::ShowVariables {
+                global: true,
+                like: Some(ShowExpr::Literal(Literal::Str("sql%".into()))),
+                where_: None,
+            }
+        );
+        let l = lower("SHOW VARIABLES WHERE Variable_name = ? AND Value <> ''");
+        assert_eq!(l.param_count, 1);
+        let Statement::ShowVariables {
+            where_: Some(w), ..
+        } = l.stmt
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            w,
+            ShowExpr::Binary {
+                op: ShowBinaryOp::And,
+                ..
+            }
+        ));
+        let l = lower("SHOW VARIABLES LIKE ?");
+        assert_eq!(l.param_count, 1);
+        assert_eq!(
+            l.stmt,
+            Statement::ShowVariables {
+                global: false,
+                like: Some(ShowExpr::Param(0)),
+                where_: None,
+            }
+        );
+        // Non-literal vs literal LIKE distinction (Go `ShowBaseExtractor.Extract` ignores `(...)`).
+        assert_eq!(
+            lower("SHOW VARIABLES LIKE ('AUTO%')").stmt,
+            Statement::ShowVariables {
+                global: false,
+                like: Some(ShowExpr::Paren(Box::new(ShowExpr::Literal(Literal::Str(
+                    "AUTO%".into()
+                ))))),
+                where_: None,
+            }
+        );
+
+        // `window_functions: false` allows window-function keywords like `rank` as aliases and rejects `OVER ()`.
+        let wf_off = tidb_parser::ParseOptions {
+            window_functions: false,
+            ..Default::default()
+        };
+        assert!(parse_and_lower_with("SELECT 1 AS rank", &wf_off).is_ok());
+        assert_eq!(
+            parse_and_lower_with("SELECT ROW_NUMBER() OVER ()", &wf_off)
+                .unwrap_err()
+                .code,
+            1064
+        );
+
+        // Other SHOW statements stay 1235.
+        for sql in ["SHOW TABLES", "SHOW DATABASES", "SHOW STATUS"] {
+            assert_eq!(err(sql).code, 1235, "{sql}");
+        }
     }
 }

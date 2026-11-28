@@ -19,11 +19,9 @@ use crate::router::sql_error;
 use tidb_base::contextutil::{SQLWarn, WarnLevelWarning};
 use tidb_base::dbterror::plannererrors::ErrGettingNoopVariable;
 use tidb_base::go_args;
+use tidb_sessionctx::variable::SysVar;
 use tidb_sessionctx::variable::session::SessionVars;
-
-/// Comment returned for `@@version_comment` (shown by the `mysql` CLI banner).
-pub const VERSION_COMMENT: &str =
-    "tidb-rs read-only prototype (Apache License 2.0), MySQL 8.0 compatible";
+use tidb_types::datum::Datum;
 
 /// Session values the constant evaluator reads.
 pub struct ConstEnv<'a> {
@@ -35,11 +33,6 @@ pub struct ConstEnv<'a> {
     pub current_user: &'a str,
     pub connection_id: u64,
     pub have_ssl: &'a str,
-    pub autocommit: bool,
-    /// `@@last_plan_from_cache` / `@@last_plan_from_binding`: the previous statement's, as
-    /// the router recorded it (VS1 plan §4.5; the PoC's own statements never use a cache).
-    pub last_plan_from_cache: bool,
-    pub last_plan_from_binding: bool,
     /// The prototype's session variables (`Session::default_session`): the session values its
     /// `SET`s and the handshake gave them, over the cluster's global values.
     pub vars: &'a mut SessionVars,
@@ -47,107 +40,94 @@ pub struct ConstEnv<'a> {
     pub warnings: &'a mut Vec<SQLWarn>,
 }
 
-/// The system variables the prototype reads from its session variables
-/// ([`ConstEnv::vars`]): the ones clients read while connecting (Connector/J, Connector/Python,
-/// Go-MySQL-Driver, the `mysql` client) and the ones the prototype's `SET` accepts. Any other
-/// variable Go knows is not supported (1235): its Go value may come from state the prototype
-/// does not keep (a statement's, a startup setting's).
-pub const READ_FROM_SESSION: &[&str] = &[
-    "auto_increment_increment",
-    "auto_increment_offset",
-    "character_set_client",
-    "character_set_connection",
-    "character_set_database",
-    "character_set_results",
-    "character_set_server",
-    "collation_connection",
-    "collation_database",
-    "collation_server",
-    "foreign_key_checks",
-    "group_concat_max_len",
-    "init_connect",
-    "innodb_lock_wait_timeout",
-    "interactive_timeout",
-    "license",
-    "lower_case_table_names",
-    "max_allowed_packet",
-    "max_execution_time",
-    "net_buffer_length",
-    "net_read_timeout",
-    "net_write_timeout",
-    "performance_schema",
-    "query_cache_size",
-    "query_cache_type",
-    "sql_mode",
-    "sql_safe_updates",
-    "sql_select_limit",
-    "system_time_zone",
-    "time_zone",
-    "transaction_isolation",
-    "transaction_read_only",
-    "tx_isolation",
-    "tx_read_only",
-    "unique_checks",
-    "wait_timeout",
-];
+/// Read the string value of `sys_var` for the prototype, honoring test/server overrides
+/// (`version`, `have_ssl`, `have_openssl`) while resolving every other variable from `vars`.
+pub(crate) fn read_sysvar_string(
+    vars: &mut SessionVars,
+    sys_var: &SysVar,
+    server_version: &str,
+    have_ssl: &str,
+    global: bool,
+) -> Result<String, SqlError> {
+    if sys_var.name == "version" && !server_version.is_empty() {
+        return Ok(server_version.to_owned());
+    }
+    if matches!(sys_var.name, "have_ssl" | "have_openssl") && !have_ssl.is_empty() {
+        return Ok(have_ssl.to_owned());
+    }
+    if sys_var.has_none_scope() {
+        return Ok(sys_var.value.clone());
+    }
+    if global {
+        vars.get_global_system_var(sys_var.name)
+            .map_err(|e| sql_error(&e))
+    } else {
+        vars.get_session_or_global_system_var(sys_var.name)
+            .map_err(|e| sql_error(&e))
+    }
+}
+
+/// Check name/scope, emit noop read warning when disabled, and evaluate `@@[scope.]name` to a
+/// typed `Datum` matching Go's `SysVar.GetNativeValType`.
+pub(crate) fn eval_sysvar_datum(
+    vars: &mut SessionVars,
+    name: &str,
+    global: bool,
+    explicit_scope: bool,
+    server_version: &str,
+    have_ssl: &str,
+    warnings: &mut Vec<SQLWarn>,
+) -> Result<Datum, SqlError> {
+    check_system_variable(name, global, explicit_scope)?;
+    let sys_var = tidb_sessionctx::variable::get_sys_var(name)
+        .expect("check_system_variable ensures registered");
+    if sys_var.is_noop && !vars.is_noop_variables_enabled() {
+        warnings.push(SQLWarn {
+            level: WarnLevelWarning.into(),
+            err: ErrGettingNoopVariable.fast_gen_by_args(go_args![sys_var.name.to_owned()]),
+        });
+    }
+    let val = read_sysvar_string(vars, &sys_var, server_version, have_ssl, global)?;
+    let (native, _, _) = sys_var.get_native_val_type(&val);
+    Ok(native)
+}
 
 impl ConstEnv<'_> {
     /// The value of `@@[global.]name` and its column, with Go's result types (Go
     /// `SysVar.GetNativeValType`: unsigned and boolean variables are LONGLONG, everything else
-    /// a string in the connection charset). `None` for a variable the prototype does not
-    /// answer.
-    fn sysvar(&mut self, name: &str, global: bool) -> Result<Option<(ColumnDef, Value)>, SqlError> {
-        let unsigned = |v: u64| {
-            let col = ColumnDef::new("", ColumnType::LongLong).with_flags(column_flag::UNSIGNED);
-            Some((col, Value::UInt(v)))
-        };
-        let boolean = |v: bool| {
-            Some((
-                ColumnDef::new("", ColumnType::LongLong),
-                Value::Int(i64::from(v)),
-            ))
-        };
-        let string = |v: &str| {
-            let col = ColumnDef::new("", ColumnType::VarString)
-                .with_length(5)
-                .with_decimals(31);
-            Some((col, Value::from(v)))
-        };
-        // The prototype's own state.
-        match name {
-            "version_comment" => return Ok(string(VERSION_COMMENT)),
-            "version" => return Ok(string(self.server_version)),
-            "autocommit" => return Ok(boolean(self.autocommit)),
-            "last_plan_from_cache" => return Ok(boolean(self.last_plan_from_cache)),
-            "last_plan_from_binding" => return Ok(boolean(self.last_plan_from_binding)),
-            "have_ssl" | "have_openssl" => return Ok(string(self.have_ssl)),
-            _ => {}
-        }
-        if !READ_FROM_SESSION.contains(&name) {
-            return Ok(None);
-        }
-        let Some(sys_var) = tidb_sessionctx::variable::get_sys_var(name) else {
-            return Ok(None);
-        };
-        // Go's `rewriteSystemVariable` (expression_rewriter.go:1829-1842).
-        let val = if sys_var.has_none_scope() {
-            sys_var.value.clone()
-        } else if global {
-            self.vars
-                .get_global_system_var(name)
-                .map_err(|e| sql_error(&e))?
-        } else {
-            self.vars
-                .get_session_or_global_system_var(name)
-                .map_err(|e| sql_error(&e))?
-        };
+    /// a string in the connection charset).
+    fn sysvar(&mut self, name: &str, global: bool) -> Result<(ColumnDef, Value), SqlError> {
+        let sys_var = tidb_sessionctx::variable::get_sys_var(name)
+            .expect("check_system_variable ensures registered");
+        let val = read_sysvar_string(
+            self.vars,
+            &sys_var,
+            self.server_version,
+            self.have_ssl,
+            global,
+        )?;
         let (native, tp, flag) = sys_var.get_native_val_type(&val);
         Ok(match tp {
-            tidb_base::mysql::TypeLonglong if flag & tidb_base::mysql::UnsignedFlag != 0 => {
-                unsigned(native.get_uint64())
+            tidb_base::mysql::TypeLonglong if flag & tidb_base::mysql::UnsignedFlag != 0 => (
+                ColumnDef::new("", ColumnType::LongLong)
+                    .with_flags(column_flag::UNSIGNED | column_flag::BINARY),
+                Value::UInt(native.get_uint64()),
+            ),
+            tidb_base::mysql::TypeLonglong => (
+                ColumnDef::new("", ColumnType::LongLong),
+                Value::Int(native.get_int64()),
+            ),
+            _ => {
+                let conn_cs = self.vars.get_system_var("character_set_connection").0;
+                let mut col = ColumnDef::new("", ColumnType::VarString)
+                    .with_length(5)
+                    .with_decimals(31);
+                let cs_id = u16::from(tidb_base::mysql::charset_name_to_id(&conn_cs));
+                if cs_id != 0 {
+                    col.charset = cs_id;
+                }
+                (col, Value::from(val))
             }
-            tidb_base::mysql::TypeLonglong => boolean(native.get_int64() != 0),
-            _ => string(&val),
         })
     }
 
@@ -187,8 +167,7 @@ impl ConstEnv<'_> {
                 check_system_variable(name, *global, *explicit_scope)?;
                 if let Some(sv) = tidb_sessionctx::variable::get_sys_var(name)
                     && sv.is_noop
-                    && !tidb_sessionctx::variable::tidb_vars::EnableNoopVariables
-                        .load(std::sync::atomic::Ordering::SeqCst)
+                    && !self.vars.is_noop_variables_enabled()
                 {
                     // The variable does nothing, append a warning to the statement output.
                     self.warnings.push(SQLWarn {
@@ -196,12 +175,7 @@ impl ConstEnv<'_> {
                         err: ErrGettingNoopVariable.fast_gen_by_args(go_args![sv.name.to_owned()]),
                     });
                 }
-                self.sysvar(name, *global)?.ok_or_else(|| {
-                    SqlError::not_supported(format!(
-                        "reading system variable '{name}' (the prototype answers only the \
-                         variables clients read while connecting)"
-                    ))
-                })
+                self.sysvar(name, *global)
             }
             Expr::Func { name } => self.func(name).ok_or_else(unsupported),
             Expr::Literal(_) | Expr::Param(_) | Expr::Neg(_) => {
@@ -380,6 +354,7 @@ mod tests {
             .vars_mut()
             .set_system_var_without_validation("collation_connection", "utf8mb4_general_ci")
             .unwrap();
+        session.vars_mut().prev_found_in_plan_cache = true;
         Fixture {
             session,
             warnings: Vec::new(),
@@ -395,9 +370,6 @@ mod tests {
                 current_user: "root@%",
                 connection_id: 9,
                 have_ssl: "YES",
-                autocommit: true,
-                last_plan_from_cache: true,
-                last_plan_from_binding: false,
                 vars: self.session.vars_mut(),
                 warnings: &mut self.warnings,
             }
@@ -433,8 +405,12 @@ mod tests {
 
     #[test]
     fn connect_time_queries() {
+        let want_comment = tidb_sessionctx::variable::get_sys_var("version_comment")
+            .unwrap()
+            .value
+            .clone();
         let r = run("select @@version_comment limit 1", &[]).unwrap();
-        assert_eq!(r.rows, vec![vec![Value::from(VERSION_COMMENT)]]);
+        assert_eq!(r.rows, vec![vec![Value::from(want_comment)]]);
         assert_eq!(r.columns[0].name, "@@version_comment");
         let r = run("SELECT DATABASE(), USER() LIMIT 1", &[]).unwrap();
         assert_eq!(r.columns[1].name, "USER()");
@@ -445,8 +421,17 @@ mod tests {
         let r = run("SELECT @@max_allowed_packet, @@autocommit", &[]).unwrap();
         assert_eq!(r.rows[0], vec![Value::UInt(64 << 20), Value::Int(1)]);
         assert!(r.columns[0].is_unsigned());
+        assert_eq!(
+            r.columns[0].flags,
+            column_flag::UNSIGNED | column_flag::BINARY
+        );
         let r = run("SELECT @@collation_connection", &[]).unwrap();
         assert_eq!(r.rows[0][0], Value::from("utf8mb4_general_ci"));
+        // Go sets `have_ssl` = "YES" with TypeBool, and `GetNativeValType` calls
+        // `tidb_opt_on("YES")` -> 0 (while `SHOW VARIABLES` returns "YES").
+        let r = run("SELECT @@have_ssl", &[]).unwrap();
+        assert_eq!(r.columns[0].column_type, ColumnType::LongLong);
+        assert_eq!(r.rows[0][0], Value::Int(0));
         assert_eq!(run("SELECT @@no_such_var", &[]).unwrap_err().code, 1193);
     }
 
@@ -461,6 +446,10 @@ mod tests {
     /// scope is read with any scope; an unknown one is 1193, a removed one 8136.
     #[test]
     fn system_variable_name_and_scope_checks() {
+        let want_comment = tidb_sessionctx::variable::get_sys_var("version_comment")
+            .unwrap()
+            .value
+            .clone();
         assert_eq!(
             err("SELECT @@global.warning_count"),
             (
@@ -519,77 +508,40 @@ mod tests {
         .unwrap();
         assert_eq!(
             r.rows[0],
-            vec![Value::from(VERSION_COMMENT), Value::from(VERSION_COMMENT)]
+            vec![Value::from(want_comment.clone()), Value::from(want_comment)]
         );
-        // Session-only without a scope, global and session with either.
+        // Session-only without a scope, global and session with either, and live variables.
         let r = run(
-            "SELECT @@last_plan_from_cache, @@global.autocommit, @@session.autocommit",
+            "SELECT @@last_plan_from_cache, @@global.autocommit, @@session.autocommit, \
+             @@warning_count, @@div_precision_increment",
             &[],
         )
         .unwrap();
-        assert_eq!(r.rows[0], vec![Value::Int(1), Value::Int(1), Value::Int(1)]);
-        // A known variable the prototype does not answer is not supported (it was 1193).
         assert_eq!(
-            err("SELECT @@warning_count"),
-            (
-                1235,
-                "42000",
-                "This version of TiDB doesn't yet support 'reading system variable \
-                 'warning_count' (the prototype answers only the variables clients read \
-                 while connecting)'"
-                    .to_owned()
-            )
+            r.rows[0],
+            vec![
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(1),
+                Value::from("0"),
+                Value::UInt(4),
+            ]
         );
     }
 
-    /// Every variable the prototype answers is a Go system variable, so the checks above
-    /// never reject one of them as unknown.
+    /// Every Go system variable is readable without error or panic.
     #[test]
-    fn answered_variables_are_go_system_variables() {
-        for name in [
-            "version_comment",
-            "version",
-            "max_allowed_packet",
-            "wait_timeout",
-            "interactive_timeout",
-            "net_write_timeout",
-            "net_read_timeout",
-            "auto_increment_increment",
-            "auto_increment_offset",
-            "autocommit",
-            "last_plan_from_cache",
-            "last_plan_from_binding",
-            "transaction_read_only",
-            "tx_read_only",
-            "lower_case_table_names",
-            "transaction_isolation",
-            "tx_isolation",
-            "character_set_client",
-            "character_set_connection",
-            "character_set_results",
-            "character_set_server",
-            "character_set_database",
-            "collation_connection",
-            "collation_server",
-            "collation_database",
-            "time_zone",
-            "system_time_zone",
-            "have_ssl",
-            "have_openssl",
-            "license",
-            "sql_mode",
-        ]
-        .into_iter()
-        .chain(READ_FROM_SESSION.iter().copied())
-        {
-            assert!(
-                fixture().env().sysvar(name, false).unwrap().is_some(),
-                "{name}"
-            );
-            assert!(
-                tidb_sessionctx::variable::get_sys_var(name).is_some(),
-                "{name}"
-            );
+    fn all_go_system_variables_are_readable() {
+        let mut f = fixture();
+        for sv in tidb_sessionctx::variable::get_sys_vars() {
+            f.env().sysvar(sv.name, false).unwrap_or_else(|e| {
+                panic!("session read failed for {}: {e:?}", sv.name);
+            });
+            if sv.has_global_scope() || sv.has_instance_scope() || sv.has_none_scope() {
+                f.env().sysvar(sv.name, true).unwrap_or_else(|e| {
+                    panic!("global read failed for {}: {e:?}", sv.name);
+                });
+            }
         }
     }
 
