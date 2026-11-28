@@ -608,5 +608,16 @@ async fn read_only_transactions_read_one_snapshot() {
     session.reset_connection().await.unwrap();
     assert_eq!(session.status_flags() & IN_TRANS, 0);
 
+    // The reset restores the connection's database (Go `cc.dbname`, set by the handshake and
+    // COM_INIT_DB), not the one a SQL `USE` chose afterwards.
+    let current_db = "SELECT DATABASE()";
+    session.use_db(TXN_DB).await.unwrap();
+    ok!("USE mysql");
+    let (_, r) = rows(session.query(current_db).await.unwrap());
+    assert_eq!(r, vec![vec![Value::Bytes(b"mysql".to_vec())]]);
+    session.reset_connection().await.unwrap();
+    let (_, r) = rows(session.query(current_db).await.unwrap());
+    assert_eq!(r, vec![vec![Value::Bytes(TXN_DB.as_bytes().to_vec())]]);
+
     go_sql(&port, &format!("DROP DATABASE {TXN_DB}"));
 }

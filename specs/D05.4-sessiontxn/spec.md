@@ -152,7 +152,7 @@ tidb-rs 是只读节点；显式事务里的写语句和加锁读由会话拒绝
 - `@@autocommit` 读会话变量（原来固定为 1）；`status_flags` 带上 `SERVER_STATUS_IN_TRANS`；`txn_timestamp` 返回原型事务的 start ts。
 - 指标按 6.1 记录；事务内的语句不再记成 autocommit 事务。`tidb_server_conn_idle_duration_seconds` 原来总记 `in_txn="0"`，现在照 Go 按状态标志分开（`crates/mysql-protocol` 的连接循环）。
 - 1792 作为 MySQL 错误直接发给客户端（相当于 Go 的 `mysql.NewErr(ErrCantExecuteInReadOnlyTransaction)`，`writeError` 原样发出）。Go 没有任何错误类注册 1792（v8.5.8 的 `ErrClassToMySQLCodes` 里没有），带这个码的 TiDB 错误经 `terror.ToSQLError` 会变成 1105，所以不用新栈的 `err_read_only_txn`（`ClassSession.NewStd`，调试构建里还会触发登记表的断言）；新栈接手事务时同样要按 MySQL 错误发出。
-- `COM_RESET_CONNECTION` 照 Go 的 `handleResetConnection`（`pkg/server/conn.go:2672-2701`）重开会话：关闭预处理语句，回滚事务（不记事务时长），用同一连接的信息打开新会话（`autocommit` 等变量回到全局值），恢复当前数据库；随后的 OK 包带新会话的状态标志（没有 `IN_TRANS`）。
+- `COM_RESET_CONNECTION` 照 Go 的 `handleResetConnection`（`pkg/server/conn.go:2672-2701`）重开会话：关闭预处理语句，回滚事务（不记事务时长），用同一连接的信息打开新会话（`autocommit` 等变量回到全局值），再以 `USE` 恢复连接的数据库——即 Go 的 `cc.dbname`，只由握手和 `COM_INIT_DB` 在其 `USE` 成功后设置（`conn.go:641, 1502`；`COM_CHANGE_USER` 也会设，但本原型不支持该命令），SQL 的 `USE` 不改它，所以重置后回到的是连接的数据库而不是最后一次 `USE` 选的库（`conn.go:2693-2694`），这一步失败时 `cc.dbname` 仍保留；随后的 OK 包带新会话的状态标志（没有 `IN_TRANS`）。
 - 事务内的写语句检查在解析之后、降级之前（`tidb_sql::ir::writes_in_txn`）：`--new-stack=off` 在原型的 `query_inner`，VS1 路由器在走原型的路径上（`PocEngine::txn_write_error`；事务中的语句按第 0 步都走原型）。
 
 ### 6.5 与 Go 的差异（代码中已标注）
@@ -176,7 +176,7 @@ tidb-rs 是只读节点；显式事务里的写语句和加锁读由会话拒绝
 11. **`tidb_rc_read_check_ts = ON`**：原型忽略（RC 照常每条语句取新 ts）；N11 D11 要求报不支持。Go 在 `pkg/sessiontxn/isolation/readcommitted.go:96-98` 使用它。
 12. **1792 不进语句指标**：1792 在语句开始计时之前返回（原型的 `query_inner`、路由器的 `query_inner`），Go 把它记为一条出错的语句。
 13. **`--new-stack=off` 下会话变量还没建好时**：`status_flags` 报 AUTOCOMMIT，即使集群的全局 `autocommit` 是 OFF（变量在第一条需要它们的语句时才建）。
-14. **没有 `wait_timeout`**：空闲连接（包括事务中的）不会被关闭；Go 默认 8 小时（`pkg/server/conn.go:540-549`）。这个差异在本 PR 之前就有，事务使它更重要。
+14. **没有 `wait_timeout` / `tidb_idle_transaction_timeout`**：空闲连接（包括事务中的）不会被关闭。Go 对空闲连接用 `wait_timeout`（默认 8 小时，`pkg/server/conn.go:540-549`），在事务中且 `tidb_idle_transaction_timeout` 大于 0 时改用它（`getWaitTimeout`，`pkg/server/conn.go:535-541`）。这个差异在本 PR 之前就有，事务使它更重要。
 15. **路由器模式下的对照**：`autocommit=0` 会话的所有语句按第 0 步留在原型（§6.3），驱动默认设置下的 A/B 对照中，原型子集之外的语句会是 1235，这是预期的。
 
 ### 6.6 需要负责人决定

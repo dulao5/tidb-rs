@@ -234,6 +234,7 @@ impl SessionFactory for Factory {
         let mut session = Session {
             shared: self.shared.clone(),
             current_db: None,
+            conn_db: None,
             user: format!("{}@{host}", info.user),
             current_user: format!("{auth_user}@{auth_host}"),
             auth_user: auth_user.clone(),
@@ -323,6 +324,10 @@ pub struct Session {
     shared: Arc<Shared>,
     /// Current database as given to `USE` (Go `CurrentDB`).
     current_db: Option<String>,
+    /// The connection's database (Go `clientConn.dbname`): set only by the handshake and
+    /// `COM_INIT_DB` when their `USE` succeeds (`conn.go:641, 1502`), never by a SQL `USE`.
+    /// `COM_RESET_CONNECTION` restores this one (`conn.go:2693-2694`).
+    conn_db: Option<String>,
     user: String,
     current_user: String,
     auth_user: String,
@@ -1702,9 +1707,12 @@ impl SessionHandler for Session {
         // `cc.ctx.Close()`: the transaction is rolled back (`RollbackTxn`, which records no
         // transaction duration).
         drop(self.txn.take());
-        let db = self.current_db.clone();
+        // `cc.dbname`: the connection's database, not the one a SQL `USE` last chose.
+        let db = self.conn_db.clone();
         let new = self.reopen.factory.open_session(&self.reopen.info)?;
         *self = new;
+        // `cc.dbname` survives the reset even when the `USE` below fails.
+        self.conn_db.clone_from(&db);
         // `cc.useDB(cc.dbname)`: the current database is restored, as a `USE` statement.
         if let Some(db) = db {
             SessionHandler::use_db(self, &db).await?;
@@ -1716,6 +1724,10 @@ impl SessionHandler for Session {
         // COM_INIT_DB and the handshake's database: Go runs them as a `USE` statement.
         tidb_metrics::statement(StmtType::Use);
         let r = self.use_db_inner(db).await;
+        if r.is_ok() {
+            // `cc.dbname = db` (`conn.go:1502`), only after the `USE` succeeded.
+            self.conn_db = Some(db.to_owned());
+        }
         if r.is_ok()
             && let Some(router) = self.router.take()
         {
