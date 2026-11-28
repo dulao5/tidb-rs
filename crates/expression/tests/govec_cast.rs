@@ -726,6 +726,46 @@ fn cprop_erase_types(mut v: Value) -> Value {
     v
 }
 
+/// Records on which ruling R37 (#499, owner decision 2026-11-28) changes the result: signed
+/// BIGINT `0 - (-9223372036854775808)`, which Go v8.5.8 wraps to `-9223372036854775808` and
+/// tidb-rs reports as `BIGINT value is out of range` (1690). The count is pinned per file, so
+/// a new difference of this shape is not absorbed silently.
+const EXPECTED_MINUS_INT_RULED: usize = 1;
+
+/// Whether `got` differs from Go's `out` only as ruling R37 says: an "arbuild" record whose
+/// built tree (the same in both) is a signed `builtinArithmeticMinusIntSig`, where Go returned
+/// `-9223372036854775808` on some row with no error, and tidb-rs returns, with the row and the
+/// vector driver alike, error 1690 on the same expression text and nothing else differs.
+fn is_minus_int_ruling_diff(rec: &Value, got: &Value) -> bool {
+    let out = &rec["out"];
+    let (res, got_res) = (&out["res"], &got["res"]);
+    if rec["op"] != "arbuild"
+        || res != got_res
+        || out["bwarns"] != got["bwarns"]
+        || out["args"] != got["args"]
+    {
+        return false;
+    }
+    let f = &res["f"];
+    let flag = f[3][1].as_u64().unwrap_or(0);
+    let unsigned = flag & tidb_base::mysql::UnsignedFlag as u64 != 0;
+    if f[2] != "builtinArithmeticMinusIntSig" || unsigned {
+        return false;
+    }
+    ["row", "vec"].iter().all(|k| {
+        let (go, rs) = (&out[*k], &got[*k]);
+        go["err"].is_null()
+            && go["v"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|x| x == "-9223372036854775808"))
+            && rs["err"].as_str().is_some_and(|e| {
+                e.starts_with("[types:1690]BIGINT value is out of range in '(") && e.contains(" - ")
+            })
+            && rs.get("v").is_none()
+            && go["warns"] == rs["warns"]
+    })
+}
+
 fn replay(path: &str) {
     let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(path).expect("vectors"));
     let mut text = String::new();
@@ -742,6 +782,7 @@ fn replay(path: &str) {
     let mut cprop = 0;
     let mut in_place = 0;
     let mut in_place_type = 0;
+    let mut minus_int_ruled = 0;
     let lenient = std::env::var("GOVEC_CPROP_STRICT").is_err();
     for line in lines {
         n += 1;
@@ -762,6 +803,10 @@ fn replay(path: &str) {
         let got = exec(rec["op"].as_str().unwrap(), &args);
         let got: Value = serde_json::from_str(&got.to_string()).unwrap();
         if got == rec["out"] {
+            continue;
+        }
+        if is_minus_int_ruling_diff(&rec, &got) {
+            minus_int_ruled += 1;
             continue;
         }
         if lenient && is_cprop && marked && !got.to_string().contains(r#""panic":true"#) {
@@ -817,6 +862,13 @@ fn replay(path: &str) {
         shown.join("\n")
     );
     assert_eq!(n as u64, header["records"].as_u64().unwrap());
+    if path == vectors() {
+        assert_eq!(
+            minus_int_ruled, EXPECTED_MINUS_INT_RULED,
+            "{path}: records ruled by R37 (signed 0 - MinInt64 is an overflow error)"
+        );
+    }
+    eprintln!("{path}: {minus_int_ruled} records ruled (R37)");
 }
 
 #[test]

@@ -58,6 +58,13 @@ panic in Rust too.
 | `arm64/cast.jsonl.gz` sha256 | `923dfe62a43550af58eca68eca843cdbb89611ee469d4465ee78a08c1ea61c58` (GOARCH=arm64, generated locally) |
 | `amd64/cast.jsonl.gz` sha256 | `36eb639ce9f60e27bf23f533177e38cba5d08006fc485b09efa1b811e5f2a2ae` (GOARCH=amd64, GOAMD64=v1; tracker CI artifact, run 43469623399; same records as arm64 except 571: 14 `vecbuild` (M-FMA, the float32 distance sums fused on arm64 only, FMADDS), 13 `arbuild` (5 hardware default NaN of an invalid DOUBLE operation, 8 `bitop` NaN DOUBLE cast to INT, M-F2I), 228 `mathbuild`, 10 `mathclone`, 306 `gomath` — Go's math package is target dependent: Exp / Log assembly, arm64 FMA fusing, the hardware default NaN of Sqrt / Pow) |
 
+Ruled record (ruling R37, #499): one `arbuild` record (`src` `sys`) evaluates signed BIGINT
+`mod(cast(c0), c1) - c0` on a row where it is `0 - (-9223372036854775808)`. Go v8.5.8 returns
+`-9223372036854775808`; tidb-rs returns error 1690 (`BIGINT value is out of range`), as MySQL
+and TiKV do, by owner decision. The replay accepts exactly that difference
+(`is_minus_int_ruling_diff` in `govec_cast.rs`) and pins the count at 1 per target; the files
+are unchanged.
+
 A `cast` record builds `CAST(arg AS tp)` with `BuildCastFunctionWithCheck` (the argument is a
 column of the record's rows or a constant, which is folded) under random type flags and error
 levels, and compares the built node (`sfDump`), the warnings of building, the `inUnion` metadata,
