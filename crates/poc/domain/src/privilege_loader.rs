@@ -38,10 +38,11 @@ use tidb_privilege::{
     ColumnsPrivRecord, DbRecord, DynamicPrivRecord, GlobalPrivRecord, Handle, MySQLPrivilege,
     TablesPrivRecord, UserRecord,
 };
-use tidb_systable::session_io::MYSQL_DB_ID;
+use tidb_systable::session_io::{MYSQL_DB_ID, SYS_VAR_CACHE_KEY, SYS_VAR_CACHE_PERIOD};
 use tidb_tablecodec::tablecodec as tc;
 use tidb_types::datum::{
-    Datum, KindInt64, KindMysqlEnum, KindMysqlJSON, KindMysqlSet, KindString, KindUint64,
+    Datum, KindInt64, KindMysqlEnum, KindMysqlJSON, KindMysqlSet, KindMysqlTime, KindString,
+    KindUint64,
 };
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
@@ -69,14 +70,17 @@ struct Inner {
     handle: Arc<Handle>,
     /// Serializes reloads so an older snapshot can never overwrite a newer one.
     reload_lock: tokio::sync::Mutex<()>,
-    /// Notified after each watch-triggered reload so the periodic timer resets (matching Go).
+    /// Notified after each watch-triggered privilege reload so the periodic timer resets.
     reset_tick: Notify,
+    /// Notified after each sysvar/privilege reload so the 30s `default_password_lifetime` timer resets.
+    reset_sysvar_tick: Notify,
     stop: tokio::sync::watch::Sender<bool>,
 }
 
 impl PrivilegeSync {
     /// Performs the initial load of `mysql.*` privilege tables from TiKV (failing fast on error)
-    /// and starts the background etcd `/tidb/privilege` watcher + periodic refresh loop.
+    /// and starts the background etcd `/tidb/privilege` + `/tidb/sysvars` watchers and periodic
+    /// refresh loops.
     pub async fn start(kv: KvClient, pd_endpoints: Vec<String>) -> Result<Self> {
         let initial = load_privileges_from_kv(&kv).await?;
         let handle = Arc::new(Handle::new(initial));
@@ -87,6 +91,7 @@ impl PrivilegeSync {
             handle,
             reload_lock: tokio::sync::Mutex::new(()),
             reset_tick: Notify::new(),
+            reset_sysvar_tick: Notify::new(),
             stop,
         });
         if has_etcd {
@@ -98,6 +103,11 @@ impl PrivilegeSync {
             PRIVILEGE_REFRESH_TICK_NO_ETCD
         };
         tokio::spawn(inner.clone().periodic_refresh_loop(tick));
+        tokio::spawn(
+            inner
+                .clone()
+                .periodic_sysvar_refresh_loop(SYS_VAR_CACHE_PERIOD),
+        );
         info!("cluster privilege cache loaded from mysql.*");
         Ok(Self { inner })
     }
@@ -131,6 +141,21 @@ impl Inner {
         Ok(())
     }
 
+    /// Lightweight refresh of `@@global.default_password_lifetime` from `mysql.global_variables`,
+    /// triggered by etcd `/tidb/sysvars` (`SET GLOBAL`) notifications and the 30s fallback tick.
+    async fn reload_default_password_lifetime(&self) -> Result<()> {
+        let _guard = self.reload_lock.lock().await;
+        let next = load_default_password_lifetime_from_kv(&self.kv).await?;
+        let cur = self.handle.get();
+        if cur.default_password_lifetime() == next {
+            return Ok(());
+        }
+        let mut updated = (*cur).clone();
+        updated.set_default_password_lifetime_opt(next);
+        self.handle.replace(updated);
+        Ok(())
+    }
+
     async fn periodic_refresh_loop(self: Arc<Self>, tick: Duration) {
         let mut stop = self.stop.subscribe();
         while !self.stopped() {
@@ -145,6 +170,26 @@ impl Inner {
                 }
                 _ = self.reset_tick.notified() => {
                     // Watch reload succeeded; reset periodic countdown (Go `domain.go:1985`).
+                }
+                _ = stop.changed() => return,
+            }
+        }
+    }
+
+    async fn periodic_sysvar_refresh_loop(self: Arc<Self>, tick: Duration) {
+        let mut stop = self.stop.subscribe();
+        while !self.stopped() {
+            tokio::select! {
+                _ = tokio::time::sleep(tick) => {
+                    if self.stopped() {
+                        return;
+                    }
+                    if let Err(e) = self.reload_default_password_lifetime().await {
+                        warn!(error = %e, "periodic default_password_lifetime reload failed; keeping previous value");
+                    }
+                }
+                _ = self.reset_sysvar_tick.notified() => {
+                    // Watch or full privilege reload refreshed global_variables; reset 30s countdown.
                 }
                 _ = stop.changed() => return,
             }
@@ -196,7 +241,7 @@ impl Inner {
             .await
             .map_err(|_| Error::Timeout)??;
         let revision = resp.header().map_or(0, |h| h.revision());
-        let (_watcher, mut stream) = tokio::time::timeout(
+        let (_priv_watcher, mut priv_stream) = tokio::time::timeout(
             ETCD_OP_TIMEOUT,
             etcd.watch(
                 keys::PRIVILEGE_NOTIFY,
@@ -205,72 +250,128 @@ impl Inner {
         )
         .await
         .map_err(|_| Error::Timeout)??;
+        let (_sysvar_watcher, mut sysvar_stream) = tokio::time::timeout(
+            ETCD_OP_TIMEOUT,
+            etcd.watch(
+                SYS_VAR_CACHE_KEY,
+                Some(WatchOptions::new().with_start_revision(revision + 1)),
+            ),
+        )
+        .await
+        .map_err(|_| Error::Timeout)??;
 
-        // Reload once right after establishing/reconnecting the watch stream so any GRANT/REVOKE
-        // committed between startup (or a prior watch error/compaction) and `revision + 1` is
-        // never missed.
+        // Reload once right after establishing/reconnecting both watch streams so any GRANT/REVOKE
+        // or SET GLOBAL default_password_lifetime committed between startup (or a prior watch
+        // error/compaction) and `revision + 1` is never missed.
         if let Err(e) = self.reload().await {
             warn!(error = %e, "privilege reload on watch connect failed; keeping previous snapshot");
         } else {
             *backoff = Duration::from_secs(1);
             self.reset_tick.notify_one();
+            self.reset_sysvar_tick.notify_one();
+        }
+
+        enum WatchEvent {
+            Privilege(Option<etcd_client::WatchResponse>),
+            SysVar(Option<etcd_client::WatchResponse>),
+            Stopped,
         }
 
         loop {
-            let msg = tokio::select! {
-                m = stream.message() => m?,
-                _ = stop.changed() => return Ok(()),
+            let ev = tokio::select! {
+                m = priv_stream.message() => WatchEvent::Privilege(m?),
+                m = sysvar_stream.message() => WatchEvent::SysVar(m?),
+                _ = stop.changed() => WatchEvent::Stopped,
             };
-            let Some(msg) = msg else {
-                return Err(Error::Other("privilege watch stream ended".to_owned()));
-            };
-            if msg.canceled() {
-                return Err(Error::Other("privilege watch canceled".to_owned()));
-            }
-            if msg.events().is_empty() {
-                continue;
-            }
-
-            // Coalesce burst notifications for up to 5 ms / 128 events (Go `domain.go:1971-1975`).
-            let mut batched = msg.events().len();
-            let deadline = tokio::time::Instant::now() + WATCH_BATCH_WINDOW;
-            while batched < WATCH_BATCH_MAX {
-                let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
-                else {
-                    break;
-                };
-                if remaining.is_zero() {
-                    break;
-                }
-                match tokio::time::timeout(remaining, stream.message()).await {
-                    Ok(Ok(Some(more))) => {
-                        if more.canceled() {
-                            return Err(Error::Other("privilege watch canceled".to_owned()));
-                        }
-                        batched += more.events().len();
-                    }
-                    Ok(Ok(None)) => {
+            match ev {
+                WatchEvent::Stopped => return Ok(()),
+                WatchEvent::Privilege(msg) => {
+                    let Some(msg) = msg else {
                         return Err(Error::Other("privilege watch stream ended".to_owned()));
+                    };
+                    if msg.canceled() {
+                        return Err(Error::Other("privilege watch canceled".to_owned()));
                     }
-                    Ok(Err(e)) => return Err(e.into()),
-                    Err(_) => break, // batch window elapsed
+                    if msg.events().is_empty() {
+                        continue;
+                    }
+                    let batched =
+                        drain_watch_burst(&mut priv_stream, msg.events().len(), "privilege")
+                            .await?;
+                    debug!(
+                        events = batched,
+                        "received /tidb/privilege notification; reloading privilege cache"
+                    );
+                    if let Err(e) = self.reload().await {
+                        warn!(
+                            error = %e,
+                            "privilege reload on etcd notification failed; keeping previous snapshot"
+                        );
+                    } else {
+                        self.reset_tick.notify_one();
+                        self.reset_sysvar_tick.notify_one();
+                    }
                 }
-            }
-
-            debug!(
-                events = batched,
-                "received /tidb/privilege notification; reloading privilege cache"
-            );
-            if let Err(e) = self.reload().await {
-                warn!(
-                    error = %e,
-                    "privilege reload on etcd notification failed; keeping previous snapshot"
-                );
-            } else {
-                self.reset_tick.notify_one();
+                WatchEvent::SysVar(msg) => {
+                    let Some(msg) = msg else {
+                        return Err(Error::Other("sysvar watch stream ended".to_owned()));
+                    };
+                    if msg.canceled() {
+                        return Err(Error::Other("sysvar watch canceled".to_owned()));
+                    }
+                    if msg.events().is_empty() {
+                        continue;
+                    }
+                    let batched =
+                        drain_watch_burst(&mut sysvar_stream, msg.events().len(), "sysvar").await?;
+                    debug!(
+                        events = batched,
+                        "received /tidb/sysvars notification; reloading default_password_lifetime"
+                    );
+                    if let Err(e) = self.reload_default_password_lifetime().await {
+                        warn!(
+                            error = %e,
+                            "default_password_lifetime reload on etcd notification failed; keeping previous value"
+                        );
+                    } else {
+                        self.reset_sysvar_tick.notify_one();
+                    }
+                }
             }
         }
     }
+}
+
+/// Coalesces burst watch notifications for up to 5 ms / 128 events (Go `domain.go:1971-1975`).
+async fn drain_watch_burst(
+    stream: &mut etcd_client::WatchStream,
+    initial: usize,
+    kind: &str,
+) -> Result<usize> {
+    let mut batched = initial;
+    let deadline = tokio::time::Instant::now() + WATCH_BATCH_WINDOW;
+    while batched < WATCH_BATCH_MAX {
+        let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
+            break;
+        };
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, stream.message()).await {
+            Ok(Ok(Some(more))) => {
+                if more.canceled() {
+                    return Err(Error::Other(format!("{kind} watch canceled")));
+                }
+                batched += more.events().len();
+            }
+            Ok(Ok(None)) => {
+                return Err(Error::Other(format!("{kind} watch stream ended")));
+            }
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => break, // batch window elapsed
+        }
+    }
+    Ok(batched)
 }
 
 /// Loads all `mysql.*` privilege tables from TiKV at a single consistent TSO snapshot.
@@ -341,9 +442,28 @@ fn peek_mysql_table_lower_name(raw: &[u8]) -> Option<String> {
         .map(str::to_lowercase)
 }
 
+/// Loads only `@@global.default_password_lifetime` from `mysql.global_variables` at a fresh TSO.
+pub async fn load_default_password_lifetime_from_kv(kv: &KvClient) -> Result<Option<u64>> {
+    let ts = kv.current_ts().await?;
+    let tables = load_mysql_table_infos_filtered(kv, ts, &["global_variables"]).await?;
+    let Some(tbl) = tables.get("global_variables") else {
+        return Ok(Some(0));
+    };
+    let rows = scan_table_records(kv, ts, tbl.id).await?;
+    parse_default_password_lifetime(tbl, &rows)
+}
+
 /// Reads `TableInfo` entries for [`LOADED_MYSQL_TABLES`] under `mysql` DB metadata at `ts`.
 /// Fails hard on corrupted JSON for any target table rather than silently treating it as missing.
 async fn load_mysql_table_infos(kv: &KvClient, ts: u64) -> Result<HashMap<String, TableInfo>> {
+    load_mysql_table_infos_filtered(kv, ts, LOADED_MYSQL_TABLES).await
+}
+
+async fn load_mysql_table_infos_filtered(
+    kv: &KvClient,
+    ts: u64,
+    wanted: &[&str],
+) -> Result<HashMap<String, TableInfo>> {
     let prefix = meta_keys::hash_data_prefix(&meta_keys::db_key(MYSQL_DB_ID));
     let range = KeyRange::new(prefix.clone(), meta_keys::prefix_next(&prefix));
     let pairs = kv.snapshot(ts).scan_all(range).await?;
@@ -356,7 +476,7 @@ async fn load_mysql_table_infos(kv: &KvClient, ts: u64) -> Result<HashMap<String
             continue;
         };
         if let Some(lower_name) = peek_mysql_table_lower_name(&v)
-            && !LOADED_MYSQL_TABLES.contains(&lower_name.as_str())
+            && !wanted.contains(&lower_name.as_str())
         {
             continue;
         }
@@ -366,7 +486,7 @@ async fn load_mysql_table_infos(kv: &KvClient, ts: u64) -> Result<HashMap<String
                 "corrupted TableInfo JSON in mysql meta (table_id={table_id}): {e}"
             ))
         })?;
-        if t.state == StatePublic && LOADED_MYSQL_TABLES.contains(&t.name.l.as_str()) {
+        if t.state == StatePublic && wanted.contains(&t.name.l.as_str()) {
             out.insert(t.name.l.clone(), t);
         }
     }
@@ -513,24 +633,56 @@ fn col_str(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> String {
         .unwrap_or_default()
 }
 
+/// Decodes `mysql.user.password_last_changed` (`TIMESTAMP`, decoded in UTC by [`RowDecoder`])
+/// into UTC Unix seconds. Returns `None` for SQL `NULL`, zero timestamps (`0000-00-00 00:00:00`),
+/// missing column, or invalid/unexpected datum types (which fail closed when effective lifetime > 0).
 #[allow(non_upper_case_globals)]
-fn decode_password_lifetime(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> Option<u16> {
+fn decode_password_last_changed(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> Option<i64> {
     let d = col_id.and_then(|id| row.get(&id))?;
     if d.is_null() {
         return None;
     }
     match d.kind() {
+        KindMysqlTime => {
+            let t = d.get_mysql_time();
+            if t.is_zero() {
+                return None;
+            }
+            let (gt, err) = t.go_time(&utc());
+            if err.is_err() {
+                return None;
+            }
+            Some(gt.unix())
+        }
+        _ => None,
+    }
+}
+
+/// Decodes `mysql.user.password_lifetime` into `(lifetime_days, invalid)`.
+/// When the column holds an unexpected non-null datum type, returns `(None, true)` so
+/// `is_password_expired_at` fails closed rather than treating it as a huge valid lifetime.
+#[allow(non_upper_case_globals)]
+fn decode_password_lifetime(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> (Option<u16>, bool) {
+    let Some(d) = col_id.and_then(|id| row.get(&id)) else {
+        return (None, false);
+    };
+    if d.is_null() {
+        return (None, false);
+    }
+    match d.kind() {
         KindInt64 => {
             let v = d.get_int64();
             if v <= 0 {
-                Some(0)
+                (Some(0), false)
             } else {
-                Some(u16::try_from(v).unwrap_or(u16::MAX))
+                (Some(u16::try_from(v).unwrap_or(u16::MAX)), false)
             }
         }
-        KindUint64 => Some(u16::try_from(d.get_uint64()).unwrap_or(u16::MAX)),
-        // Unexpected non-null type: fail closed as positive lifetime.
-        _ => Some(u16::MAX),
+        KindUint64 => (
+            Some(u16::try_from(d.get_uint64()).unwrap_or(u16::MAX)),
+            false,
+        ),
+        _ => (None, true),
     }
 }
 
@@ -622,6 +774,7 @@ pub fn decode_mysql_user(
     let locked_id = optional_col(tbl, "account_locked");
     let plugin_id = optional_col(tbl, "plugin");
     let pwd_expired_id = optional_col(tbl, "password_expired");
+    let pwd_last_changed_id = optional_col(tbl, "password_last_changed");
     let pwd_lifetime_id = optional_col(tbl, "password_lifetime");
     let user_attrs_id = optional_col(tbl, "user_attributes");
     let priv_cols: Vec<(i64, PrivilegeType)> = tbl
@@ -645,7 +798,9 @@ pub fn decode_mysql_user(
         let plugin = col_str(&row, plugin_id);
         let account_locked = col_str(&row, locked_id).eq_ignore_ascii_case("Y");
         let password_expired = col_str(&row, pwd_expired_id).eq_ignore_ascii_case("Y");
-        let password_lifetime = decode_password_lifetime(&row, pwd_lifetime_id);
+        let password_last_changed = decode_password_last_changed(&row, pwd_last_changed_id);
+        let (password_lifetime, password_lifetime_invalid) =
+            decode_password_lifetime(&row, pwd_lifetime_id);
         let has_failed_login_policy = has_failed_login_policy_in_attrs(&row, user_attrs_id);
         let mut privs = 0u64;
         for &(cid, p) in &priv_cols {
@@ -659,25 +814,26 @@ pub fn decode_mysql_user(
                 .with_auth_plugin(plugin)
                 .with_account_locked(account_locked)
                 .with_password_expired(password_expired)
+                .with_password_last_changed(password_last_changed)
                 .with_password_lifetime(password_lifetime)
+                .with_password_lifetime_invalid(password_lifetime_invalid)
                 .with_failed_login_policy(has_failed_login_policy),
         );
     }
     Ok(())
 }
 
-/// Decodes `default_password_lifetime` from `mysql.global_variables` into `out`.
-///
-/// Accounts whose `mysql.user.password_lifetime` is `NULL` (the `CREATE USER` default) inherit
-/// `@@global.default_password_lifetime`. Unparseable non-empty values fail closed (`u64::MAX`).
-pub fn decode_mysql_global_variables(
+/// Parses `default_password_lifetime` from scanned `mysql.global_variables` records.
+/// Returns `Some(0)` if the variable is absent or empty, `Some(days)` if valid, and `None`
+/// (fail-closed) if the stored value is non-empty and unparseable.
+fn parse_default_password_lifetime(
     tbl: &TableInfo,
     records: &[(Vec<u8>, Vec<u8>)],
-    out: &mut MySQLPrivilege,
-) -> Result<()> {
+) -> Result<Option<u64>> {
     let name_id = require_col(tbl, "variable_name")?;
     let val_id = require_col(tbl, "variable_value")?;
     let decoder = RowDecoder::new(tbl);
+    let mut parsed = Some(0);
 
     for (k, v) in records {
         if !tc::is_record_key(k) {
@@ -690,22 +846,35 @@ pub fn decode_mysql_global_variables(
         }
         let val = col_str(&row, Some(val_id));
         let trimmed = val.trim();
-        let days = if trimmed.is_empty() {
-            0
+        parsed = if trimmed.is_empty() {
+            Some(0)
         } else {
             match trimmed.parse::<u64>() {
-                Ok(n) => n,
+                Ok(n) => Some(n),
                 Err(_) => {
                     warn!(
                         value = %trimmed,
                         "unparseable default_password_lifetime in mysql.global_variables; failing closed"
                     );
-                    u64::MAX
+                    None
                 }
             }
         };
-        out.set_default_password_lifetime(days);
     }
+    Ok(parsed)
+}
+
+/// Decodes `default_password_lifetime` from `mysql.global_variables` into `out`.
+///
+/// Accounts whose `mysql.user.password_lifetime` is `NULL` (the `CREATE USER` default) inherit
+/// `@@global.default_password_lifetime`. Unparseable non-empty values fail closed (`None`).
+pub fn decode_mysql_global_variables(
+    tbl: &TableInfo,
+    records: &[(Vec<u8>, Vec<u8>)],
+    out: &mut MySQLPrivilege,
+) -> Result<()> {
+    let parsed = parse_default_password_lifetime(tbl, records)?;
+    out.set_default_password_lifetime_opt(parsed);
     Ok(())
 }
 
@@ -954,19 +1123,32 @@ mod tests {
     use super::*;
     use tidb_base::mysql::{
         InsertPriv, SelectPriv, SuperPriv, TypeEnum, TypeJSON, TypeSet, TypeShort, TypeString,
-        TypeVarchar, UnsignedFlag, UpdatePriv,
+        TypeTimestamp, TypeVarchar, UnsignedFlag, UpdatePriv,
     };
     use tidb_kv::key::{Handle as KvHandle, IntHandle, new_common_handle};
     use tidb_model::{IndexColumn, IndexInfo};
     use tidb_parser::model::CIStr;
     use tidb_privilege::{PrivilegeManager, UserPrivileges};
     use tidb_tablecodec::rowcodec::encoder::Encoder as RowEncoder;
+    use tidb_types::core_time::ZeroCoreTime;
     use tidb_types::datum::{
-        new_mysql_enum_datum, new_mysql_set_datum, new_string_datum, new_uint_datum,
+        new_mysql_enum_datum, new_mysql_set_datum, new_string_datum, new_time_datum, new_uint_datum,
     };
     use tidb_types::enum_type::parse_enum_name;
     use tidb_types::json::parse_binary_json_from_string;
     use tidb_types::set_type::parse_set_name;
+    use tidb_types::time::{from_date_checked, new_time};
+
+    fn timestamp_col(id: i64, offset: isize, name: &str) -> Arc<ColumnInfo> {
+        Arc::new(ColumnInfo {
+            id,
+            name: CIStr::new(name),
+            offset,
+            field_type: FieldType::new(TypeTimestamp),
+            state: StatePublic,
+            ..Default::default()
+        })
+    }
 
     fn char_col(id: i64, offset: isize, name: &str) -> Arc<ColumnInfo> {
         let mut ft = FieldType::new(TypeString);
@@ -1115,6 +1297,7 @@ mod tests {
                 enum_yn_col(8, 7, "password_expired"),
                 smallint_unsigned_col(9, 8, "password_lifetime"),
                 json_col(10, 9, "User_attributes"),
+                timestamp_col(11, 10, "Password_last_changed"),
             ]),
             state: StatePublic,
             ..Default::default()
@@ -1122,6 +1305,12 @@ mod tests {
         let yn = &[b"N".to_vec(), b"Y".to_vec()];
         let e_y = new_mysql_enum_datum(parse_enum_name(yn, b"Y", "").unwrap());
         let e_n = new_mysql_enum_datum(parse_enum_name(yn, b"N", "").unwrap());
+        let ts_2026_utc = new_time_datum(new_time(
+            from_date_checked(2026, 11, 1, 12, 30, 45, 0).0,
+            TypeTimestamp,
+            0,
+        ));
+        let ts_zero = new_time_datum(new_time(ZeroCoreTime, TypeTimestamp, 0));
         let mut lock_policy_json = Datum::default();
         lock_policy_json.set_mysql_json(
             parse_binary_json_from_string(
@@ -1147,11 +1336,11 @@ mod tests {
                     e_n.clone(),
                 ],
             ),
-            // v2-encoded normal account.
+            // v2-encoded normal account with a concrete UTC Password_last_changed timestamp.
             encode_v2_record(
                 5,
                 2,
-                &[1, 2, 3, 4, 5, 6, 7],
+                &[1, 2, 3, 4, 5, 6, 7, 11],
                 &[
                     new_string_datum("%".to_owned()),
                     new_string_datum("u_app".to_owned()),
@@ -1160,13 +1349,14 @@ mod tests {
                     e_n.clone(),
                     e_n.clone(),
                     new_string_datum("mysql_native_password".to_owned()),
+                    ts_2026_utc,
                 ],
             ),
-            // v2-encoded locked role row.
+            // v2-encoded locked role row with zero Password_last_changed (decodes to None).
             encode_v2_record(
                 5,
                 3,
-                &[1, 2, 3, 4, 5, 6],
+                &[1, 2, 3, 4, 5, 6, 11],
                 &[
                     new_string_datum("%".to_owned()),
                     new_string_datum("r_reader".to_owned()),
@@ -1174,6 +1364,7 @@ mod tests {
                     e_n.clone(),
                     e_n.clone(),
                     e_y.clone(),
+                    ts_zero,
                 ],
             ),
             // v2-encoded non-native plugin (`tidb_auth_token`) with empty authentication_string.
@@ -1517,8 +1708,37 @@ mod tests {
         let restricted_rec = snap.match_user("u_restricted", "127.0.0.1").unwrap();
         assert!(restricted_rec.password_expired);
         assert_eq!(restricted_rec.password_lifetime, Some(30));
+        assert!(!restricted_rec.password_lifetime_invalid);
+        assert_eq!(restricted_rec.password_last_changed, None);
         assert!(restricted_rec.has_failed_login_policy);
-        assert_eq!(snap.default_password_lifetime(), 90);
+        assert_eq!(snap.default_password_lifetime(), Some(90));
+
+        // Verify UTC `Password_last_changed` decoding (concrete timestamp vs zero timestamp).
+        let app_rec = snap.match_user("u_app", "127.0.0.1").unwrap();
+        let (expected_gt, err) = new_time(
+            from_date_checked(2026, 11, 1, 12, 30, 45, 0).0,
+            TypeTimestamp,
+            0,
+        )
+        .go_time(&utc());
+        err.unwrap();
+        assert_eq!(app_rec.password_last_changed, Some(expected_gt.unix()));
+        let role_rec = snap.match_user("r_reader", "127.0.0.1").unwrap();
+        assert_eq!(role_rec.password_last_changed, None);
+
+        // Verify unparseable `default_password_lifetime` fails closed (`None`).
+        let bad_gv_rows = vec![encode_v2_record(
+            13,
+            2,
+            &[1, 2],
+            &[
+                new_string_datum("default_password_lifetime".to_owned()),
+                new_string_datum("not-a-number".to_owned()),
+            ],
+        )];
+        let mut mp_bad_gv = MySQLPrivilege::new();
+        decode_mysql_global_variables(&gv_tbl, &bad_gv_rows, &mut mp_bad_gv).unwrap();
+        assert_eq!(mp_bad_gv.default_password_lifetime(), None);
 
         // Verify unrelated mysql.* table names are skipped by `peek_mysql_table_lower_name`.
         assert_eq!(
