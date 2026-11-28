@@ -640,7 +640,16 @@ where
                         // plain TCP (Go TiDB v8.5.8 also rejects 0x02 with 1045).
                         (false, true)
                     } else {
-                        let plaintext = full_auth.strip_suffix(&[0]).unwrap_or(&full_auth);
+                        // Match Go `authSha` (`bytes.Trim(data, "\x00")`, pkg/server/conn.go:755).
+                        let start = full_auth
+                            .iter()
+                            .position(|&b| b != 0)
+                            .unwrap_or(full_auth.len());
+                        let end = full_auth
+                            .iter()
+                            .rposition(|&b| b != 0)
+                            .map_or(start, |i| i + 1);
+                        let plaintext = &full_auth[start..end];
                         (
                             cred.verify_caching_sha2_plaintext(plaintext),
                             !plaintext.is_empty() || !empty,

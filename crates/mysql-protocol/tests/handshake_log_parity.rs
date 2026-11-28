@@ -10,6 +10,8 @@ use std::time::Duration;
 use mysql_async::{Opts, OptsBuilder};
 use tidb_base::config::LogConfig;
 use tidb_log::sink::{LogSink, MemorySink};
+use tidb_mysql_protocol::constants::{auth_plugin, capability::*};
+use tidb_mysql_protocol::packet::PacketIo;
 use tidb_mysql_protocol::{
     AccountAuth, ConnectionInfo, Credential, OkInfo, Param, PreparedInfo, Response, Server,
     ServerConfig, SessionFactory, SessionHandler, SqlError,
@@ -36,6 +38,9 @@ impl SessionFactory for AuthTestFactory {
                 auth_host: Some("%".to_owned()),
                 account_locked: true,
             }),
+            "sha2_user" => Some(AccountAuth::from(Credential::caching_sha2_from_password(
+                "secret123",
+            ))),
             _ => None,
         }
     }
@@ -293,6 +298,54 @@ async fn handshake_eof_auth_failure_and_lifecycle_logs_match_go() {
             "[DEBUG] [conn.rs:LINE] [\"connection closed\"] [conn=7]",
         ]
     );
+
+    // 8 & 9. caching_sha2_password empty auth (`[]` from drivers and `[0x00]` from libmysqlclient)
+    //        against a non-empty hash: both pin `[privilege:1045]...(using password: NO)` on wire
+    //        and in whole-line handshake logs.
+    for (idx, empty_payload) in [&b""[..], &b"\0"[..]].into_iter().enumerate() {
+        let conn_id = 8 + idx;
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut io = PacketIo::new(stream, 1 << 20);
+        let _hs = io.read_packet().await.unwrap();
+        let caps = CLIENT_PROTOCOL_41
+            | CLIENT_SECURE_CONNECTION
+            | CLIENT_PLUGIN_AUTH
+            | CLIENT_LONG_PASSWORD;
+        let resp = tidb_mysql_protocol::handshake::encode_handshake_response(
+            caps,
+            "sha2_user",
+            empty_payload,
+            None,
+            auth_plugin::CACHING_SHA2_PASSWORD,
+        );
+        io.write_packet(&resp).await.unwrap();
+        io.flush().await.unwrap();
+        let mut pkt = io.read_packet().await.unwrap();
+        assert_eq!(pkt[0], 0xfe, "expected AuthSwitchRequest");
+        io.write_packet(empty_payload).await.unwrap();
+        io.flush().await.unwrap();
+        pkt = io.read_packet().await.unwrap();
+        assert_eq!(pkt[0], 0xff, "expected ERR packet");
+        assert_eq!(u16::from_le_bytes([pkt[1], pkt[2]]), 1045);
+        assert_eq!(
+            std::str::from_utf8(&pkt[9..]).unwrap(),
+            "Access denied for user 'sha2_user'@'127.0.0.1' (using password: NO)"
+        );
+
+        let lines = take_lines(&sink, 3).await;
+        assert_eq!(
+            lines,
+            vec![
+                "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]".to_owned(),
+                format!(
+                    "[WARN] [conn.rs:LINE] [\"open new session or authentication failure\"] [conn={conn_id}] [error=\"[privilege:1045]Access denied for user 'sha2_user'@'127.0.0.1' (using password: NO)\"]"
+                ),
+                format!(
+                    "[WARN] [conn.rs:LINE] [\"Server.onConn handshake\"] [conn={conn_id}] [error=\"[privilege:1045]Access denied for user 'sha2_user'@'127.0.0.1' (using password: NO)\"] [\"remote addr\"=127.0.0.1:PORT]"
+                ),
+            ]
+        );
+    }
 
     let _ = stop_tx.send(());
     srv.await.unwrap();

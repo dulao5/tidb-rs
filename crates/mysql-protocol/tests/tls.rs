@@ -572,5 +572,52 @@ async fn caching_sha2_password_over_tls_and_plain_tcp() {
                 );
             }
         }
+
+        // 8. Full-auth NUL trimming matches Go `bytes.Trim(data, "\x00")` (leading + trailing NULs).
+        {
+            let mut tcp = TcpStream::connect(addr).await.unwrap();
+            let _ = read_handshake(&mut tcp).await;
+            let caps = CLIENT_PROTOCOL_41
+                | CLIENT_SECURE_CONNECTION
+                | CLIENT_PLUGIN_AUTH
+                | CLIENT_SSL
+                | CLIENT_LONG_PASSWORD;
+            tokio::io::AsyncWriteExt::write_all(&mut tcp, &ssl_request(caps))
+                .await
+                .unwrap();
+            let connector = tokio_rustls::TlsConnector::from(client_config(&generated.cert_pem));
+            let tls = connector
+                .connect("localhost".try_into().unwrap(), tcp)
+                .await
+                .unwrap();
+            let mut io = PacketIo::new(tls, 1 << 20);
+            io.set_sequence(2);
+            let resp = tidb_mysql_protocol::handshake::encode_handshake_response(
+                caps,
+                "bob",
+                &[0x11; 32],
+                None,
+                auth_plugin::CACHING_SHA2_PASSWORD,
+            );
+            io.write_packet(&resp).await.unwrap();
+            io.flush().await.unwrap();
+            let mut pkt = io.read_packet().await.unwrap();
+            if pkt[0] == 0xfe {
+                io.write_packet(&[0x11; 32]).await.unwrap();
+                io.flush().await.unwrap();
+                pkt = io.read_packet().await.unwrap();
+            }
+            assert_eq!(pkt, [0x01, 0x04]);
+            let mut padded = vec![0x00, 0x00];
+            padded.extend_from_slice(PASSWORD.as_bytes());
+            padded.extend_from_slice(&[0x00, 0x00]);
+            io.write_packet(&padded).await.unwrap();
+            io.flush().await.unwrap();
+            let ok = io.read_packet().await.unwrap();
+            assert_eq!(
+                ok[0], 0x00,
+                "leading/trailing NULs must be trimmed like Go bytes.Trim (default={default_plugin}): {ok:?}"
+            );
+        }
     }
 }
