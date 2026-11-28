@@ -440,15 +440,15 @@ pub fn save_logical_plan_build_ctx() -> Result<(), Error> {
 /// `buildAndOptimizeLogicalPlanRound`: one build of the logical plan and its optimization.
 ///
 /// `PlanBuilder.Build` returns a logical plan for every statement it builds (the other
-/// statements are boundaries), so Go's non-logical branch is not reached. The privilege
-/// check needs the privilege manager, which the new stack does not have (VS1 plan §3.2):
-/// Go skips it when no manager is registered. The cascades planner (`tidb_enable_cascades_planner`
+/// statements are boundaries), so Go's non-logical branch is not reached. When a privilege
+/// manager is bound on `ctx`, `visit_info4_priv_check` + `check_privilege` run fail-fast;
+/// otherwise Go's nil-manager skip is taken. The cascades planner (`tidb_enable_cascades_planner`
 /// / the `USE_CASCADES` hint) is a boundary. Returns the best plan, its names and cost.
 ///
 /// Go's builder reads each node's own text (`SelectField.Text()` names an expression
 /// column); the Rust AST keeps spans into the statement's text, which the node wrapper
 /// carries, so the builder's `sql_text` is set from it after `Init`.
-// go: buildAndOptimizeLogicalPlanRound L2 (Build returns only logical plans; no privilege manager, D04.1; cascades is blocked-by:D09.17; the builder takes the node's text)
+// go: buildAndOptimizeLogicalPlanRound L2 (Build returns only logical plans; cascades is blocked-by:D09.17; the builder takes the node's text)
 fn build_and_optimize_logical_plan_round(
     ctx: &mut PlanCtx<'_>,
     node: &NodeW<'_>,
@@ -487,16 +487,17 @@ fn build_and_optimize_with_builder<'ast>(
     if !*checked {
         // Keep privilege and lock checks fail-fast. These depend on visitInfo
         // produced by the logical build, but not on the later cost winner.
-        // if pm := privilege.GetPrivilegeManager(sctx); pm != nil: there is no privilege
-        // manager (D04.1), VisitInfo4PrivCheck / CheckPrivilege are not called.
-        let _ = visit_info4_priv_check;
+        if let Some(pm) = ctx.privilege_manager.as_deref() {
+            let priv_visit_info =
+                visit_info4_priv_check(is, Some(node.node), builder.get_visit_info());
+            crate::core::optimizer::check_privilege(&ctx.vars.active_roles, pm, &priv_visit_info)?;
+        }
 
         check_table_lock(builder.get_visit_info())?;
 
         check_table_mode(node)?;
         *checked = true;
     }
-    let _ = is;
 
     // core.RecheckCTE(logic): CTEs are D09.5 (the builder stops at WITH).
 
@@ -597,13 +598,13 @@ pub fn optimize_exec_stmt(
     Ok((exec, names))
 }
 
-/// `exec.PrepStmt.VisitInfos`: `PlanCacheStmt` does not keep the visit infos yet (D13.1:
-/// they feed the privilege check of a cached plan, and there is no privilege manager).
-// glue: PlanCacheStmt.VisitInfos (not kept by the Rust PlanCacheStmt)
+/// Returns `exec.PrepStmt.VisitInfos` so `StmtCtx.tables` is populated on `EXECUTE`
+/// (`specs/D04.1-privilege/spec.md` §5.2 item 8).
+// glue: PlanCacheStmt.VisitInfos
 fn prep_stmt_visit_infos(
-    _prep_stmt: &crate::core::plan_cache_utils::PlanCacheStmt,
+    prep_stmt: &crate::core::plan_cache_utils::PlanCacheStmt,
 ) -> Vec<crate::core::planbuilder::VisitInfo> {
-    Vec::new()
+    prep_stmt.visit_infos.clone()
 }
 
 /// The resets of `buildLogicalPlan` before `Build`: the plan and column ids,

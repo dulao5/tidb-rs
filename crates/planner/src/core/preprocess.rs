@@ -34,8 +34,9 @@ use std::sync::{Arc, LazyLock};
 use tidb_base::blocked::blocked;
 use tidb_base::dbterror::ErrDerivedMustHaveAlias;
 use tidb_base::dbterror::plannererrors::{
-    ErrInternal, ErrNoDB, ErrNonUniqTable, ErrWrongArguments, ErrWrongUsage,
+    ErrInternal, ErrNoDB, ErrNonUniqTable, ErrTableaccessDenied, ErrWrongArguments, ErrWrongUsage,
 };
+use tidb_base::go_args;
 use tidb_base::gofmt::Arg;
 use tidb_base::mysql::{self, ModeOracle, SQLMode};
 use tidb_base::terror::ClassParser;
@@ -99,6 +100,13 @@ pub fn with_domain_info_schema(is: Arc<dyn InfoSchemaLookup>) -> PreprocessOpt {
     Box::new(move |p| p.domain_info_schema = Some(is))
 }
 
+/// The session's privilege manager (`privilege.GetPrivilegeManager(sctx)`), used by
+/// `table_by_name` to avoid leaking missing-table existence (`1142` vs `1146`, R31).
+// glue: privilege.GetPrivilegeManager(sctx) for the preprocessor (M-CTX)
+pub fn with_privilege_manager(pm: tidb_privilege::PrivilegeManagerRef) -> PreprocessOpt {
+    Box::new(move |p| p.privilege_manager = Some(pm))
+}
+
 /// TryAddExtraLimit trys to add an extra limit for SELECT or UNION statement when sql_select_limit is set.
 ///
 /// Go returns a shallow copy of the statement with `Limit` set; the statement is changed in
@@ -159,6 +167,7 @@ pub fn preprocess(
         err: None,
         resolve_ctx: node.get_resolve_context(),
         domain_info_schema: None,
+        privilege_manager: None,
     };
     for opt_fn in preprocess_opt {
         opt_fn(&mut v);
@@ -291,6 +300,8 @@ pub struct Preprocessor<'a> {
     resolve_ctx: ContextRef,
     /// The session's domain InfoSchema ([`with_domain_info_schema`]).
     domain_info_schema: Option<Arc<dyn InfoSchemaLookup>>,
+    /// The session's privilege manager ([`with_privilege_manager`]).
+    privilege_manager: Option<tidb_privilege::PrivilegeManagerRef>,
 }
 
 /// A node the walker hands to `Enter` / `Leave` (Go: `ast.Node`).
@@ -727,12 +738,41 @@ impl Preprocessor<'_> {
         });
     }
 
+    /// Returns the statement-appropriate `(privilege, column)` required to inspect a missing
+    /// table without leaking `1146 Table '...' doesn't exist` (R31, D4 option A;
+    /// `specs/D04.1-privilege/spec.md` §6.1 D4).
+    // glue: R31 missing-table statement-appropriate privilege check
+    fn missing_table_check_priv(&self) -> (mysql::PrivilegeType, &'static str) {
+        match self.stmt_tp {
+            TYPE_DELETE => (mysql::DeletePriv, ""),
+            TYPE_UPDATE => (mysql::UpdatePriv, ""),
+            TYPE_INSERT => (mysql::InsertPriv, ""),
+            TYPE_DROP => (mysql::DropPriv, ""),
+            TYPE_CREATE => (mysql::CreatePriv, ""),
+            TYPE_ALTER => (mysql::AlterPriv, ""),
+            TYPE_RENAME => (
+                mysql::PrivilegeType(mysql::DropPriv.0 | mysql::AlterPriv.0),
+                "",
+            ),
+            TYPE_REPAIR => (
+                mysql::PrivilegeType(mysql::SelectPriv.0 | mysql::InsertPriv.0),
+                "",
+            ),
+            TYPE_SHOW => (mysql::AllPrivMask, ""),
+            TYPE_IMPORT_INTO => (mysql::InsertPriv, ""),
+            // Read statements (`TYPE_SELECT` and uncaught read cases): check `SelectPriv` with
+            // `column = "*"` instead of Go's `AllPrivMask` so users holding non-SELECT grants
+            // (e.g. `INSERT ON test.*`) receive `1142` instead of `1146`.
+            _ => (mysql::SelectPriv, "*"),
+        }
+    }
+
     /// The table's meta (Go returns the `table.Table`; the callers here use its `Meta()`).
     ///
-    /// When the lookup fails, Go checks the user's privileges on the table first so that it
-    /// never tells a user without them whether the table exists. The privilege manager is
-    /// D04.1: a failed lookup is a boundary stub until then (the PoC answers).
-    // go: preprocessor.tableByName L2 (the privilege check of a failed lookup: blocked-by:D04.1)
+    /// When the lookup fails and a `PrivilegeManager` is bound, checks the statement's required
+    /// privilege (`SelectPriv` with `column = "*"` for read statements per ruling R31 / D4 A) so
+    /// unauthorized users receive `1142` rather than `1146` table-existence leakage.
+    // go: preprocessor.tableByName L2 (R31: checks statement-appropriate privilege instead of AllPrivMask)
     fn table_by_name(&mut self, tn: &TableName) -> Result<Arc<tidb_model::TableInfo>, Error> {
         let mut current_db = self.vars.current_db.clone();
         if !tn.schema.o.is_empty() {
@@ -749,14 +789,26 @@ impl Preprocessor<'_> {
                 if tidb_base::blocked::blocked_by(&err).is_some() {
                     return Err(err);
                 }
-                // privilege.GetPrivilegeManager(p.sctx).RequestVerification(...) →
-                // ErrTableaccessDenied.GenWithStackByArgs(p.stmtType(), u, h, tn.Name.O)
-                let _ = self.stmt_type();
-                // glue: blocked-by:D04.1 (the privilege check of a failed table lookup)
-                Err(blocked(
-                    "D04.1",
-                    "the privilege check of a table that is not found",
-                ))
+                if let Some(pm) = self.privilege_manager.as_deref() {
+                    let (req_priv, col) = self.missing_table_check_priv();
+                    if !pm.request_verification(
+                        &self.vars.active_roles,
+                        &s_name.l,
+                        &tn.name.o,
+                        col,
+                        req_priv,
+                    ) {
+                        let (u, h) =
+                            tidb_parser::auth::get_user_and_host_name(self.vars.user.as_ref());
+                        return Err(ErrTableaccessDenied.gen_with_stack_by_args(go_args![
+                            self.stmt_type(),
+                            u,
+                            h,
+                            tn.name.o.clone()
+                        ]));
+                    }
+                }
+                Err(err)
             }
         }
     }

@@ -18,6 +18,8 @@ tidb-execdetails = { workspace = true }
 tidb-parser = { workspace = true }
 # SessionVars, StatementContext (D05.2, D00.1).
 tidb-sessionctx = { workspace = true }
+# PrivilegeManager interface (D04.1).
+tidb-privilege = { workspace = true }
 # Datum parameters.
 tidb-types = { workspace = true }
 # Planner and executors (VS1-10…VS1-15).
