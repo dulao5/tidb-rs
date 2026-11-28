@@ -1678,6 +1678,42 @@ fn is_r29_gby_col_vi(entry: &Value, resolved_tables: &[(String, String)]) -> boo
             )
 }
 
+/// The resolved tables whose `_tidb_rowid` `sql` references (ruling R32): `t._tidb_rowid`
+/// names table `t`; an unqualified `_tidb_rowid` names the statement's only table. Each of
+/// them must register exactly its own R32 entry, and no other table may register one.
+/// `None`: an unqualified `_tidb_rowid` among several tables, which the builder resolves (or
+/// reports ambiguous); then any of the tables may register it, and at least one must.
+fn r32_rowid_tables(
+    sql: &str,
+    resolved_tables: &[(String, String)],
+) -> Option<Vec<(String, String)>> {
+    let lower = sql.to_lowercase();
+    let mut tables: Vec<(String, String)> = Vec::new();
+    let mut add = |t: &(String, String)| {
+        if !tables.contains(t) {
+            tables.push(t.clone());
+        }
+    };
+    for (pos, _) in lower.match_indices("_tidb_rowid") {
+        let before = lower[..pos].trim_end_matches('`');
+        if let Some(qual) = before.strip_suffix('.') {
+            let qual = qual.trim_end_matches('`');
+            let start = qual
+                .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .map_or(0, |i| i + 1);
+            let name = &qual[start..];
+            for t in resolved_tables.iter().filter(|(_, t)| t == name) {
+                add(t);
+            }
+        } else if let [only] = resolved_tables {
+            add(only);
+        } else {
+            return None;
+        }
+    }
+    Some(tables)
+}
+
 /// Checks whether `got` equals Go's `out` once the exact `R29` table-read `("*", 1142)` entries
 /// for the statement's resolved base tables (including those folded into `TableDual` by
 /// `WHERE 0` / `LIMIT 0`, per specs/D04.1-privilege/spec.md §5.1), `R29` `GROUP BY` column `1143`
@@ -1687,6 +1723,7 @@ fn is_r29_gby_col_vi(entry: &Value, resolved_tables: &[(String, String)]) -> boo
 /// actually emitted its exact `R29` entry in `got["vi"]` and every other field (`plan`,
 /// `plan_id`, `col_id`, `opt_flag`, remaining `vi`, `w`) matches Go byte-for-byte.
 fn matches_with_r29_vi_normalization(
+    sql: &str,
     out: &Value,
     got: &Value,
     resolved_tables: &[(String, String)],
@@ -1728,8 +1765,13 @@ fn matches_with_r29_vi_normalization(
     }
 
     // R32: `_tidb_rowid` references now register full-table SelectPriv (`column = ""`, 1143)
-    // where Go v8.5.8 emitted none.
-    let r32_rowid_entries: Vec<Value> = resolved_tables
+    // where Go v8.5.8 emitted none. The entry must name the table whose `_tidb_rowid` the
+    // statement references (in a join, the qualified side), and every referenced table must
+    // have one.
+    let r32_tables = r32_rowid_tables(sql, resolved_tables);
+    let r32_rowid_entries: Vec<Value> = r32_tables
+        .as_deref()
+        .unwrap_or(resolved_tables)
         .iter()
         .map(|(db, tbl)| {
             json!([
@@ -1746,16 +1788,23 @@ fn matches_with_r29_vi_normalization(
         .collect();
 
     let mut rem_got_vi = Vec::with_capacity(got_vi.len());
+    let mut r32_seen = vec![false; r32_rowid_entries.len()];
     for entry in got_vi {
         if let Some(pos) = expected_entries.iter().position(|e| e == entry) {
             expected_entries.remove(pos);
-        } else if r32_rowid_entries.contains(entry) {
+        } else if let Some(pos) = r32_rowid_entries.iter().position(|e| e == entry) {
             // R32 `_tidb_rowid` entry (not emitted by Go v8.5.8).
+            r32_seen[pos] = true;
         } else {
             rem_got_vi.push(entry.clone());
         }
     }
-    if !expected_entries.is_empty() {
+    let r32_ok = if r32_tables.is_some() {
+        !r32_seen.contains(&false)
+    } else {
+        r32_seen.contains(&true)
+    };
+    if !expected_entries.is_empty() || !r32_ok {
         return false;
     }
 
@@ -1938,6 +1987,7 @@ fn govec_selectbuild() {
                         equal += 1;
                     }
                 } else if matches_with_r29_vi_normalization(
+                    sql,
                     out,
                     &got,
                     &resolved_tables,

@@ -832,6 +832,87 @@ fn every_fallback_point_restores_the_session() {
     }
 }
 
+/// The privilege errors of a join come from the plan build on the new stack and are
+/// returned, not a fallback (`specs/D09.3-join-build/spec.md` §6.4): 1143 for a USING column
+/// (both sides are registered), 1143 for `_tidb_rowid` of a joined table (ruling R32), 1142
+/// for a table without read access, and 1142 for a table placed after a joined subtree even
+/// when a column of the subtree is denied too (ruling R30 over the whole statement). The
+/// session is idle afterwards and keeps no warning.
+#[test]
+fn join_privilege_errors_come_from_the_new_stack() {
+    use tidb_base::mysql::{PrivilegeType, SelectPriv};
+    use tidb_parser::auth::UserIdentity;
+    use tidb_privilege::{ColumnsPrivRecord, Handle, MySQLPrivilege, UserPrivileges, UserRecord};
+
+    let mut p = MySQLPrivilege::new();
+    // SELECT(id) on sbtest1 and SELECT(a) on t2.
+    p.add_user(UserRecord::new("%", "u_cols", PrivilegeType(0)));
+    p.add_column_priv(ColumnsPrivRecord::new(
+        "u_cols", "%", "test", "sbtest1", "id", SelectPriv,
+    ));
+    p.add_column_priv(ColumnsPrivRecord::new(
+        "u_cols", "%", "test", "t2", "a", SelectPriv,
+    ));
+    // SELECT(id) on sbtest1 only.
+    p.add_user(UserRecord::new("%", "u_sb", PrivilegeType(0)));
+    p.add_column_priv(ColumnsPrivRecord::new(
+        "u_sb", "%", "test", "sbtest1", "id", SelectPriv,
+    ));
+    let handle = Arc::new(Handle::new(p));
+
+    for (user, sql, code, want) in [
+        (
+            "u_cols",
+            "SELECT s1.id FROM sbtest1 s1 JOIN sbtest1 s2 USING (c)",
+            1143,
+            "for column 'c' in table 'sbtest1'",
+        ),
+        (
+            "u_cols",
+            "SELECT t2._tidb_rowid FROM sbtest1 JOIN t2 ON sbtest1.id = t2.a",
+            1143,
+            "for column '_tidb_rowid' in table 't2'",
+        ),
+        (
+            "u_sb",
+            "SELECT 1 FROM sbtest1 JOIN t2 ON sbtest1.id = t2.a",
+            1142,
+            "for table 't2'",
+        ),
+        (
+            "u_sb",
+            "SELECT 1 FROM sbtest1 s1 JOIN sbtest1 s2 USING (c) JOIN t2",
+            1142,
+            "for table 't2'",
+        ),
+    ] {
+        let store = MockStore::new(10);
+        tidb_sessionctx::variable::tidb_vars::EnableMDL.store(true, SeqCst);
+        let mut s = session(&store);
+        s.set_domain_info_schema(join_info_schema());
+        s.vars_mut().current_db = "test".to_owned();
+        s.core.sctx.vars.user = Some(UserIdentity {
+            username: user.to_owned(),
+            hostname: "%".to_owned(),
+            ..Default::default()
+        });
+        s.set_privilege_manager(Some(Arc::new(UserPrivileges::new(
+            user,
+            "%",
+            Arc::clone(&handle),
+        ))));
+        let err = block_on(s.execute_stmt(parse(sql), sql))
+            .err()
+            .unwrap_or_else(|| panic!("{user} `{sql}` must be denied"));
+        assert_eq!(blocked(&err), None, "{user} `{sql}`: {err:?}");
+        assert_eq!(err.code(), code, "{user} `{sql}`: {err}");
+        let msg = String::from_utf8_lossy(&err.error()).into_owned();
+        assert!(msg.contains(want), "{user} `{sql}`: {msg}");
+        assert!(s.is_idle(), "{user} `{sql}`: {}", s.state_snapshot());
+        assert_eq!(s.vars().stmt_ctx().warning_count(), 0, "{user} `{sql}`");
+    }
+}
+
 /// A statement outside the Rust AST (`Stmt::Unported`).
 fn unported() -> ast::Stmt {
     let node = parse("INSERT INTO t VALUES (1)");
@@ -1176,6 +1257,44 @@ fn sbtest_info_schema_with(
     version: i64,
     c_collation: Option<(&str, &str)>,
 ) -> Arc<tidb_infoschema::InfoSchemaV2> {
+    sbtest_info_schema_and(version, c_collation, Vec::new())
+}
+
+/// `sbtest_info_schema` with `test.t2(a INT, b INT)` (id 111, no primary key, so it has
+/// `_tidb_rowid`): two tables to join.
+fn join_info_schema() -> Arc<tidb_infoschema::InfoSchemaV2> {
+    use tidb_model::{ColumnInfo, StatePublic, TableInfo};
+    use tidb_parser::model::CIStr;
+    use tidb_parser::types::FieldType;
+    let col = |id: i64, name: &str| {
+        Arc::new(ColumnInfo {
+            id,
+            name: CIStr::new(name),
+            offset: (id - 1) as isize,
+            field_type: FieldType::new(tidb_base::mysql::TypeLong),
+            state: StatePublic,
+            ..Default::default()
+        })
+    };
+    let t2 = TableInfo {
+        id: 111,
+        dbid: 2,
+        name: CIStr::new("t2"),
+        columns: Some(vec![col(1, "a"), col(2, "b")]),
+        state: StatePublic,
+        version: 5,
+        max_column_id: 2,
+        ..Default::default()
+    };
+    sbtest_info_schema_and(1, None, vec![t2])
+}
+
+/// `sbtest_info_schema_with(version, c_collation)` with the tables `extra` in `test` too.
+fn sbtest_info_schema_and(
+    version: i64,
+    c_collation: Option<(&str, &str)>,
+    extra: Vec<tidb_model::TableInfo>,
+) -> Arc<tidb_infoschema::InfoSchemaV2> {
     use tidb_model::{ColumnInfo, DBInfo, StatePublic, TableInfo};
     use tidb_parser::model::CIStr;
     use tidb_parser::types::FieldType;
@@ -1218,7 +1337,9 @@ fn sbtest_info_schema_with(
         state: StatePublic,
         ..Default::default()
     };
-    db.deprecated.tables = Some(vec![Arc::new(t)]);
+    let mut tables = vec![Arc::new(t)];
+    tables.extend(extra.into_iter().map(Arc::new));
+    db.deprecated.tables = Some(tables);
     let mut b = tidb_infoschema::new_builder(None, None, tidb_infoschema::new_data());
     block_on(b.init_with_db_infos(vec![db], vec![], vec![], version)).unwrap();
     Arc::new(block_on(b.build(1)))

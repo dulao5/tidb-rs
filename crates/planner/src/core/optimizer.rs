@@ -306,9 +306,15 @@ pub fn opt_rule_list() -> [&'static dyn LogicalOptRule; 26] {
     ]
 }
 
-/// CheckPrivilege checks the privilege for a user in slice order (first failure wins, ensuring
-/// R30 table-denied `1142` precedes column-denied `1143`).
-// go: CheckPrivilege L2 (R32 defers synthetic _tidb_rowid full-table check after ordinary column checks so Go's reported 1143 column is preserved)
+/// CheckPrivilege checks the privilege for a user (first failure wins).
+///
+/// R30 (table read denied `1142` before column denied `1143`) holds for the whole statement:
+/// the table-read entries (`column = "*"`, ruling R29) of every table are checked before any
+/// other entry. Slice order alone is not enough in a join, where the left subtree registers
+/// its ON / USING column entries before the right data source registers its table-read
+/// entry; `SELECT 1 FROM t1 JOIN t2 USING (b) JOIN secret` would then answer 1143 when
+/// `secret` exists and 1142 when it does not.
+// go: CheckPrivilege L2 (R30: table-read entries of all tables first; R32: synthetic _tidb_rowid full-table checks after ordinary column checks so Go's reported 1143 column is preserved; other entries keep Go's slice order)
 pub fn check_privilege(
     active_roles: &[tidb_parser::auth::RoleIdentity],
     pm: &dyn tidb_privilege::PrivilegeManager,
@@ -359,13 +365,22 @@ pub fn check_privilege(
         Ok(())
     };
 
-    // Pass 1: check table-level (1142), dynamic, and ordinary column (1143) entries in Go order.
+    let is_table_read = |v: &VisitInfo| -> bool { v.column == "*" };
+
+    // Pass 1 (R30): the table-read entries of every table of the statement, in slice order,
+    // so that a table without read access answers 1142 before any column answers 1143.
     for v in vs {
-        if !is_deferred_rowid(v) {
+        if is_table_read(v) {
             check_one(v)?;
         }
     }
-    // Pass 2: check R32 `_tidb_rowid` entries only after all ordinary column checks succeed,
+    // Pass 2: the other entries (dynamic privileges, ordinary columns) in Go's slice order.
+    for v in vs {
+        if !is_table_read(v) && !is_deferred_rowid(v) {
+            check_one(v)?;
+        }
+    }
+    // Pass 3: check R32 `_tidb_rowid` entries only after all ordinary column checks succeed,
     // so queries like `SELECT a FROM t WHERE _tidb_rowid = 1` still report Go's denied column `a`.
     for v in vs {
         if is_deferred_rowid(v) {

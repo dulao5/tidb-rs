@@ -106,7 +106,7 @@ fn all_constants(ctx: &dyn BuildContext, expr: &ExprRef) -> bool {
 /// `innerSchema` is replaced with SQL NULL.
 ///
 /// `Err` only for a `blocked` boundary met while folding (see the module doc).
-// go: IsNullRejected L1 [M-CTX]
+// go: IsNullRejected L2 [M-CTX] (returns Result: a blocked error met while folding goes up, where Go has no error to ignore)
 pub fn is_null_rejected(
     ctx: &PlanCtx<'_>,
     inner_schema: &Schema,
@@ -495,7 +495,7 @@ fn try_fold_nullified_coalesce_like(
 ///
 /// IF also needs a special path: after inner columns become NULL, the condition
 /// may collapse to a constant and reveal that only one branch matters.
-// go: tryFoldNullifiedIf L1 [M-CTX]
+// go: tryFoldNullifiedIf L2 [M-CTX] (a blocked EvalInt error goes up; Go ignores the error)
 fn try_fold_nullified_if(
     ctx: &PlanCtx<'_>,
     inner_schema: &Schema,
@@ -520,7 +520,7 @@ fn try_fold_nullified_if(
     try_fold_nullified_constant(ctx, inner_schema, &args[2])
 }
 
-// go: foldNullifiedFunction L1 [M-CTX]
+// go: foldNullifiedFunction L2 [M-CTX] (a blocked NewFunction error goes up; Go ignores the error)
 fn fold_nullified_function(
     ctx: &PlanCtx<'_>,
     expr: &ExprRef,

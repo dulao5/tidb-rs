@@ -20,7 +20,7 @@ use tidb_parser::model::CIStr;
 use tidb_parser::types::FieldType;
 use tidb_parser::{ParseOptions, parse};
 use tidb_planner::core::expression_rewriter::CheckSelectColumnPrivOption;
-use tidb_planner::core::plan_cache_utils::InfoSchemaLookup;
+use tidb_planner::core::plan_cache_utils::{InfoSchemaLookup, table_is_view};
 use tidb_planner::core::planbuilder::{PlanBuilder, VisitInfo, new_plan_builder};
 use tidb_planner::core::preprocess::{
     InfoSchemaHandle, PreprocessorReturn, preprocess, with_preprocessor_return,
@@ -133,7 +133,8 @@ fn table(id: i64, name: &str, cols: Vec<Arc<ColumnInfo>>) -> Arc<TableInfo> {
 }
 
 /// test.t1(a INT NOT NULL, b INT), test.t2(a INT NOT NULL, b INT NOT NULL),
-/// test.t3(a INT, c INT); none has a primary key, so each has `_tidb_rowid`.
+/// test.t3(a INT, c INT); none has a primary key, so each has `_tidb_rowid`. test.v1(a, b)
+/// is a view (only looked up by name: views are not built yet).
 fn tables() -> Arc<MockIs> {
     Arc::new(MockIs(vec![
         table(
@@ -151,6 +152,15 @@ fn tables() -> Arc<MockIs> {
             "t3",
             vec![int_col(1, 0, "a", false), int_col(2, 1, "c", false)],
         ),
+        Arc::new(TableInfo {
+            view: Some(Box::default()),
+            ..(*table(
+                13,
+                "v1",
+                vec![int_col(1, 0, "a", false), int_col(2, 1, "b", false)],
+            ))
+            .clone()
+        }),
     ]))
 }
 
@@ -754,6 +764,32 @@ fn priv_handle() -> Arc<Handle> {
     }
     mp.add_user(UserRecord::new("%", "u_t1", PrivilegeType(0)));
     mp.add_table_priv(TablesPrivRecord::new("u_t1", "%", "test", "t1", SelectPriv));
+    // SELECT(a) on t1 and t2 and the whole of t3.
+    mp.add_user(UserRecord::new("%", "u_cola_t3", PrivilegeType(0)));
+    for t in ["t1", "t2"] {
+        mp.add_column_priv(ColumnsPrivRecord::new(
+            "u_cola_t3",
+            "%",
+            "test",
+            t,
+            "a",
+            SelectPriv,
+        ));
+    }
+    mp.add_table_priv(TablesPrivRecord::new(
+        "u_cola_t3",
+        "%",
+        "test",
+        "t3",
+        SelectPriv,
+    ));
+    // SELECT(a) on t1, t2 and t3.
+    mp.add_user(UserRecord::new("%", "u_a3", PrivilegeType(0)));
+    for t in ["t1", "t2", "t3"] {
+        mp.add_column_priv(ColumnsPrivRecord::new(
+            "u_a3", "%", "test", t, "a", SelectPriv,
+        ));
+    }
     Arc::new(Handle::new(mp))
 }
 
@@ -838,5 +874,141 @@ fn join_privilege_errors_before_the_boundary() {
     ] {
         let err = plan_as(user, sql).unwrap_err();
         assert!(blocked_by(&err).is_some(), "{user} `{sql}`: {err}");
+    }
+}
+
+/// R30 holds for the whole statement: a table placed after a joined subtree answers 1142
+/// before any column of the subtree answers 1143, whether the table exists (`t3`) or not
+/// (`nosuch`, ruling R31 in preprocessing), so the answer tells nothing about the table's
+/// existence. The left subtree registers its USING / ON column entries before the right data
+/// source registers its table-read entry, so slice order alone would answer 1143.
+#[test]
+fn r30_table_denied_before_column_denied_across_joins() {
+    let cases = [
+        "SELECT 1 FROM t1 JOIN t2 USING (b) JOIN {t}",
+        "SELECT 1 FROM t1 JOIN t2 ON t1.b = t2.b JOIN {t} ON {t}.a = t1.a",
+        "SELECT 1 FROM t1 NATURAL JOIN t2 JOIN {t}",
+    ];
+    // SELECT(a) on t1 and t2, nothing on t3 or nosuch.
+    for case in cases {
+        for t in ["t3", "nosuch"] {
+            let sql = case.replace("{t}", t);
+            let err = plan_as("u_cola", &sql).unwrap_err();
+            assert_eq!(err.code(), 1142, "`{sql}`: {err}");
+            assert!(
+                msg(&err).contains(&format!("for table '{t}'")),
+                "`{sql}`: {}",
+                msg(&err)
+            );
+        }
+    }
+    // With the read access to t3, the column error of the subtree stands.
+    for case in cases {
+        let sql = case.replace("{t}", "t3");
+        let err = plan_as("u_cola_t3", &sql).unwrap_err();
+        assert_eq!(err.code(), 1143, "`{sql}`: {err}");
+        assert!(
+            msg(&err).contains("for column 'b' in table 't1'"),
+            "`{sql}`: {}",
+            msg(&err)
+        );
+    }
+}
+
+/// R32: `_tidb_rowid` registers the full-table entry of the table it is qualified with, on
+/// either side of a join, and of no other table.
+#[test]
+fn r32_rowid_entry_names_the_referenced_side() {
+    for (sql, tbl) in [
+        ("SELECT t1._tidb_rowid FROM t1 JOIN t2 ON t1.a = t2.a", "t1"),
+        ("SELECT t2._tidb_rowid FROM t1 JOIN t2 ON t1.a = t2.a", "t2"),
+        (
+            "SELECT t3._tidb_rowid FROM t1 JOIN t2 ON t1.a = t2.a JOIN t3 ON t3.a = t1.a",
+            "t3",
+        ),
+    ] {
+        let vi: Vec<VisitInfo> = with_plan(sql, |b, _, res| {
+            res.unwrap_or_else(|e| panic!("build {sql}: {e}"));
+            b.get_visit_info().to_vec()
+        });
+        let rowid: Vec<&str> = vi
+            .iter()
+            .filter(|v| v.column.is_empty())
+            .map(|v| v.table.as_str())
+            .collect();
+        assert_eq!(rowid, vec![tbl], "{sql}: {vi:?}");
+        // SELECT(a) on every table: 1143 for `_tidb_rowid` of the referenced table.
+        let err = plan_as("u_a3", sql).unwrap_err();
+        assert_eq!(err.code(), 1143, "`{sql}`: {err}");
+        assert!(
+            msg(&err).contains(&format!("for column '_tidb_rowid' in table '{tbl}'")),
+            "`{sql}`: {}",
+            msg(&err)
+        );
+    }
+}
+
+/// USING registers the derived table's side through the names the derived table took from
+/// its select list (Go `coalesceCommonColumns:1281-1297`). A plain column keeps its database
+/// and original table (a non-LATERAL alias only renames the table, `buildResultSetNode:525-
+/// 531`), so `t1.b` is registered again; a computed column has no database name and is
+/// skipped (`:1291`), so only the base table's side is registered.
+#[test]
+fn using_registers_a_derived_table_through_its_names() {
+    for (sql, want) in [
+        (
+            "SELECT 1 FROM (SELECT b FROM t1) d JOIN t2 USING (b)",
+            vec![("t1", "b"), ("t1", "b"), ("t2", "b")],
+        ),
+        (
+            "SELECT 1 FROM (SELECT b + 1 AS b FROM t1) d JOIN t2 USING (b)",
+            vec![("t1", "b"), ("t2", "b")],
+        ),
+    ] {
+        let vi: Vec<VisitInfo> = with_plan(sql, |b, _, res| {
+            res.unwrap_or_else(|e| panic!("build {sql}: {e}"));
+            b.get_visit_info().to_vec()
+        });
+        let cols: Vec<(&str, &str)> = vi
+            .iter()
+            .filter(|v| v.column != "*")
+            .map(|v| (v.table.as_str(), v.column.as_str()))
+            .collect();
+        // The first t1.b comes from the derived table's own select list.
+        assert_eq!(cols, want, "{sql}: {vi:?}");
+    }
+}
+
+/// `TableIsView` (Go `infoschema.go`): a view is a view, a table or a missing name is not.
+#[test]
+fn table_is_view_answers_from_the_infoschema() {
+    let is = tables();
+    let test = CIStr::new("test");
+    assert!(table_is_view(&*is, &test, &CIStr::new("v1")).unwrap());
+    assert!(!table_is_view(&*is, &test, &CIStr::new("t1")).unwrap());
+    assert!(!table_is_view(&*is, &test, &CIStr::new("nosuch")).unwrap());
+    assert!(!table_is_view(&*is, &CIStr::new("other"), &CIStr::new("v1")).unwrap());
+}
+
+/// USING looks the side's table name (the alias, if any) up with `TableIsView`
+/// (`coalesceCommonColumns:1287-1290`): for a table it registers the original table's
+/// column; when the alias is a view's name, Go registers the view's column instead. The
+/// second case is Go v8.5.8's behaviour, kept as is and reported in #548.
+#[test]
+fn using_registers_through_table_is_view() {
+    for (sql, want) in [
+        ("SELECT 1 FROM t1 AS x JOIN t2 USING (b)", ("t1", "b")),
+        ("SELECT 1 FROM t1 AS v1 JOIN t2 USING (b)", ("v1", "b")),
+    ] {
+        let vi: Vec<VisitInfo> = with_plan(sql, |b, _, res| {
+            res.unwrap_or_else(|e| panic!("build {sql}: {e}"));
+            b.get_visit_info().to_vec()
+        });
+        let cols: Vec<(&str, &str)> = vi
+            .iter()
+            .filter(|v| v.column != "*")
+            .map(|v| (v.table.as_str(), v.column.as_str()))
+            .collect();
+        assert_eq!(cols, vec![want, ("t2", "b")], "{sql}: {vi:?}");
     }
 }
