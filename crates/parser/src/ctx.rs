@@ -28,6 +28,7 @@ pub struct Ctx {
     /// Parser-mode flags (goyacc: `parser.lexer.GetSQLMode()`, `EnableWindowFunc`, `SetMariaDB`).
     pub mariadb: bool,
     pub window_funcs: bool,
+    pub sql_mode: tidb_base::mysql::SQLMode,
     /// `yylex.AppendError(e)` lands here.
     pub errors: RefCell<Vec<Diagnostic>>,
     /// `parser.lastErrorAsWarn()` / `AppendWarn` lands here.

@@ -256,11 +256,19 @@ fn unsupported(what: impl std::fmt::Display) -> SqlError {
     SqlError::not_supported(what)
 }
 
-/// Parse `sql` and lower its single statement. Several statements, empty input and parse errors
-/// are reported like TiDB (1064 for syntax errors).
+/// Parse `sql` and lower its single statement with default [`tidb_parser::ParseOptions`].
+/// Several statements, empty input and parse errors are reported like TiDB (1064 for syntax
+/// errors).
 pub fn parse_and_lower(sql: &str) -> Result<Lowered, SqlError> {
-    let out = tidb_parser::parse(sql, &tidb_parser::ParseOptions::default())
-        .map_err(|e| parse_error(sql, &e))?;
+    parse_and_lower_with(sql, &tidb_parser::ParseOptions::default())
+}
+
+/// Like [`parse_and_lower`], using `opts` (e.g. session `sql_mode`).
+pub fn parse_and_lower_with(
+    sql: &str,
+    opts: &tidb_parser::ParseOptions,
+) -> Result<Lowered, SqlError> {
+    let out = tidb_parser::parse(sql, opts).map_err(|e| parse_error(sql, &e))?;
     let mut stmts = out.stmts;
     match stmts.len() {
         0 => Err(SqlError::new(1065, "Query was empty")),
@@ -269,11 +277,16 @@ pub fn parse_and_lower(sql: &str) -> Result<Lowered, SqlError> {
     }
 }
 
-/// Parse `sql` into its single statement, with the errors of [`parse_and_lower`]. The VS1
-/// router (poc-session) looks at the AST before it lowers it with [`lower_statement`].
+/// Parse `sql` into its single statement with default [`tidb_parser::ParseOptions`], with the
+/// errors of [`parse_and_lower`].
 pub fn parse_one(sql: &str) -> Result<ast::Stmt, SqlError> {
-    let out = tidb_parser::parse(sql, &tidb_parser::ParseOptions::default())
-        .map_err(|e| parse_error(sql, &e))?;
+    parse_one_with(sql, &tidb_parser::ParseOptions::default())
+}
+
+/// Like [`parse_one`], using `opts` (e.g. session `sql_mode`). The VS1 router (`poc-session`)
+/// looks at the AST before it lowers it with [`lower_statement`].
+pub fn parse_one_with(sql: &str, opts: &tidb_parser::ParseOptions) -> Result<ast::Stmt, SqlError> {
+    let out = tidb_parser::parse(sql, opts).map_err(|e| parse_error(sql, &e))?;
     let mut stmts = out.stmts;
     match stmts.len() {
         0 => Err(SqlError::new(1065, "Query was empty")),

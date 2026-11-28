@@ -110,6 +110,12 @@ struct Conn {
     /// A's, so reads are not sent to B (skipped, "session diverged"). Value: the statement's
     /// line and text.
     diverged: BTreeMap<String, (usize, String)>,
+    /// The same for the session state that only steers plans: plan-only variables B rejected
+    /// (`tidb_enable_non_prepared_plan_cache`, `tidb_opt_fix_control`, ...) and session
+    /// bindings A created (B never runs them). Reads of where the last plan came from
+    /// (`@@last_plan_from_cache`, `@@last_plan_from_binding`) are skipped as "session
+    /// diverged" while any is in effect; other reads are still compared (#510).
+    plan_diverged: BTreeMap<String, (usize, String)>,
     /// The previous statement ran on B too (so SHOW WARNINGS etc. are comparable).
     last_on_both: bool,
 }
@@ -545,6 +551,7 @@ impl Runner<'_> {
             temp_tables: BTreeSet::new(),
             rejected: Vec::new(),
             diverged: BTreeMap::new(),
+            plan_diverged: BTreeMap::new(),
             last_on_both: false,
         })
     }
@@ -733,7 +740,13 @@ impl Runner<'_> {
         }
 
         match class {
-            Class::Write => out,
+            Class::Write => {
+                if !a_failed && mysqltest::creates_session_binding(sql) {
+                    conn.plan_diverged
+                        .insert(SESSION_BINDING.into(), (line, sql.to_string()));
+                }
+                out
+            }
             Class::Session => {
                 out.kind = "session".into();
                 if a_failed {
@@ -757,7 +770,13 @@ impl Runner<'_> {
                 let ob = conn.b.query(sql).await;
                 out.census = Some(self.probe.route(&conn.b, mark).await.path(&ob));
                 let b_failed = matches!(ob, Outcome::Error { .. } | Outcome::Client(_));
-                track_divergence(&mut conn.diverged, line, sql, b_failed);
+                track_divergence(
+                    &mut conn.diverged,
+                    &mut conn.plan_diverged,
+                    line,
+                    sql,
+                    b_failed,
+                );
                 if b_failed {
                     counts.b_set_rejected += 1;
                     if mysqltest::is_use(sql) {
@@ -804,10 +823,19 @@ impl Runner<'_> {
                     out.kind = why.into();
                     return out;
                 }
-                if let Some((var, (at, stmt))) = conn.diverged.iter().next() {
+                let plan_diverged = conn
+                    .plan_diverged
+                    .iter()
+                    .next()
+                    .filter(|_| mysqltest::reads_last_plan_source(sql));
+                if let Some((var, (at, stmt))) = conn.diverged.iter().next().or(plan_diverged) {
                     out.verdict = StmtOutcome::Skipped;
                     out.kind = "session diverged".into();
-                    out.detail = format!("B rejected `{}` ({var}, line {at})", truncate(stmt, 120));
+                    out.detail = if var == SESSION_BINDING {
+                        format!("A only: `{}` ({var}, line {at})", truncate(stmt, 120))
+                    } else {
+                        format!("B rejected `{}` ({var}, line {at})", truncate(stmt, 120))
+                    };
                     out.result = Some((
                         "skipped",
                         json!({
@@ -1170,25 +1198,33 @@ pub async fn run(
     Ok(t.get("mismatch") == 0)
 }
 
+/// The `plan_diverged` key of a session binding A created (a write, never run on B).
+const SESSION_BINDING: &str = "session binding";
+
 /// After a session statement A ran: records in `diverged` the result-affecting variables it
 /// set that B rejected, and forgets those it set on both sides. Set back to DEFAULT on A, a
-/// variable agrees again even if B rejected that too (B never changed it). `SET GLOBAL` /
-/// `@@global.x` are not session statements (`mysqltest::classify`): B rejecting one shows up as
-/// mismatches of later connections, not as hidden reads.
+/// variable agrees again even if B rejected that too (B never changed it). The other
+/// (plan-only) variables go to `plan_diverged` the same way: they change only where the last
+/// plan came from. `SET GLOBAL` / `@@global.x` are not session statements
+/// (`mysqltest::classify`): B rejecting one shows up as mismatches of later connections, not as
+/// hidden reads.
 fn track_divergence(
     diverged: &mut BTreeMap<String, (usize, String)>,
+    plan_diverged: &mut BTreeMap<String, (usize, String)>,
     line: usize,
     sql: &str,
     b_failed: bool,
 ) {
     for (var, default) in mysqltest::session_vars(sql) {
-        if !mysqltest::affects_results(&var) {
-            continue;
-        }
-        if b_failed && !default {
-            diverged.insert(var, (line, sql.to_string()));
+        let map = if mysqltest::affects_results(&var) {
+            &mut *diverged
         } else {
-            diverged.remove(&var);
+            &mut *plan_diverged
+        };
+        if b_failed && !default {
+            map.insert(var, (line, sql.to_string()));
+        } else {
+            map.remove(&var);
         }
     }
 }
@@ -1215,22 +1251,69 @@ mod tests {
 
     #[test]
     fn divergence() {
-        let mut d = BTreeMap::new();
-        // Rejected plan-only setting: no divergence.
-        track_divergence(&mut d, 1, "set tidb_cost_model_version = 2", true);
+        let (mut d, mut p) = (BTreeMap::new(), BTreeMap::new());
+        // Rejected plan-only setting: no result divergence, a plan-source one.
+        track_divergence(&mut d, &mut p, 1, "set tidb_cost_model_version = 2", true);
         assert!(d.is_empty());
-        track_divergence(&mut d, 1, "set names gbk", true);
-        track_divergence(&mut d, 1, "set sql_mode = ''", true);
+        assert_eq!(p.keys().collect::<Vec<_>>(), ["tidb_cost_model_version"]);
+        track_divergence(&mut d, &mut p, 1, "set names gbk", true);
+        track_divergence(&mut d, &mut p, 1, "set sql_mode = ''", true);
         assert_eq!(d.len(), 5);
         // Set on both sides again / back to DEFAULT (even if B rejects that too).
-        track_divergence(&mut d, 1, "set names utf8mb4", false);
+        track_divergence(&mut d, &mut p, 1, "set names utf8mb4", false);
         assert_eq!(d.keys().collect::<Vec<_>>(), ["sql_mode"]);
-        track_divergence(&mut d, 1, "set @@sql_mode = default", true);
+        track_divergence(&mut d, &mut p, 1, "set @@sql_mode = default", true);
         assert!(d.is_empty());
-        track_divergence(&mut d, 7, "use db1", true);
+        track_divergence(&mut d, &mut p, 7, "use db1", true);
         assert_eq!(d["database"], (7, "use db1".to_string()));
-        track_divergence(&mut d, 1, "use db2", false);
+        track_divergence(&mut d, &mut p, 1, "use db2", false);
         assert!(d.is_empty());
+        track_divergence(
+            &mut d,
+            &mut p,
+            1,
+            "set tidb_cost_model_version = default",
+            true,
+        );
+        assert!(p.is_empty());
+    }
+
+    /// The W48 weekly (the week-48 run) shapes of #510: a plan-only variable B rejects hides
+    /// the plan-source reads after it until it is set back; `rand_seed1/2` change results.
+    #[test]
+    fn plan_source_divergence() {
+        let (mut d, mut p) = (BTreeMap::new(), BTreeMap::new());
+        let sql = "set session tidb_enable_non_prepared_plan_cache=1";
+        track_divergence(&mut d, &mut p, 7, sql, true);
+        assert!(d.is_empty());
+        assert_eq!(
+            p["tidb_enable_non_prepared_plan_cache"],
+            (7, sql.to_string())
+        );
+        assert!(mysqltest::reads_last_plan_source(
+            "select @@last_plan_from_cache"
+        ));
+        assert!(mysqltest::reads_last_plan_source(
+            "select @@session.last_plan_from_binding"
+        ));
+        assert!(!mysqltest::reads_last_plan_source("select * from t"));
+        track_divergence(
+            &mut d,
+            &mut p,
+            14,
+            "set session tidb_enable_non_prepared_plan_cache=DEFAULT",
+            false,
+        );
+        assert!(p.is_empty());
+        track_divergence(
+            &mut d,
+            &mut p,
+            201,
+            "set @@rand_seed1=10000000,@@rand_seed2=1000000",
+            true,
+        );
+        assert_eq!(d.keys().collect::<Vec<_>>(), ["rand_seed1", "rand_seed2"]);
+        assert!(p.is_empty());
     }
 
     fn j(

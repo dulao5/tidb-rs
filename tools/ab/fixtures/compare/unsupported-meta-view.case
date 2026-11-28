@@ -1,0 +1,11 @@
+# T1: a view, which the read-only node cannot read (crates/meta `Unsupported::View`), where Go
+# answers rows.
+sql: SELECT v0.c0 FROM v0
+cols: c0
+tolerance: T1
+class: unordered
+verdict: unsupported
+[a]
+1
+[b_error]
+1235|42000|This version of TiDB doesn't yet support '`v0` is a view'

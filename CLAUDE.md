@@ -129,6 +129,23 @@ end-to-end comparison against Go (`tools/ab`) **before merge**; the maintainer r
 docs/process/agent-workflow.md). Session-level tests must check result rows **and** column metadata
 (names and types), not only values.
 
+Running the local comparison uses the **patched TiKV v8.5.8** binary pinned in
+`tools/tikv-patched.version` (from `dulao5/tikv`, carrying the `#523`/`#524` fixes):
+
+```sh
+scripts/playground.sh start                     # resolves & caches patched TiKV via tools/tikv-patched.sh (--kv.binpath) and verifies PD
+scripts/sysbench-prepare.sh -t 1 -s 100000 -r 8
+cargo run --release -p poc-server -- -P 27001 --pd 127.0.0.1:25379
+cargo run --release -p tidb-ab -- -a 127.0.0.1:27000 -b 127.0.0.1:27001 sysbench -n 200
+scripts/playground.sh clean
+```
+
+To use a locally built `dulao5/tikv` binary before a release asset is published or while iterating on
+TiKV, pass `TIDB_RS_TIKV_BIN=/path/to/tikv-server` (or `TIDB_RS_TIKV_SRC=/path/to/dulao5-tikv`);
+`tools/tikv-patched.sh` and every harness (`scripts/playground.sh`, `tools/ab/faults/run.sh`,
+`tools/weekly/run.sh`, `scripts/integrationtest.sh`, `scripts/n3-bench.sh`, etc.) still verify the
+patched commit hash at startup and fail against stock TiKV. See [tools/ab/README.md](tools/ab/README.md).
+
 Build in your worktree's own `target/` (a target shared between worktrees can pick up another
 worktree's sources). Check free disk before a full build: with less than 10 GB free, stop and
 report in the issue. Delete your worktree's `target/` after the PR is merged.

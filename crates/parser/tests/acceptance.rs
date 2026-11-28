@@ -22,6 +22,7 @@ fn corpus_acceptance() {
     for c in &valid {
         let opts = ParseOptions {
             window_functions: c.window,
+            ..Default::default()
         };
         if let Err(e) = parse(&c.src, &opts) {
             rejected_valid.push(format!("parser_test.go:{}: {:?} -> {e}", c.line, c.src));
@@ -34,6 +35,7 @@ fn corpus_acceptance() {
                 &c.src,
                 &ParseOptions {
                     window_functions: c.window,
+                    ..Default::default()
                 },
             )
             .is_err()

@@ -1002,3 +1002,32 @@ fn get_uint_from_node_param_marker_matches_go() {
         (0, true, true)
     );
 }
+
+/// #509 / #555: `PlanCacheKey` encodes `parse_sql_mode` (the `sql_mode` active at `PREPARE`)
+/// alongside execution-time `vars.sql_mode`, so executing a statement prepared under
+/// `ANSI_QUOTES` / `NO_BACKSLASH_ESCAPES` after `SET sql_mode = ''` cannot collide in the
+/// instance plan cache with a later `PREPARE` of the same SQL text under `sql_mode = ''`.
+#[test]
+fn plan_cache_key_distinguishes_parse_sql_mode() {
+    use crate::core::plan_cache_utils::{PlanCacheKeyEnv, new_plan_cache_key};
+    use tidb_base::mysql::{ModeANSIQuotes, ModeNoBackslashEscapes};
+
+    for parse_mode in [ModeANSIQuotes.0, ModeNoBackslashEscapes.0] {
+        let mut s_old = stmt("SELECT id FROM t WHERE \"c\" = 'x'", vec![], 1);
+        s_old.parse_sql_mode = parse_mode;
+        let mut s_new = stmt("SELECT id FROM t WHERE \"c\" = 'x'", vec![], 1);
+        s_new.parse_sql_mode = 0;
+
+        let mut v = vars();
+        v.sql_mode = 0; // execution-time sql_mode is '' for both
+        let env = PlanCacheKeyEnv { domain_is: None };
+        let (_, ok1, r1) = new_plan_cache_key(&mut v, &mut s_old, &env).unwrap();
+        let (_, ok2, r2) = new_plan_cache_key(&mut v, &mut s_new, &env).unwrap();
+        assert!(ok1, "{r1}");
+        assert!(ok2, "{r2}");
+        assert_ne!(
+            s_old.cache_key, s_new.cache_key,
+            "same SQL text and exec sql_mode but different parse_sql_mode ({parse_mode} vs 0) must not collide"
+        );
+    }
+}

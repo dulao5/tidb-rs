@@ -1,0 +1,10 @@
+# A also answers 1235, B's 1235 is not a not-implemented answer (a ported Go
+# ErrNotSupportedYet branch with another text): both errors compare in full (T1 does not cover it).
+sql: SELECT a FROM t
+class: unordered
+verdict: mismatch
+diff: error: message
+[a_error]
+1235|42000|This version of TiDB doesn't yet support 'this feature'
+[b_error]
+1235|42000|This version of TiDB doesn't yet support 'something Go says'

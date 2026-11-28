@@ -3,6 +3,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,11 @@ def classified(mismatch=0, unsupported=0):
     return {"statements": 10 + mismatch + unsupported,
             "totals": {"match": 10, "mismatch": mismatch, "unsupported": unsupported, "both_error": 0},
             "operators": ops, "templates": {}}
+
+
+def read(path):
+    with open(path) as f:
+        return f.read()
 
 
 def write(d, name, obj):
@@ -280,6 +286,86 @@ class VerdictTest(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertTrue(first.startswith("**REGRESSED**"), first)
 
+    @staticmethod
+    def earlier_run(d, verdict, title, unsupported):
+        """An earlier run's results as the workflow downloads them: report.md and the parts."""
+        write(f"{d}/results/part-ab", "ab-classified.json", classified(unsupported=unsupported))
+        with open(f"{d}/report.md", "w") as f:
+            f.write(f"**{verdict}**: something.\n\n# {title}\n")
+
+    def test_last_run_is_the_previous_run_and_is_named(self):
+        # #510: the W48 weekly (week 48's run) compared with the last GREEN run (W46: 27
+        # unsupported) instead of the previous one (W47: 33), and did not say which run.
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/cur", "ab.json", {"part": "ab", "status": "ok"})
+            write(f"{d}/cur", "ab-classified.json", classified(unsupported=117))
+            self.earlier_run(f"{d}/prev", "REGRESSED", "tidb-rs weekly build 2026-W47 (2026-11-20)", 33)
+            self.earlier_run(f"{d}/base", "GREEN", "tidb-rs weekly build 2026-W46 (2026-11-13)", 27)
+            rc, first = report(f"{d}/cur", f"{d}/prev", extra=[
+                "--previous-run", "47", "--baseline", f"{d}/base", "--baseline-run", "46"])
+            self.assertEqual(rc, 2, first)
+            text = read(f"{d}/cur/report.md")
+            self.assertIn("Compared with the last run: tidb-rs weekly build 2026-W47 (2026-11-20), "
+                          "REGRESSED, run 47.", text)
+            self.assertIn("Against the last run (tidb-rs weekly build 2026-W47 (2026-11-20), REGRESSED, "
+                          "run 47):\n- `unsupported` statements up by 84 (33 → 117)", text)
+            self.assertIn("Against the baseline (tidb-rs weekly build 2026-W46 (2026-11-13), GREEN, "
+                          "run 46):\n- `unsupported` statements up by 90 (27 → 117)", text)
+
+    def test_still_worse_than_the_baseline_is_regressed(self):
+        # The previous run was already as bad (REGRESSED, not accepted): still reported.
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/cur", "ab.json", {"part": "ab", "status": "ok"})
+            write(f"{d}/cur", "ab-classified.json", classified(unsupported=3))
+            self.earlier_run(f"{d}/prev", "REGRESSED", "prev", 3)
+            self.earlier_run(f"{d}/base", "GREEN", "base", 0)
+            rc, first = report(f"{d}/cur", f"{d}/prev", extra=["--baseline", f"{d}/base"])
+            self.assertEqual(rc, 2, first)
+            text = read(f"{d}/cur/report.md")
+            self.assertNotIn("Against the last run", text)
+            self.assertIn("Against the baseline (base, GREEN):", text)
+        # The baseline is the previous run: listed once.
+        with tempfile.TemporaryDirectory() as d:
+            write(f"{d}/cur", "ab.json", {"part": "ab", "status": "ok"})
+            write(f"{d}/cur", "ab-classified.json", classified(unsupported=3))
+            self.earlier_run(f"{d}/prev", "GREEN", "prev", 0)
+            rc, first = report(f"{d}/cur", f"{d}/prev", extra=["--baseline", f"{d}/prev"])
+            self.assertEqual(rc, 2, first)
+            text = read(f"{d}/cur/report.md")
+            self.assertIn("Against the last run (prev, GREEN):", text)
+            self.assertNotIn("Against the baseline", text)
+
+    def test_turned_red_notice(self):
+        def run(prev_verdict):
+            d = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, d, True)
+            write(f"{d}/cur", "ab.json", {"part": "ab", "status": "ok"})
+            write(f"{d}/cur", "ab-classified.json", classified(mismatch=2))
+            prev = None
+            if prev_verdict:
+                self.earlier_run(f"{d}/prev", prev_verdict, "tidb-rs nightly build 2026-W48 (2026-11-26)", 0)
+                prev = f"{d}/prev"
+            rc, _ = report(f"{d}/cur", prev, extra=["--previous-run", "9"] if prev else [])
+            path = f"{d}/cur/turned-red.md"
+            return rc, read(path) if os.path.exists(path) else None
+
+        rc, notice = run("GREEN")
+        self.assertEqual(rc, 1)
+        self.assertIn("turned red (the last run, tidb-rs nightly build 2026-W48 (2026-11-26), GREEN, "
+                      "run 9, was not).", notice)
+        self.assertIn("Failing parts: `ab`.", notice)
+        self.assertIn("- `ab`: 2 mismatches", notice)
+        self.assertIsNotNone(run("REGRESSED")[1])
+        self.assertIsNotNone(run(None)[1])
+        # Already red last time: no new notice.
+        self.assertIsNone(run("RED")[1])
+        # Not red: no notice.
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "ab.json", {"part": "ab", "status": "ok"})
+            write(d, "ab-classified.json", classified())
+            self.assertEqual(report(d)[0], 0)
+            self.assertFalse(os.path.exists(f"{d}/turned-red.md"))
+
     def test_tpch_query_no_longer_executable_is_regressed(self):
         with tempfile.TemporaryDirectory() as d:
             write(f"{d}/cur", "tpch.json", {"part": "tpch", "status": "ok"})
@@ -372,6 +458,25 @@ class VerdictTest(unittest.TestCase):
             self.assertIn("| `use db1` **(new)** | 1 | 2 |", text)
             self.assertIn("use rejected: 1049", text)  # a rejected USE is a tidb-rs error
             self.assertIn("1 reads sent to tidb-rs", text)  # skipped reads are not sent
+
+    def test_integrationtest_session_binding_is_not_a_rejected_statement(self):
+        # A session binding ran on A only (a write): the plan-source reads skipped after it are
+        # counted on their own line, not as reads hidden by a rejected statement (#516 review).
+        binding = "create binding for select 1 using select 1"
+        with tempfile.TemporaryDirectory() as d:
+            skipped = diverged(3, 2, binding)
+            skipped["cause"]["var"] = "session binding"
+            it_records(d, [{"verdict": "b_set_rejected", "query": "set x = 1", "line": 1},
+                           diverged(2, 1, "set x = 1"), skipped])
+            rc, first = report(d, parts="integrationtest")
+            self.assertEqual(rc, 0, first)
+            with open(f"{d}/report.md") as f:
+                text = f.read()
+            self.assertIn("(`session diverged`): **1**.", text)
+            self.assertIn("after a session binding that ran on A only (not rejected: tidb-rs never "
+                          "runs writes): **1**, after 1 distinct statements.", text)
+            self.assertIn("| `set x = 1` | 1 | 1 |", text)
+            self.assertNotIn("| `create binding", text)
 
     def test_integrationtest_rejected_statement_seen_before_is_not_new(self):
         with tempfile.TemporaryDirectory() as d:
@@ -597,6 +702,40 @@ class CensusTest(unittest.TestCase):
             census_file(f"{prev}/ab-strict-sysbench", "workload-strict", new_stack=5, equal=4)
             census_file(f"{cur}/ab-strict-sysbench", "workload-strict", new_stack=5, equal=3)
             self.assertEqual(report(cur, prev)[0], 2)
+
+
+class TikvHeaderTest(unittest.TestCase):
+    def test_report_header_shows_tikv_build_from_parts(self):
+        with tempfile.TemporaryDirectory() as d:
+            tikv = {"version": "8.5.8", "commit": "a87863eb7ce3b848f1d9ea964e4a84c823da2359",
+                    "tag": "tikv-v8.5.8-tidbrs.1"}
+            write(d, "ab.json", {"part": "ab", "status": "ok", "tikv": tikv})
+            write(d, "ab-classified.json", classified())
+            rc, _ = report(d, extra=["--commit", "deadbeef"])
+            self.assertEqual(rc, 0)
+            with open(f"{d}/report.md") as f:
+                head = "\n".join(f.read().splitlines()[:8])
+            self.assertIn("Commit `deadbeef`.", head)
+            self.assertIn("TiKV: `8.5.8` (`a87863eb7ce3b848f1d9ea964e4a84c823da2359`, `tikv-v8.5.8-tidbrs.1`).", head)
+
+    def test_report_header_shows_distinct_tikv_builds_and_faults_fallback(self):
+        with tempfile.TemporaryDirectory() as d:
+            t1 = {"version": "8.5.8", "commit": "a87863eb7ce3b848f1d9ea964e4a84c823da2359",
+                  "tag": "tikv-v8.5.8-tidbrs.1"}
+            t2 = {"version": "8.5.8", "commit": "1111111111111111111111111111111111111111",
+                  "tag": "tikv-v8.5.8-tidbrs.2"}
+            write(d, "ab.json", {"part": "ab", "status": "ok", "tikv": t1})
+            write(d, "ab-classified.json", classified())
+            write(d, "faults.json", {"part": "faults", "status": "ok"})
+            write(d, "faults-raw.json", {"tikv": t2, "results": [], "new_inconsistencies": [], "incomplete": []})
+            rc, _ = report(d, parts="ab,faults")
+            self.assertEqual(rc, 0)
+            with open(f"{d}/report.md") as f:
+                head = "\n".join(f.read().splitlines()[:8])
+            self.assertIn("[ab]", head)
+            self.assertIn("[faults]", head)
+            self.assertIn("a87863eb7ce3b848f1d9ea964e4a84c823da2359", head)
+            self.assertIn("1111111111111111111111111111111111111111", head)
 
 
 if __name__ == "__main__":

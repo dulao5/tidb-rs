@@ -17,6 +17,7 @@ status=$((10080 + OFFSET))
 mkdir -p "$OUT"
 
 "$repo/scripts/playground.sh" start -t "$TAG" -o "$OFFSET" -c "$here/tidb.toml"
+"$repo/tools/tikv-patched.sh" --check-pd "127.0.0.1:$((2379 + OFFSET))" >/dev/null
 pid_of() { ps -axo pid=,command= | grep "$1" | grep "/data/$TAG/" | grep -v grep | awk '{print $1}' | head -1; }
 tikv_pid=$(pid_of tikv-server)
 tidb_pid=$(pid_of tidb-server)

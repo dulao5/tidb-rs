@@ -621,7 +621,7 @@ PrimaryOpt -> String:
   ;
 NotSym -> String:
     not { tok_text($lexer, &$1) }
-  | not2 { ph("NotSym#1", $span, vec![]) }
+  | not2 { "NOT".to_string() }
   ;
 EnforcedOrNot -> bool:
     enforced { true }
@@ -1444,7 +1444,7 @@ CancelImportStmt -> Stmt:
     cancel importKwd job Int64Num { ph("CancelImportStmt#0", $span, vec![Box::new($4) as Item]) }
   ;
 Expression -> Expr:
-    singleAtIdentifier assignmentEq Expression %prec assignmentEq { Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1))), value: Some($3), ..Default::default() })) }
+    singleAtIdentifier assignmentEq Expression %prec assignmentEq { Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1)), $lexer.no_backslash_escapes()), value: Some($3), ..Default::default() })) }
   | Expression logOr Expression %prec pipes { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::LogicOr, l: $1, r: $3 })) }
   | Expression xor Expression %prec xor { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::LogicXor, l: $1, r: $3 })) }
   | Expression logAnd Expression %prec andand { Expr::Binary(Box::new(BinaryOperationExpr { op: Op::LogicAnd, l: $1, r: $3 })) }
@@ -1518,7 +1518,7 @@ BoolPri -> Expr:
         Expr::CompareSubquery(Box::new(CompareSubqueryExpr { op: $2, l: $1, r: sq, all: $3 }))
     } }
   | BoolPri CompareOp singleAtIdentifier assignmentEq PredicateExpr %prec assignmentEq { {
-        let variable = Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$3))), value: Some($5), ..Default::default() }));
+        let variable = Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$3)), $lexer.no_backslash_escapes()), value: Some($5), ..Default::default() }));
         Expr::Binary(Box::new(BinaryOperationExpr { op: $2, l: $1, r: variable }))
     } }
   | PredicateExpr { $1 }
@@ -2988,7 +2988,7 @@ CastType -> Box<FieldType>:
         Box::new(tp)
     } }
   | realType { {
-        let mut tp = FieldType::new(mysql_type::DOUBLE);
+        let mut tp = FieldType::new(if p.sql_mode.has_real_as_float_mode() { mysql_type::FLOAT } else { mysql_type::DOUBLE });
         let (flen, decimal) = default_length_and_decimal_for_cast(tp.tp);
         tp.flen = flen;
         tp.decimal = decimal;
@@ -3855,7 +3855,7 @@ VariableAssignment -> Box<VariableAssignment>:
   | session VariableName EqOrAssignmentEq SetExpr { Box::new(VariableAssignment { name: $2, value: $4, is_system: true, ..Default::default() }) }
   | local VariableName EqOrAssignmentEq SetExpr { Box::new(VariableAssignment { name: $2, value: $4, is_system: true, ..Default::default() }) }
   | doubleAtIdentifier EqOrAssignmentEq SetExpr { {
-        let mut v = at_ident_text($lexer.src_str(tok_span(&$1))).to_lowercase();
+        let mut v = at_ident_text($lexer.src_str(tok_span(&$1)), $lexer.no_backslash_escapes()).to_lowercase();
         let (mut is_global, mut is_instance) = (false, false);
         if let Some(r) = v.strip_prefix("@@global.") {
             is_global = true;
@@ -3872,7 +3872,7 @@ VariableAssignment -> Box<VariableAssignment>:
         }
         Box::new(VariableAssignment { name: v, value: $3, is_global, is_instance, is_system: true, ..Default::default() })
     } }
-  | singleAtIdentifier EqOrAssignmentEq Expression { Box::new(VariableAssignment { name: at_ident_text($lexer.src_str(tok_span(&$1))), value: $3, ..Default::default() }) }
+  | singleAtIdentifier EqOrAssignmentEq Expression { Box::new(VariableAssignment { name: at_ident_text($lexer.src_str(tok_span(&$1)), $lexer.no_backslash_escapes()), value: $3, ..Default::default() }) }
   | names CharsetName { Box::new(VariableAssignment { name: SET_NAMES.into(), value: val_nocs(Datum::Str($2)), ..Default::default() }) }
   | names CharsetName collate defaultKwd { Box::new(VariableAssignment { name: SET_NAMES.into(), value: val_nocs(Datum::Str($2)), ..Default::default() }) }
   | names CharsetName collate StringName { Box::new(VariableAssignment { name: SET_NAMES.into(), value: val_nocs(Datum::Str($2)), extend_value: Some(Box::new(ValueExpr::new(Datum::Str($4), "", ""))), ..Default::default() }) }
@@ -3920,7 +3920,7 @@ Variable -> Expr:
   ;
 SystemVariable -> Expr:
     doubleAtIdentifier { {
-        let mut v = at_ident_text($lexer.src_str(tok_span(&$1))).to_lowercase();
+        let mut v = at_ident_text($lexer.src_str(tok_span(&$1)), $lexer.no_backslash_escapes()).to_lowercase();
         let (mut is_global, mut is_instance, mut explicit_scope) = (false, false, true);
         if let Some(r) = v.strip_prefix("@@global.") {
             is_global = true;
@@ -3940,7 +3940,7 @@ SystemVariable -> Expr:
     } }
   ;
 UserVariable -> Expr:
-    singleAtIdentifier { Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1))), ..Default::default() })) }
+    singleAtIdentifier { Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1)), $lexer.no_backslash_escapes()), ..Default::default() })) }
   ;
 Username -> Box<AuthUserIdentity>:
     StringName { ph("Username#0", $span, vec![Box::new($1) as Item]) }
@@ -4604,12 +4604,12 @@ FixedPointType -> u8:
   | fixed { ph("FixedPointType#2", $span, vec![]) }
   ;
 FloatingPointType -> u8:
-    floatType { ph("FloatingPointType#0", $span, vec![]) }
-  | realType { ph("FloatingPointType#1", $span, vec![]) }
-  | doubleType { ph("FloatingPointType#2", $span, vec![]) }
-  | doubleType precisionType { ph("FloatingPointType#3", $span, vec![]) }
-  | float4Type { ph("FloatingPointType#4", $span, vec![]) }
-  | float8Type { ph("FloatingPointType#5", $span, vec![]) }
+    floatType { mysql_type::FLOAT }
+  | realType { if p.sql_mode.has_real_as_float_mode() { mysql_type::FLOAT } else { mysql_type::DOUBLE } }
+  | doubleType { mysql_type::DOUBLE }
+  | doubleType precisionType { mysql_type::DOUBLE }
+  | float4Type { mysql_type::FLOAT }
+  | float8Type { mysql_type::DOUBLE }
   ;
 BitValueType -> u8:
     bitType { ph("BitValueType#0", $span, vec![]) }
@@ -5779,7 +5779,7 @@ fn underscore_cs(text: &str) -> &'static str {
 
 /// Lexer value of a single/doubleAtIdentifier (lexer.go startWithAt): `@x` -> "x",
 /// `@'x'` -> "x", `@@global.x` -> "@@global.x", `@@global.'x'` -> "@@global.x".
-fn at_ident_text(raw: &str) -> String {
+fn at_ident_text(raw: &str, no_backslash_escapes: bool) -> String {
     let quoted = |s: &str| s.starts_with(['\'', '"', '`']);
     if let Some(rest) = raw.strip_prefix("@@") {
         let lower = rest.to_ascii_lowercase();
@@ -5789,12 +5789,12 @@ fn at_ident_text(raw: &str) -> String {
             .map_or(0, |p| p.len());
         let (prefix, name) = rest.split_at(plen);
         if quoted(name) {
-            return format!("@@{prefix}{}", unquote_text(name));
+            return format!("@@{prefix}{}", unquote_text(name, no_backslash_escapes));
         }
         return raw.to_string();
     }
     let name = &raw[1..];
-    if quoted(name) { unquote_text(name) } else { name.to_string() }
+    if quoted(name) { unquote_text(name, no_backslash_escapes) } else { name.to_string() }
 }
 
 /// ParseHexStr: x'..' / X'..' / 0x.. (the lexer guarantees the digits).

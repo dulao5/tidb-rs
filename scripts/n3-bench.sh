@@ -45,6 +45,8 @@ overload=${OVERLOAD:-"16 32 64 128 256 320"}
 tests=${TESTS:-"ps ro scan overload"}
 script_dir=$(cd "$(dirname "$0")" && pwd)
 out=${OUT:-$(cd "$script_dir/.." && pwd)/target/n3bench}
+tikv_info=$("$script_dir/../tools/tikv-patched.sh" --check-pd "$pd")
+echo "TiKV: $tikv_info"
 mkdir -p "$out"
 results=$out/results.tsv
 [ -f "$results" ] || printf "label\ttest\tthreads\tqps\tp95_ms\tp99_ms\terrors\textra\n" >"$results"

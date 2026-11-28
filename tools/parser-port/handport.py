@@ -274,6 +274,7 @@ for tok, op in [("'|'", "Or"), ("'&'", "And"), ("lsh", "LeftShift"), ("rsh", "Ri
     binop("BitExpr", f"BitExpr {tok} BitExpr", op)
 for tok, op in [("'!'", "Not2"), ("'~'", "BitNeg"), ("'-'", "Minus"), ("'+'", "Plus"), ("not2", "Not2")]:
     act("SimpleExpr", f"{tok} SimpleExpr", "Expr::Unary(Box::new(UnaryOperationExpr { op: Op::%s, v: $2 }))" % op)
+act("NotSym", "not2", '"NOT".to_string()')
 act("SimpleExpr", "'(' Expression ')'", """{
         // goyacc: parser.setNodeText(expr, src[startOffset(yyS[yypt-1]) : endOffset(yyS[yypt])])
         Expr::Paren(Box::new($2))
@@ -360,7 +361,7 @@ for k, (tok, conv) in enumerate([("stringLit", "Datum::Str(tok_text($lexer, &$2)
 act("SimpleExpr", "paramMarker", "param_marker(&$1, p)")
 act("LimitOption", "paramMarker", "param_marker(&$1, p)")
 act("SystemVariable", "doubleAtIdentifier", """{
-        let mut v = at_ident_text($lexer.src_str(tok_span(&$1))).to_lowercase();
+        let mut v = at_ident_text($lexer.src_str(tok_span(&$1)), $lexer.no_backslash_escapes()).to_lowercase();
         let (mut is_global, mut is_instance, mut explicit_scope) = (false, false, true);
         if let Some(r) = v.strip_prefix("@@global.") {
             is_global = true;
@@ -379,11 +380,11 @@ act("SystemVariable", "doubleAtIdentifier", """{
         Expr::Variable(Box::new(VariableExpr { name: v, is_global, is_instance, is_system: true, explicit_scope, value: None }))
     }""")
 act("UserVariable", "singleAtIdentifier",
-    "Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1))), ..Default::default() }))")
+    "Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1)), $lexer.no_backslash_escapes()), ..Default::default() }))")
 act("Expression", "singleAtIdentifier assignmentEq Expression",
-    "Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1))), value: Some($3), ..Default::default() }))")
+    "Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$1)), $lexer.no_backslash_escapes()), value: Some($3), ..Default::default() }))")
 act("BoolPri", "BoolPri CompareOp singleAtIdentifier assignmentEq PredicateExpr", """{
-        let variable = Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$3))), value: Some($5), ..Default::default() }));
+        let variable = Expr::Variable(Box::new(VariableExpr { name: at_ident_text($lexer.src_str(tok_span(&$3)), $lexer.no_backslash_escapes()), value: Some($5), ..Default::default() }));
         Expr::Binary(Box::new(BinaryOperationExpr { op: $2, l: $1, r: variable }))
     }""")
 
@@ -761,8 +762,13 @@ FLOATISH = """{
         Box::new(tp)
     }"""
 act("CastType", "doubleType", FLOATISH % "mysql_type::DOUBLE")
-# REAL_AS_FLOAT sql mode is not supported by ParseOptions yet: REAL is DOUBLE.
-act("CastType", "realType", FLOATISH % "mysql_type::DOUBLE")
+act("CastType", "realType", FLOATISH % "if p.sql_mode.has_real_as_float_mode() { mysql_type::FLOAT } else { mysql_type::DOUBLE }")
+act("FloatingPointType", "floatType", "mysql_type::FLOAT")
+act("FloatingPointType", "realType", "if p.sql_mode.has_real_as_float_mode() { mysql_type::FLOAT } else { mysql_type::DOUBLE }")
+act("FloatingPointType", "doubleType", "mysql_type::DOUBLE")
+act("FloatingPointType", "doubleType precisionType", "mysql_type::DOUBLE")
+act("FloatingPointType", "float4Type", "mysql_type::FLOAT")
+act("FloatingPointType", "float8Type", "mysql_type::DOUBLE")
 act("CastType", "floatType FloatOpt", """{
         let fopt = $2;
         let mut t = mysql_type::FLOAT;
@@ -1007,7 +1013,7 @@ for syms, fields in [("VariableName EqOrAssignmentEq SetExpr", "name: $1, value:
     act("VariableAssignment", syms,
         "Box::new(VariableAssignment { %s, is_system: true, ..Default::default() })" % fields)
 act("VariableAssignment", "doubleAtIdentifier EqOrAssignmentEq SetExpr", """{
-        let mut v = at_ident_text($lexer.src_str(tok_span(&$1))).to_lowercase();
+        let mut v = at_ident_text($lexer.src_str(tok_span(&$1)), $lexer.no_backslash_escapes()).to_lowercase();
         let (mut is_global, mut is_instance) = (false, false);
         if let Some(r) = v.strip_prefix("@@global.") {
             is_global = true;
@@ -1025,7 +1031,7 @@ act("VariableAssignment", "doubleAtIdentifier EqOrAssignmentEq SetExpr", """{
         Box::new(VariableAssignment { name: v, value: $3, is_global, is_instance, is_system: true, ..Default::default() })
     }""")
 act("VariableAssignment", "singleAtIdentifier EqOrAssignmentEq Expression",
-    "Box::new(VariableAssignment { name: at_ident_text($lexer.src_str(tok_span(&$1))), value: $3, ..Default::default() })")
+    "Box::new(VariableAssignment { name: at_ident_text($lexer.src_str(tok_span(&$1)), $lexer.no_backslash_escapes()), value: $3, ..Default::default() })")
 SET_NAMES = "Box::new(VariableAssignment { name: SET_NAMES.into(), value: val_nocs(Datum::Str($2)), %s..Default::default() })"
 act("VariableAssignment", "names CharsetName", SET_NAMES % "")
 act("VariableAssignment", "names CharsetName collate defaultKwd", SET_NAMES % "")
@@ -1518,7 +1524,7 @@ fn underscore_cs(text: &str) -> &'static str {
 
 /// Lexer value of a single/doubleAtIdentifier (lexer.go startWithAt): `@x` -> "x",
 /// `@'x'` -> "x", `@@global.x` -> "@@global.x", `@@global.'x'` -> "@@global.x".
-fn at_ident_text(raw: &str) -> String {
+fn at_ident_text(raw: &str, no_backslash_escapes: bool) -> String {
     let quoted = |s: &str| s.starts_with(['\'', '"', '`']);
     if let Some(rest) = raw.strip_prefix("@@") {
         let lower = rest.to_ascii_lowercase();
@@ -1528,12 +1534,12 @@ fn at_ident_text(raw: &str) -> String {
             .map_or(0, |p| p.len());
         let (prefix, name) = rest.split_at(plen);
         if quoted(name) {
-            return format!("@@{prefix}{}", unquote_text(name));
+            return format!("@@{prefix}{}", unquote_text(name, no_backslash_escapes));
         }
         return raw.to_string();
     }
     let name = &raw[1..];
-    if quoted(name) { unquote_text(name) } else { name.to_string() }
+    if quoted(name) { unquote_text(name, no_backslash_escapes) } else { name.to_string() }
 }
 
 /// ParseHexStr: x'..' / X'..' / 0x.. (the lexer guarantees the digits).

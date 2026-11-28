@@ -7,6 +7,7 @@
 set -euo pipefail
 pd=${1:?pd host:port}
 port=${2:?Go TiDB port}
+"$(cd "$(dirname "$0")/.." && pwd)/tools/tikv-patched.sh" --check-pd "$pd" >/dev/null
 cargo build -q -p poc-domain --example systable_cli
 C=target/debug/examples/systable_cli
 m() { mysql -h 127.0.0.1 -P "$port" -u root -N -e "$1"; }
