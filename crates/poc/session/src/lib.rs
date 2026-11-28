@@ -27,6 +27,7 @@ pub mod plan_cache;
 pub mod privilege;
 pub mod router;
 pub mod timing;
+mod txn;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -37,6 +38,7 @@ use std::time::Instant;
 use poc_domain::Admission;
 use poc_domain::ResultCheck;
 use poc_domain::SchemaSync;
+use poc_domain::StartTsGuard;
 use poc_domain::StmtGuard;
 use poc_executor::ExecContext;
 use poc_kv::KvClient;
@@ -77,6 +79,9 @@ use crate::router::Router;
 use crate::timing::Kind;
 use crate::timing::Phase;
 use crate::timing::Timer;
+use crate::txn::PocTxn;
+use crate::txn::StmtTs;
+use crate::txn::TxnEnd;
 
 /// State shared by all sessions.
 pub struct Shared {
@@ -229,6 +234,7 @@ impl SessionFactory for Factory {
         let mut session = Session {
             shared: self.shared.clone(),
             current_db: None,
+            conn_db: None,
             user: format!("{}@{host}", info.user),
             current_user: format!("{auth_user}@{auth_host}"),
             auth_user: auth_user.clone(),
@@ -259,6 +265,11 @@ impl SessionFactory for Factory {
             router: None,
             prev_stmt: router::LastStmtInfo::default(),
             set_applied: 0,
+            txn: None,
+            reopen: Reopen {
+                factory: self.clone(),
+                info: info.clone(),
+            },
         };
         if self.new_stack != NewStackMode::Off {
             let domain = self
@@ -276,6 +287,12 @@ impl SessionFactory for Factory {
                     .clone()
                     .unwrap_or_else(|| Arc::new(tidb_systable::sysvar_cache::SysVarCache::new())),
             ));
+            new.set_min_start_ts_tracker(
+                self.shared
+                    .sync
+                    .as_ref()
+                    .map(|s| Arc::clone(s.min_start_ts_tracker())),
+            );
             if let Some(pm) = privilege_manager {
                 let ns = router::NewStack::session_mut(&mut *new);
                 ns.vars_mut().user = Some(tidb_parser::auth::UserIdentity {
@@ -307,6 +324,10 @@ pub struct Session {
     shared: Arc<Shared>,
     /// Current database as given to `USE` (Go `CurrentDB`).
     current_db: Option<String>,
+    /// The connection's database (Go `clientConn.dbname`): set only by the handshake and
+    /// `COM_INIT_DB` when their `USE` succeeds (`conn.go:641, 1502`), never by a SQL `USE`.
+    /// `COM_RESET_CONNECTION` restores this one (`conn.go:2693-2694`).
+    conn_db: Option<String>,
     user: String,
     current_user: String,
     auth_user: String,
@@ -359,6 +380,19 @@ pub struct Session {
     /// How many assignments of the current statement's `SET` were applied (`run_set`); 0 for
     /// any other statement.
     set_applied: usize,
+    /// How to open this session anew (`COM_RESET_CONNECTION`).
+    reopen: Reopen,
+    /// The read-only transaction the session is in (`BEGIN`, or `autocommit = 0` after a
+    /// statement took a start ts; Go's `InTxn`), D05.4 spec §6.
+    txn: Option<PocTxn>,
+}
+
+/// What `COM_RESET_CONNECTION` opens a new session with (Go's `handleResetConnection` calls
+/// `OpenCtx` with the connection's id, capability and collation, then
+/// `AuthWithoutVerification` for the same user).
+struct Reopen {
+    factory: Factory,
+    info: ConnectionInfo,
 }
 
 /// A statement the prototype prepared.
@@ -426,7 +460,7 @@ pub(crate) fn stmt_type(stmt: &Statement) -> StmtType {
         Statement::Select(_) => StmtType::Select,
         Statement::Use(_) => StmtType::Use,
         Statement::Set(_) => StmtType::Set,
-        Statement::Begin => StmtType::Begin,
+        Statement::Begin(_) => StmtType::Begin,
         Statement::Commit => StmtType::Commit,
         Statement::Rollback => StmtType::Rollback,
         Statement::ShowWarnings { .. } => StmtType::Show,
@@ -453,8 +487,38 @@ fn count_expensive(plan: &tidb_sql::Plan) {
     }
 }
 
-fn kv_error(e: impl std::fmt::Display) -> SqlError {
-    SqlError::unknown(e.to_string())
+trait KvSqlError {
+    fn into_sql_error(self) -> SqlError;
+}
+
+impl KvSqlError for poc_kv::Error {
+    fn into_sql_error(self) -> SqlError {
+        match self.as_tidb_error() {
+            Some(err) => SqlError::from_tidb_error(err),
+            None => SqlError::unknown(self.to_string()),
+        }
+    }
+}
+
+impl KvSqlError for tidb_meta::Error {
+    fn into_sql_error(self) -> SqlError {
+        match self.as_kv_error().and_then(poc_kv::Error::as_tidb_error) {
+            Some(err) => SqlError::from_tidb_error(err),
+            None => SqlError::unknown(self.to_string()),
+        }
+    }
+}
+
+fn kv_error(e: impl KvSqlError) -> SqlError {
+    e.into_sql_error()
+}
+
+/// The read ts of a statement the prototype reads at ([`Session::read_at`]).
+enum ReadTs {
+    /// An autocommit statement's start ts, requested before planning and waited for after.
+    Future(TsFuture),
+    /// A transaction's read ts (D05.4 spec §6.4), already known.
+    At(u64),
 }
 
 /// A start timestamp requested from PD ahead of the point where it is needed (Go's
@@ -499,33 +563,18 @@ fn ok() -> Response {
     Response::Ok(OkInfo::default())
 }
 
-fn not_in_txn(what: &str) -> SqlError {
-    SqlError::not_supported(format!(
-        "{what}: explicit transactions are not supported by the read-only node (every \
-         statement runs in autocommit mode)"
-    ))
-}
-
-/// The fence of explicit transactions (`specs/exceptions/fences.md`): the read-only node runs
-/// every statement in autocommit mode, so BEGIN / START TRANSACTION, COMMIT and ROLLBACK answer
-/// 1235. `None` for any other statement.
-fn txn_fence(stmt: &Statement) -> Option<SqlError> {
-    match stmt {
-        Statement::Begin => Some(not_in_txn("BEGIN/START TRANSACTION")),
-        Statement::Commit => Some(not_in_txn("COMMIT")),
-        Statement::Rollback => Some(not_in_txn("ROLLBACK")),
-        _ => None,
-    }
-}
-
-/// `SET autocommit = value`, after Go's validation turned the value into `ON` / `OFF`
-/// ([`validated_session_value`]): on is accepted, off is the explicit-transaction fence
-/// (1235).
-fn autocommit_fence(normalized: &str) -> Result<(), SqlError> {
-    if normalized == tidb_sessionctx::variable::Off {
-        return Err(not_in_txn("autocommit=0"));
-    }
-    Ok(())
+/// The 1792 of a write or a locking read in a transaction (or with `autocommit = 0`) on the
+/// read-only node (N11 D8, approved in #146; D05.4 spec §6.2): Go's
+/// `ErrCantExecuteInReadOnlyTransaction` code, message and SQLSTATE `25006`. Go defines the
+/// code but never raises it, so no Go error class registers it and `terror.ToSQLError` would
+/// send a TiDB error with it as 1105; like a boundary stub's 1235, it is tidb-rs's own error
+/// and goes to the client as a MySQL error (Go's `writeError` sends a `*mysql.SQLError` as is).
+// glue: N11 D8 (writes and locking reads in a transaction are rejected), the client error
+pub(crate) fn read_only_txn_error() -> SqlError {
+    let code = tidb_base::mysql::ErrCantExecuteInReadOnlyTransaction;
+    // Go's `mysql.NewErr(mysql.ErrCantExecuteInReadOnlyTransaction)`.
+    let m = tidb_base::mysql::new_err(code, vec![]);
+    SqlError::new(m.code, String::from_utf8_lossy(&m.message).into_owned())
 }
 
 /// `SET name = value` of a session variable as Go's `SessionVars.SetSystemVar` checks it before
@@ -679,7 +728,6 @@ impl Session {
             } else {
                 "DISABLED"
             },
-            autocommit: true,
             last_plan_from_cache: self.prev_stmt.plan_from_cache,
             last_plan_from_binding: self.prev_stmt.plan_from_binding,
             vars,
@@ -709,10 +757,18 @@ impl Session {
         Ok(self.begin_read().await?.1)
     }
 
+    fn track_start_ts(&self, start_ts: u64) -> Option<StartTsGuard> {
+        self.shared
+            .sync
+            .as_ref()
+            .and_then(|s| s.min_start_ts_tracker().register(start_ts))
+    }
+
     /// A start timestamp and the schema visible at it.
     async fn begin_read(&mut self) -> Result<(u64, Arc<InfoSchema>), SqlError> {
         let ts = self.shared.kv.current_ts().await.map_err(kv_error)?;
         self.timer.mark(Phase::Tso);
+        let _ts_guard = self.track_start_ts(ts);
         let is = self
             .shared
             .schema
@@ -760,15 +816,28 @@ impl Session {
         match &lowered.stmt {
             Statement::Select(sel) => self.select(sel, params, ts).await.map(Response::ResultSet),
             Statement::Use(db) => {
-                self.use_db(db).await?;
+                // SQL `USE` changes only `current_db` (Go `CurrentDB`), not `conn_db` (Go
+                // `cc.dbname`), and `run()` already records `StmtType::Use`.
+                self.use_db_inner(db).await?;
                 Ok(ok())
             }
             Statement::Set(assignments) => {
                 self.set(assignments)?;
                 Ok(ok())
             }
-            Statement::Begin | Statement::Commit | Statement::Rollback => {
-                Err(txn_fence(&lowered.stmt).unwrap_or_else(|| not_in_txn("this statement")))
+            Statement::Begin(b) => {
+                self.begin(&b.mode).await?;
+                Ok(ok())
+            }
+            // Go's `executeCommit` / `executeRollback` and `autoCommitAfterStmt`: the
+            // transaction ends; outside one nothing happens.
+            Statement::Commit => {
+                self.end_txn(TxnEnd::Commit);
+                Ok(ok())
+            }
+            Statement::Rollback => {
+                self.end_txn(TxnEnd::Rollback);
+                Ok(ok())
             }
             Statement::ShowWarnings { errors } => Ok(Response::ResultSet(warnings_result_set(
                 &self.warnings,
@@ -790,6 +859,33 @@ impl Session {
             }
             return Ok(rs);
         }
+        let (plan, rows) = if self.txn_context()? {
+            self.txn_read(sel, params).await?
+        } else {
+            self.autocommit_read(sel, params, ts).await?
+        };
+        count_expensive(&plan);
+        let rows = poc_executor::finish(&plan, rows, self.shared.dag.new_collation_enabled)?;
+        self.timer.mark(Phase::Finish);
+        let mut columns = plan.columns;
+        for c in &mut columns {
+            apply_result_charset(c, self.results_charset.as_deref());
+        }
+        Ok(ResultSet {
+            columns,
+            rows,
+            warnings: 0,
+        })
+    }
+
+    /// A SELECT that reads a table as its own (autocommit) transaction: in synced mode with
+    /// the synced schema, else at a fresh TSO with the schema visible there.
+    async fn autocommit_read(
+        &mut self,
+        sel: &Select,
+        params: &[Literal],
+        ts: Option<TsFuture>,
+    ) -> Result<(tidb_sql::Plan, Vec<Vec<tidb_distsql::Datum>>), SqlError> {
         let mut ts = ts;
         let admitted = self
             .shared
@@ -805,28 +901,126 @@ impl Session {
             }
             None => None,
         };
-        let (plan, rows) = match synced {
+        Ok(match synced {
             Some(done) => done,
             None => {
                 let ts = ts.unwrap_or_else(|| TsFuture::request(&self.shared.kv));
-                match self.optimistic_read(sel, params, ts).await? {
-                    Ok(done) => done,
-                    Err((start_ts, raw)) => self.checked_read(sel, params, start_ts, raw).await?,
-                }
+                let (plan, rows, _) = self.read_at(sel, params, ReadTs::Future(ts), None).await?;
+                (plan, rows)
+            }
+        })
+    }
+
+    /// Whether the statement runs in a transaction (D05.4 spec §6): the session is in one, or
+    /// `autocommit` is off (the statement starts one when it takes a read ts).
+    fn txn_context(&mut self) -> Result<bool, SqlError> {
+        if self.txn.is_some() {
+            return Ok(true);
+        }
+        Ok(!self.default_session()?.vars().is_autocommit())
+    }
+
+    /// A SELECT that reads a table in a transaction (D05.4 spec §6.4): at the transaction's
+    /// read ts ([`txn::stmt_ts`]), with the schema visible at that ts and not the synced one;
+    /// no metadata-lock entry (#549), while its `start_ts` is registered in `MinStartTsTracker`
+    /// for `/tidb/server/minstartts/<ddl_id>` reporting (#550). Without a transaction
+    /// (`autocommit = 0`) the statement starts one with the TSO it takes, once it has read: a
+    /// statement that fails does not leave a transaction (spec §6.5, item 4).
+    // glue: the read ts of GetStmtReadTS / ActivateTxn (D05.4 spec §6.1) on the prototype's read
+    async fn txn_read(
+        &mut self,
+        sel: &Select,
+        params: &[Literal],
+    ) -> Result<(tidb_sql::Plan, Vec<Vec<tidb_distsql::Datum>>), SqlError> {
+        // `TxnCtx.CreateTime` of a lazy transaction: the context the statement entered.
+        let created = Instant::now();
+        let stmt_ts = txn::stmt_ts(self.txn.as_ref());
+        let (read_ts, mut stmt_guard) = match stmt_ts {
+            StmtTs::Start(ts) => (ts, None),
+            StmtTs::Activate | StmtTs::NewTso => {
+                let ts = TsFuture::request(&self.shared.kv).wait().await?;
+                self.timer.mark(Phase::Tso);
+                let g = self.track_start_ts(ts);
+                (ts, g)
             }
         };
-        count_expensive(&plan);
-        let rows = poc_executor::finish(&plan, rows, self.shared.dag.new_collation_enabled)?;
-        self.timer.mark(Phase::Finish);
-        let mut columns = plan.columns;
-        for c in &mut columns {
-            apply_result_charset(c, self.results_charset.as_deref());
+        let known = self.txn.as_ref().and_then(|t| t.schema_at(read_ts));
+        let (plan, rows, is) = self
+            .read_at(sel, params, ReadTs::At(read_ts), known)
+            .await?;
+        if stmt_ts == StmtTs::Activate {
+            let vars = self.default_session()?.vars();
+            let mode = txn::lazy_txn_mode(&vars.txn_mode);
+            let isolation = vars.isolation_level_for_new_txn();
+            self.txn = Some(PocTxn::new(
+                mode,
+                &isolation,
+                read_ts,
+                created,
+                stmt_guard.take(),
+            ));
         }
-        Ok(ResultSet {
-            columns,
-            rows,
-            warnings: 0,
-        })
+        if let Some(t) = &mut self.txn {
+            t.read_with(read_ts, &is);
+        }
+        drop(stmt_guard);
+        Ok((plan, rows))
+    }
+
+    /// `BEGIN` / `START TRANSACTION` (Go's `executeBegin` → `EnterNewTxn` with
+    /// `EnterNewTxnWithBeginStmt`): the current transaction is committed (a read-only commit
+    /// does nothing), and a new one takes its start ts now. `mode` is `BEGIN PESSIMISTIC` /
+    /// `OPTIMISTIC`, empty for the session's `tidb_txn_mode`. `READ ONLY` needs no check: it
+    /// is always accepted (N11 D8) and every transaction here is read-only.
+    // glue: executeBegin / OnInitialize(EnterNewTxnWithBeginStmt) (D05.4 spec §6.1) on the prototype
+    async fn begin(&mut self, mode: &str) -> Result<(), SqlError> {
+        // `CommitBeforeEnterNewTxn` (BEGIN as the first statement of its context reuses a
+        // transaction only when none is valid).
+        self.end_txn(TxnEnd::Commit);
+        let vars = self.default_session()?.vars();
+        let mode = txn::begin_txn_mode(mode, &vars.txn_mode).to_owned();
+        let isolation = vars.isolation_level_for_new_txn();
+        let created = Instant::now();
+        // `prepareTxnWithOracleTS` + `ActivateTxn`: a failure leaves no transaction (Go's
+        // `EnterNewTxn` rolls back).
+        let start_ts = TsFuture::request(&self.shared.kv).wait().await?;
+        self.timer.mark(Phase::Tso);
+        let ts_guard = self.track_start_ts(start_ts);
+        self.txn = Some(PocTxn::new(&mode, &isolation, start_ts, created, ts_guard));
+        Ok(())
+    }
+
+    /// The session's transaction ends (`COMMIT`, `ROLLBACK`, `BEGIN`, `SET autocommit = 1`
+    /// from off); nothing happens outside one.
+    fn end_txn(&mut self, end: TxnEnd) {
+        if let Some(t) = self.txn.take() {
+            t.end(end);
+        }
+    }
+
+    /// Whether the statement may run in a transaction, without making the session variables:
+    /// only to skip the early TSO request of an autocommit statement (a transaction's
+    /// statements take their own read ts); [`Session::txn_context`] decides.
+    fn maybe_in_txn(&self) -> bool {
+        self.txn.is_some()
+            || self
+                .default_vars
+                .as_ref()
+                .is_some_and(|s| !s.vars().is_autocommit())
+    }
+
+    /// The 1792 of `stmt` if it writes or takes locks in a transaction (D05.4 spec §6.2);
+    /// checked after parsing, before the statement is lowered.
+    fn txn_write_error(&mut self, stmt: &tidb_parser::ast::Stmt) -> Option<SqlError> {
+        if !tidb_sql::ir::writes_in_txn(stmt) {
+            return None;
+        }
+        // An error making the session variables is the statement's own error, reported when
+        // it runs; only `autocommit` is read here.
+        match self.txn_context() {
+            Ok(true) => Some(read_only_txn_error()),
+            Ok(false) | Err(_) => None,
+        }
     }
 
     fn plan(
@@ -893,13 +1087,14 @@ impl Session {
         guard.set_tables(vec![plan.table.id]);
         self.timer.set_kind(Kind::of(&plan));
         self.timer.mark(Phase::Plan);
-        let (mut snapshot, start_ts) = if max_ts_point_get(&plan) {
-            (self.shared.kv.latest_snapshot(), None)
+        let (mut snapshot, start_ts, _ts_guard) = if max_ts_point_get(&plan) {
+            (self.shared.kv.latest_snapshot(), None, None)
         } else {
             let start_ts = TsFuture::request(&self.shared.kv).wait().await?;
             self.stmt.took_ts = true;
             self.timer.mark(Phase::Tso);
-            (self.shared.kv.snapshot(start_ts), Some(start_ts))
+            let ts_guard = self.track_start_ts(start_ts);
+            (self.shared.kv.snapshot(start_ts), Some(start_ts), ts_guard)
         };
         let cx = ExecContext {
             dag: self.shared.dag.clone(),
@@ -921,27 +1116,109 @@ impl Session {
         Ok(Some((plan, rows?)))
     }
 
-    /// Plan with the newest cached schema and read at `start_ts` while checking, concurrently
-    /// and at the same `start_ts`, that this schema is the one visible there. Returns the plan
-    /// and source rows if the check passed (read errors are returned only then), else
-    /// `Err((start_ts, raw version key if read))` for [`Session::checked_read`].
+    /// The statement at `start_ts` with the schema visible there (ADR 0003): with `known`,
+    /// the InfoSchema already found at `start_ts` (a transaction's, D05.4 spec §6.4);
+    /// otherwise plan with the newest cached schema and read while checking, concurrently and
+    /// at the same `start_ts`, that it is the one visible there, and if it is not, plan and
+    /// read again with that one. Returns the plan, the source rows and the schema used.
+    #[allow(clippy::type_complexity)]
+    async fn read_at(
+        &mut self,
+        sel: &Select,
+        params: &[Literal],
+        ts: ReadTs,
+        known: Option<Arc<InfoSchema>>,
+    ) -> Result<
+        (
+            tidb_sql::Plan,
+            Vec<Vec<tidb_distsql::Datum>>,
+            Arc<InfoSchema>,
+        ),
+        SqlError,
+    > {
+        if let Some(is) = known {
+            let start_ts = self.wait_read_ts(ts).await?;
+            let _ts_guard = self.track_start_ts(start_ts);
+            let plan = self.plan(sel, &is, params)?;
+            self.timer.set_kind(Kind::of(&plan));
+            self.timer.mark(Phase::Plan);
+            let rows = self.read_source(&plan, &is, start_ts).await?;
+            return Ok((plan, rows, is));
+        }
+        let mut stmt_guard = None;
+        match self
+            .optimistic_read(sel, params, ts, &mut stmt_guard)
+            .await?
+        {
+            Ok(done) => Ok(done),
+            Err((start_ts, raw)) => self.checked_read(sel, params, start_ts, raw).await,
+        }
+    }
+
+    /// The read ts: a pending TSO is waited for (an autocommit statement's start ts, taken
+    /// while it planned), a known one is used as it is.
+    async fn wait_read_ts(&mut self, ts: ReadTs) -> Result<u64, SqlError> {
+        match ts {
+            ReadTs::At(ts) => Ok(ts),
+            ReadTs::Future(f) => {
+                let ts = f.wait().await?;
+                self.stmt.took_ts = true;
+                self.timer.mark(Phase::Tso);
+                Ok(ts)
+            }
+        }
+    }
+
+    /// The source rows of `plan` (planned with `is`) at `start_ts`.
+    async fn read_source(
+        &mut self,
+        plan: &tidb_sql::Plan,
+        is: &InfoSchema,
+        start_ts: u64,
+    ) -> Result<Vec<Vec<tidb_distsql::Datum>>, SqlError> {
+        let mut snapshot = self.shared.kv.snapshot(start_ts);
+        let cx = ExecContext {
+            dag: self.shared.dag.clone(),
+            schema_version: is.version(),
+        };
+        let rows = poc_executor::read_source(plan, &mut snapshot, &cx).await;
+        self.timer.mark(Phase::KvRead);
+        rows
+    }
+
+    /// Plan with the newest cached schema and read at the read ts while checking,
+    /// concurrently and at the same ts, that this schema is the one visible there. Returns the
+    /// plan, source rows and schema if the check passed (read errors are returned only then),
+    /// else `Err((read ts, raw version key if read))` for [`Session::checked_read`].
     #[allow(clippy::type_complexity)]
     async fn optimistic_read(
         &mut self,
         sel: &Select,
         params: &[Literal],
-        ts: TsFuture,
-    ) -> Result<Result<(tidb_sql::Plan, Vec<Vec<tidb_distsql::Datum>>), (u64, Option<i64>)>, SqlError>
-    {
+        ts: ReadTs,
+        stmt_guard: &mut Option<StartTsGuard>,
+    ) -> Result<
+        Result<
+            (
+                tidb_sql::Plan,
+                Vec<Vec<tidb_distsql::Datum>>,
+                Arc<InfoSchema>,
+            ),
+            (u64, Option<i64>),
+        >,
+        SqlError,
+    > {
         let planned = self
             .shared
             .schema
             .candidate()
             .and_then(|is| self.plan(sel, &is, params).ok().map(|plan| (is, plan)));
         self.timer.mark(Phase::Plan);
-        let start_ts = ts.wait().await?;
-        self.stmt.took_ts = true;
-        self.timer.mark(Phase::Tso);
+        let track = matches!(ts, ReadTs::Future(_));
+        let start_ts = self.wait_read_ts(ts).await?;
+        if track {
+            *stmt_guard = self.track_start_ts(start_ts);
+        }
         // No cached schema yet, or planning failed with it (it may not be the right one):
         // take the checked path, which reports genuine planning errors.
         let Some((is, plan)) = planned else {
@@ -959,20 +1236,28 @@ impl Session {
         );
         self.timer.mark(Phase::KvRead);
         match check.map_err(kv_error)? {
-            SchemaCheck::Valid => Ok(Ok((plan, rows?))),
+            SchemaCheck::Valid => Ok(Ok((plan, rows?, is))),
             SchemaCheck::Stale { raw } => Ok(Err((start_ts, raw))),
         }
     }
 
     /// The statement at `start_ts` with the schema visible there, as `begin_read` does
     /// (`raw`: the version key at `start_ts`, if already read).
+    #[allow(clippy::type_complexity)]
     async fn checked_read(
         &mut self,
         sel: &Select,
         params: &[Literal],
         start_ts: u64,
         raw: Option<i64>,
-    ) -> Result<(tidb_sql::Plan, Vec<Vec<tidb_distsql::Datum>>), SqlError> {
+    ) -> Result<
+        (
+            tidb_sql::Plan,
+            Vec<Vec<tidb_distsql::Datum>>,
+            Arc<InfoSchema>,
+        ),
+        SqlError,
+    > {
         let schema = &self.shared.schema;
         let is = match raw {
             Some(raw) => schema.info_schema_with_raw(start_ts, raw).await,
@@ -983,14 +1268,8 @@ impl Session {
         let plan = self.plan(sel, &is, params)?;
         self.timer.set_kind(Kind::of(&plan));
         self.timer.mark(Phase::Plan);
-        let mut snapshot = self.shared.kv.snapshot(start_ts);
-        let cx = ExecContext {
-            dag: self.shared.dag.clone(),
-            schema_version: is.version(),
-        };
-        let rows = poc_executor::read_source(&plan, &mut snapshot, &cx).await?;
-        self.timer.mark(Phase::KvRead);
-        Ok((plan, rows))
+        let rows = self.read_source(&plan, &is, start_ts).await?;
+        Ok((plan, rows, is))
     }
 
     fn set(&mut self, assignments: &[SetAssignment]) -> Result<(), SqlError> {
@@ -1000,6 +1279,11 @@ impl Session {
             .as_mut()
             .expect("made by default_session")
             .vars_mut();
+        // Go's `autocommit` hook (`sysvar.go:1848-1855`): an assignment that turns it on from
+        // off ends the transaction (`InTxn = false`), which the end of the statement commits,
+        // or rolls back when a later assignment fails (`autoCommitAfterStmt`, `tidb.go:325-341`).
+        let mut autocommit = vars.is_autocommit();
+        let mut turned_on = false;
         let (charset, collation, results_charset, warnings, values) = (
             &mut self.charset,
             &mut self.collation,
@@ -1016,11 +1300,35 @@ impl Session {
                 *results_charset = r;
             }
             warnings.extend(change.warnings);
+            turned_on |= autocommit_turns_on(&mut autocommit, &change.values);
             record_session_values(values, change.values, change.from_default);
         });
         self.set_applied = applied;
+        if turned_on {
+            self.end_txn(if result.is_ok() {
+                TxnEnd::Commit
+            } else {
+                TxnEnd::Abort
+            });
+        }
         result
     }
+}
+
+/// Whether the writes `values` of one `SET` assignment turn `autocommit` on from off (Go's
+/// `autocommit` hook, `sysvar.go:1848-1855`: `!s.IsAutocommit() && isAutocommit` ends the
+/// transaction); `autocommit` is the value before them and becomes the value after them.
+// glue: the implicit commit of the autocommit SetSession hook (D05.4 spec §6.1) on the prototype
+fn autocommit_turns_on(autocommit: &mut bool, values: &[(String, String)]) -> bool {
+    let mut turned_on = false;
+    for (name, value) in values {
+        if name == "autocommit" {
+            let on = tidb_sessionctx::variable::varsutil::tidb_opt_on(value);
+            turned_on |= !*autocommit && on;
+            *autocommit = on;
+        }
+    }
+    turned_on
 }
 
 /// A session value of the prototype's session variables: the variable, and its value
@@ -1227,7 +1535,9 @@ fn check_set(
             };
             let mut change = SetChange::default();
             match name.as_str() {
-                "autocommit" => autocommit_fence(&normalized)?,
+                // Read-only transactions (D05.4 spec §6): `SET autocommit = 1` from off ends
+                // the transaction ([`Session::set`]).
+                "autocommit" => {}
                 // NULL is the empty value (`getVarValue`): columns keep their charset.
                 "character_set_results" => {
                     change.results = Some((!normalized.is_empty()).then(|| normalized.clone()));
@@ -1395,10 +1705,32 @@ impl SessionHandler for Session {
         }
     }
 
+    // glue: handleResetConnection (pkg/server/conn.go:2672-2701; the server block's part 2, D03.1) on the prototype session
+    async fn reset_connection(&mut self) -> Result<(), SqlError> {
+        // `cc.ctx.Close()`: the transaction is rolled back (`RollbackTxn`, which records no
+        // transaction duration).
+        drop(self.txn.take());
+        // `cc.dbname`: the connection's database, not the one a SQL `USE` last chose.
+        let db = self.conn_db.clone();
+        let new = self.reopen.factory.open_session(&self.reopen.info)?;
+        *self = new;
+        // `cc.dbname` survives the reset even when the `USE` below fails.
+        self.conn_db.clone_from(&db);
+        // `cc.useDB(cc.dbname)`: the current database is restored, as a `USE` statement.
+        if let Some(db) = db {
+            SessionHandler::use_db(self, &db).await?;
+        }
+        Ok(())
+    }
+
     async fn use_db(&mut self, db: &str) -> Result<(), SqlError> {
         // COM_INIT_DB and the handshake's database: Go runs them as a `USE` statement.
         tidb_metrics::statement(StmtType::Use);
         let r = self.use_db_inner(db).await;
+        if r.is_ok() {
+            // `cc.dbname = db` (`conn.go:1502`), only after the `USE` succeeded.
+            self.conn_db = Some(db.to_owned());
+        }
         if r.is_ok()
             && let Some(router) = self.router.take()
         {
@@ -1410,10 +1742,18 @@ impl SessionHandler for Session {
     }
 
     fn status_flags(&self) -> u16 {
-        if let Some(router) = &self.router {
+        let status = if let Some(router) = &self.router {
             router.new_stack().session().vars().status()
+        } else if let Some(s) = &self.default_vars {
+            s.vars().status()
         } else {
             tidb_mysql_protocol::constants::status::AUTOCOMMIT
+        };
+        // The prototype holds the transaction (D05.4 spec §6.3): Go's `SetInTxn`.
+        if self.txn.is_some() {
+            status | tidb_mysql_protocol::constants::status::IN_TRANS
+        } else {
+            status
         }
     }
 
@@ -1439,7 +1779,9 @@ impl SessionHandler for Session {
     }
 
     fn txn_timestamp(&self) -> u64 {
-        if let Some(router) = &self.router {
+        if let Some(t) = &self.txn {
+            t.start_ts()
+        } else if let Some(router) = &self.router {
             let tc = &router.new_stack().session().vars().state.txn_ctx;
             if tc.start_ts != 0 {
                 tc.start_ts
@@ -1483,20 +1825,31 @@ impl Session {
         self.stmt.stmt_type = None;
         let opts = self.parse_options()?;
         let start = Instant::now();
-        let lowered = match tidb_sql::parse_and_lower_with(sql, &opts) {
+        let stmt = match tidb_sql::ir::parse_one_with(sql, &opts) {
+            Ok(s) => s,
+            Err(e) if e.code == tidb_base::errno::ErrParse => {
+                // Go fails before `ResetContextOfStmt`: the warnings stay.
+                return Err(router::log_and_wrap_parse_error(
+                    self.connection_id,
+                    "",
+                    tidb_base::errors::redact_log_enabled_load(),
+                    sql,
+                    e,
+                ));
+            }
+            Err(e) => {
+                self.warnings.clear();
+                return Err(e);
+            }
+        };
+        // A write in a read-only transaction (D05.4 spec §6.2), or a statement the prototype
+        // does not lower: Go would have started it.
+        let lowered = match self
+            .txn_write_error(&stmt)
+            .map_or_else(|| tidb_sql::ir::lower_statement(&stmt, sql), Err)
+        {
             Ok(l) => l,
             Err(e) => {
-                if e.code == tidb_base::errno::ErrParse {
-                    // Go fails before `ResetContextOfStmt`: the warnings stay.
-                    return Err(router::log_and_wrap_parse_error(
-                        self.connection_id,
-                        "",
-                        tidb_base::errors::redact_log_enabled_load(),
-                        sql,
-                        e,
-                    ));
-                }
-                // A statement the prototype does not lower: Go would have started it.
                 self.warnings.clear();
                 return Err(e);
             }
@@ -1515,8 +1868,8 @@ impl Session {
     /// A `COM_QUERY` statement after parsing: request the TSO early, then run it.
     async fn run_query(&mut self, lowered: &Lowered) -> Result<Response, SqlError> {
         self.reset_warnings(&lowered.stmt);
-        let ts =
-            (needs_ts(lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
+        let ts = (needs_ts(lowered) && !self.synced_mode() && !self.maybe_in_txn())
+            .then(|| TsFuture::request(&self.shared.kv));
         self.run(lowered, &[], ts).await
     }
 
@@ -1538,7 +1891,12 @@ impl Session {
         // warnings stay.
         let opts = self.parse_options()?;
         let stmt = tidb_sql::ir::parse_one_with(sql, &opts)?;
-        let lowered = match tidb_sql::ir::lower_statement(&stmt, sql) {
+        // A write in a read-only transaction (D05.4 spec §6.2): the prototype cannot prepare
+        // a write, so its 1792 comes at PREPARE (Go's at EXECUTE; spec §6.5).
+        let lowered = match self
+            .txn_write_error(&stmt)
+            .map_or_else(|| tidb_sql::ir::lower_statement(&stmt, sql), Err)
+        {
             Ok(l) => l,
             Err(e) => {
                 self.warnings.clear();
@@ -1684,8 +2042,8 @@ impl Session {
         self.timer.begin();
         self.mdl = None;
         let start = Instant::now();
-        let ts =
-            (needs_ts(&lowered) && !self.synced_mode()).then(|| TsFuture::request(&self.shared.kv));
+        let ts = (needs_ts(&lowered) && !self.synced_mode() && !self.maybe_in_txn())
+            .then(|| TsFuture::request(&self.shared.kv));
         let params = params_to_literals(params)?;
         self.stmt.start(stmt_type(&lowered.stmt), start.elapsed());
         self.reset_warnings(&lowered.stmt);
@@ -1739,8 +2097,12 @@ impl router::PocEngine for Session {
     }
 
     fn in_txn(&self) -> bool {
-        // BEGIN / START TRANSACTION and autocommit=0 are rejected: never in a transaction.
-        false
+        // The prototype holds explicit and `autocommit = 0` transactions (D05.4 spec §6.3).
+        self.txn.is_some()
+    }
+
+    fn txn_write_error(&mut self, stmt: &tidb_parser::ast::Stmt) -> Option<SqlError> {
+        Session::txn_write_error(self, stmt)
     }
 
     fn values(&self) -> PocValues {
@@ -1894,31 +2256,6 @@ async fn tidb_table_rows(kv: &KvClient, schema: &SchemaCache) -> Result<Vec<Vec<
 mod fence_tests {
 
     use super::*;
-
-    const NOT_IN_TXN: &str = ": explicit transactions are not supported by the read-only node \
-                              (every statement runs in autocommit mode)'";
-
-    /// The explicit-transaction fence answers 1235 with the fixed text, never panics.
-    #[test]
-    fn explicit_transactions_answer_1235() {
-        for (sql, what) in [
-            ("BEGIN", "BEGIN/START TRANSACTION"),
-            ("START TRANSACTION", "BEGIN/START TRANSACTION"),
-            ("COMMIT", "COMMIT"),
-            ("ROLLBACK", "ROLLBACK"),
-        ] {
-            let lowered = tidb_sql::parse_and_lower(sql).unwrap();
-            let e = txn_fence(&lowered.stmt).unwrap_or_else(|| panic!("{sql}: no fence"));
-            assert_eq!(e.code, 1235, "{sql}");
-            assert_eq!(
-                e.message,
-                format!("This version of TiDB doesn't yet support '{what}{NOT_IN_TXN}"),
-                "{sql}"
-            );
-        }
-        let select = tidb_sql::parse_and_lower("SELECT 1").unwrap();
-        assert!(txn_fence(&select.stmt).is_none());
-    }
 
     /// The session the prototype's `SET` validates against, as `Session::default_session`
     /// makes it: over a sysvar cache built from these rows of `mysql.global_variables` (the
@@ -2099,28 +2436,59 @@ mod fence_tests {
         (e.code, e.state.to_string(), e.message)
     }
 
+    /// `SET autocommit` takes every value Go's `checkBoolSystemVar` accepts (D05.4 spec §6:
+    /// `autocommit = 0` starts read-only transactions, it was 1235) and leaves Go's
+    /// normalized value in the session variables.
     #[test]
-    fn autocommit_off_answers_1235() {
-        for sql in [
-            "SET autocommit = 0",
-            "SET autocommit = OFF",
-            "SET @@autocommit = 'off'",
-        ] {
-            let e = set(sql).unwrap_err();
-            assert_eq!(e.code, 1235, "{sql}");
-            assert_eq!(
-                e.message,
-                format!("This version of TiDB doesn't yet support 'autocommit=0{NOT_IN_TXN}")
-            );
-        }
-        for sql in [
-            "SET autocommit = 1",
-            "SET autocommit = ON",
-            "SET autocommit = 'on'",
-            "SET autocommit = TRUE",
-            "SET autocommit = DEFAULT",
+    fn autocommit_is_accepted() {
+        for (sql, want) in [
+            ("SET autocommit = 0", "OFF"),
+            ("SET autocommit = OFF", "OFF"),
+            ("SET @@autocommit = 'off'", "OFF"),
+            ("SET AUTOCOMMIT = 0", "OFF"),
+            ("SET autocommit = 1", "ON"),
+            ("SET autocommit = ON", "ON"),
+            ("SET autocommit = 'on'", "ON"),
+            ("SET autocommit = TRUE", "ON"),
+            ("SET autocommit = DEFAULT", "ON"),
         ] {
             assert_eq!(set(sql), Ok((None, None)), "{sql}");
+            let (values, warnings) = set_values(sql);
+            assert_eq!(
+                values,
+                vec![("autocommit".to_owned(), want.to_owned())],
+                "{sql}"
+            );
+            assert!(warnings.is_empty(), "{sql}");
+        }
+    }
+
+    /// `SET autocommit = 1` from off ends the transaction (Go's hook), also when a later
+    /// assignment of the statement fails; from on, or turning it off, it does not. Each
+    /// statement runs after the ones before it in the same session.
+    #[test]
+    fn autocommit_turned_on_ends_the_transaction() {
+        let mut session = validation_session(&[]);
+        for (sql, ends) in [
+            ("SET autocommit = 1", false),
+            ("SET autocommit = 0", false),
+            ("SET autocommit = 0", false),
+            ("SET autocommit = 1", true),
+            ("SET autocommit = 0, autocommit = 1, autocommit = 0", true),
+            ("SET autocommit = ON, group_concat_max_len = 'abc'", true),
+            ("SET autocommit = 'abc'", false),
+        ] {
+            let Statement::Set(a) = tidb_sql::parse_and_lower(sql).unwrap().stmt else {
+                unreachable!()
+            };
+            let vars = session.vars_mut();
+            let mut autocommit = vars.is_autocommit();
+            let mut turned_on = false;
+            let _ = run_set(vars, &a, |c| {
+                turned_on |= autocommit_turns_on(&mut autocommit, &c.values);
+            });
+            assert_eq!(turned_on, ends, "{sql}");
+            assert_eq!(autocommit, session.vars_mut().is_autocommit(), "{sql}");
         }
     }
 
@@ -2449,7 +2817,6 @@ mod fence_tests {
             "/../../../tools/ab/workloads/connect"
         );
         let expected_errors: &[(&str, u16)] = &[
-            ("SET @@session.autocommit = OFF", 1235),
             ("SET max_execution_time = 1.5", 1232),
             ("SET max_execution_time = 99999999999999999999", 1232),
             ("SET max_execution_time = 'abc'", 1232),
@@ -2471,7 +2838,7 @@ mod fence_tests {
             .map(|e| e.unwrap().path())
             .collect();
         files.sort();
-        assert_eq!(files.len(), 6, "{files:?}");
+        assert_eq!(files.len(), 7, "{files:?}");
         let mut seen = 0;
         for file in files {
             let text = std::fs::read_to_string(&file).unwrap();
@@ -2493,7 +2860,6 @@ mod fence_tests {
                         current_user: "root@%",
                         connection_id: 1,
                         have_ssl: "NO",
-                        autocommit: true,
                         last_plan_from_cache: false,
                         last_plan_from_binding: false,
                         vars: session.vars_mut(),
@@ -2501,6 +2867,9 @@ mod fence_tests {
                     }
                     .select(&sel, &[])
                     .map(|_| ()),
+                    // A read-only transaction's statements (D05.4 spec §6); the session's
+                    // transaction is tested in `Session`'s tests.
+                    Statement::Begin(_) | Statement::Commit | Statement::Rollback => Ok(()),
                     other => panic!("{sql}: {other:?}"),
                 });
                 let want = expected_errors.iter().find(|(s, _)| *s == sql);
@@ -2652,7 +3021,6 @@ mod fence_tests {
                     current_user: "root@%",
                     connection_id: 1,
                     have_ssl: "NO",
-                    autocommit: true,
                     last_plan_from_cache: false,
                     last_plan_from_binding: false,
                     vars: sess.vars_mut(),
@@ -2689,5 +3057,39 @@ mod fence_tests {
         let stmt4 = tidb_sql::parse_and_lower_with(r#"SELECT "abc""#, &opts(&s)).unwrap();
         let err = eval_const_select(&mut s, &stmt4).unwrap_err();
         assert_eq!(err.code, 1054, "{}", err.message);
+    }
+
+    #[test]
+    fn kv_error_preserves_9006_and_9001_across_kv_and_meta() {
+        let cache = poc_kv::SafePointCache::new();
+        let sp = (1_700_000_060_000_u64 << 18) + 1;
+        cache.update(sp, Instant::now());
+        let e_9006 = cache.check_visibility(sp - 10).unwrap_err();
+
+        let from_kv = kv_error(poc_kv::Error::SafePoint(Box::new(e_9006.clone())));
+        assert_eq!(from_kv.code, 9006);
+        assert_eq!(from_kv.state, "HY000");
+        assert!(from_kv.source_err.is_some());
+
+        let from_meta = kv_error(tidb_meta::Error::Kv(poc_kv::Error::Copr(e_9006.clone())));
+        assert_eq!(from_meta.code, 9006);
+        assert_eq!(from_meta.state, "HY000");
+
+        let shared_meta = kv_error(tidb_meta::Error::Shared(Arc::new(tidb_meta::Error::Kv(
+            poc_kv::Error::Driver(Box::new(e_9006)),
+        ))));
+        assert_eq!(shared_meta.code, 9006);
+        assert_eq!(shared_meta.state, "HY000");
+
+        let stale = poc_kv::SafePointCache::new();
+        stale.update(10, Instant::now() - Duration::from_secs(100));
+        let e_9001 = stale.check_visibility(20).unwrap_err();
+        let timeout = kv_error(poc_kv::Error::SafePoint(Box::new(e_9001)));
+        assert_eq!(timeout.code, 9001);
+        assert_eq!(timeout.state, "HY000");
+        assert_eq!(
+            timeout.message,
+            "PD server timeout: start timestamp may fall behind safe point"
+        );
     }
 }

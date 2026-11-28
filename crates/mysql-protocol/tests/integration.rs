@@ -33,6 +33,7 @@ impl SessionFactory for Factory {
             db: info.database.clone(),
             stmts: Default::default(),
             raw: Default::default(),
+            in_txn: false,
         })
     }
 }
@@ -42,6 +43,8 @@ struct Session {
     stmts: std::collections::HashMap<u32, String>,
     /// The raw parameter section of the last `COM_STMT_EXECUTE` (`execute_raw_params`).
     raw: tidb_mysql_protocol::RawParams,
+    /// After `begin`, until `COM_RESET_CONNECTION`.
+    in_txn: bool,
 }
 
 /// One row exercising most column types.
@@ -117,6 +120,10 @@ impl SessionHandler for Session {
                 warnings: 0,
             })),
             "set names utf8mb4" => Ok(Response::ok()),
+            "begin" => {
+                self.in_txn = true;
+                Ok(Response::ok())
+            }
             // Sent by mysql_async right after connecting.
             "select @@max_allowed_packet,@@wait_timeout" => Ok(Response::ResultSet(ResultSet {
                 columns: vec![
@@ -201,6 +208,24 @@ impl SessionHandler for Session {
 
     fn close(&mut self, stmt_id: u32) {
         self.stmts.remove(&stmt_id);
+    }
+
+    fn status_flags(&self) -> u16 {
+        if self.in_txn {
+            status::AUTOCOMMIT | status::IN_TRANS
+        } else {
+            status::AUTOCOMMIT
+        }
+    }
+
+    async fn reset_connection(&mut self) -> Result<(), SqlError> {
+        // Like a new session: no transaction, no prepared statements.
+        assert!(
+            self.stmts.is_empty(),
+            "statements are closed before the reset"
+        );
+        self.in_txn = false;
+        Ok(())
     }
 
     async fn use_db(&mut self, db: &str) -> Result<(), SqlError> {
@@ -628,6 +653,38 @@ async fn raw_without_deprecate_eof() {
     c.command(command::PING, &[]).await;
     assert_eq!(c.read().await, [0, 0, 0, 2, 0, 0, 0]);
     c.command(command::QUIT, &[]).await;
+}
+
+/// `COM_RESET_CONNECTION` (Go's `handleResetConnection`): the open statements are closed,
+/// the session is reset, and the OK packet carries the reset session's status flags, so a
+/// transaction's `SERVER_STATUS_IN_TRANS` is gone on the wire (#547). The OK packet of a
+/// statement in a transaction carries it.
+#[tokio::test(flavor = "multi_thread")]
+async fn reset_connection_resets_the_session_status() {
+    let addr = start(ServerConfig::default()).await;
+    let (mut c, ok) = Raw::connect(
+        addr,
+        BASE_CAPS,
+        "alice",
+        PASSWORD,
+        auth_plugin::MYSQL_NATIVE_PASSWORD,
+    )
+    .await;
+    assert_eq!(ok, [0, 0, 0, 2, 0, 0, 0]);
+    c.command(command::STMT_PREPARE, b"SELECT ?").await;
+    assert_eq!(c.read().await[0], 0);
+    let _param = c.read().await;
+    assert!(is_eof(&c.read().await));
+    c.command(command::QUERY, b"begin").await;
+    // OK, status AUTOCOMMIT | IN_TRANS.
+    assert_eq!(c.read().await, [0, 0, 0, 3, 0, 0, 0]);
+    c.command(command::RESET_CONNECTION, b"").await;
+    assert_eq!(c.read().await, [0, 0, 0, 2, 0, 0, 0]);
+    c.command(command::QUERY, b"select 1").await;
+    assert_eq!(c.read().await, [1]);
+    let _col = c.read().await;
+    let eof = c.read().await;
+    assert_eq!(&eof[3..5], &status::AUTOCOMMIT.to_le_bytes());
 }
 
 #[tokio::test(flavor = "multi_thread")]

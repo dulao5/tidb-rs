@@ -2,6 +2,12 @@
 
 /// `/tidb/server/info/<ddl_id>` → [`crate::ServerInfo`] JSON, lease-bound.
 pub const SERVER_INFO_PREFIX: &str = "/tidb/server/info/";
+/// `/tidb/server/minstartts/<ddl_id>` → smallest active `start_ts`, lease-bound (Go:
+/// `infosync.ServerMinStartTSPath`, waited on by `GCWorker`).
+pub const SERVER_MIN_START_TS: &str = "/tidb/server/minstartts";
+/// `/tidb/store/gcworker/saved_safe_point` → decimal GC safe point TSO persisted by TiDB's
+/// GC worker (`client-go/tikv/safepoint.go`: `GcSavedSafePoint`).
+pub const GC_SAVED_SAFE_POINT: &str = "/tidb/store/gcworker/saved_safe_point";
 /// Put by the DDL owner after each schema version it commits (Go: `DDLGlobalSchemaVersion`).
 pub const GLOBAL_SCHEMA_VERSION: &str = "/tidb/ddl/global_schema_version";
 /// `/tidb/ddl/all_schema_versions/<ddl_id>` → loaded version, lease-bound (Go:
@@ -22,6 +28,10 @@ pub fn job_schema_version(job_id: i64, ddl_id: &str) -> String {
     format!("{ALL_SCHEMA_BY_JOB_VERSIONS}/{job_id}/{ddl_id}")
 }
 
+pub fn min_start_ts(ddl_id: &str) -> String {
+    format!("{SERVER_MIN_START_TS}/{ddl_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37,5 +47,10 @@ mod tests {
             job_schema_version(0, "f989950c-7c23-42e3-84c0-42c797d4063c"),
             "/tidb/ddl/all_schema_by_job_versions/0/f989950c-7c23-42e3-84c0-42c797d4063c"
         );
+        assert_eq!(
+            min_start_ts("f989950c-7c23-42e3-84c0-42c797d4063c"),
+            "/tidb/server/minstartts/f989950c-7c23-42e3-84c0-42c797d4063c"
+        );
+        assert_eq!(GC_SAVED_SAFE_POINT, "/tidb/store/gcworker/saved_safe_point");
     }
 }

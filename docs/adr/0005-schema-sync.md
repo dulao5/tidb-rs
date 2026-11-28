@@ -47,11 +47,19 @@ the node then behaves exactly as in phase A and writes nothing to etcd.
 - `/tidb/ddl/all_schema_versions/<ddl_id>` = the loaded version (used by the owner when
   `tidb_enable_metadata_lock=OFF`). It is put at registration and advanced after each reload,
   but only once no in-flight synced statement uses an older version (see "MDL").
-- Both keys are bound to one lease with TTL 90 s (Go's `SessionTTL`), kept alive every
+- `/tidb/server/minstartts/<ddl_id>` = the node's minimum active `start_ts` across open
+  read-only transactions and active non-MaxTS read statements (bounded by
+  `tidb_gc_max_wait_time`, default 86400 s). Put immediately upon registration under the same
+  lease, refreshed every 30 s, and cleared when the lease is revoked on shutdown or
+  deregistration, so Go's GC worker does not advance the safe point past an open read-only
+  transaction. Meanwhile, `SafePointCache` polls `/tidb/store/gcworker/saved_safe_point` and
+  enforces Go's `9006` (`ErrGCTooEarly`) / `9001` (`ErrPDServerTimeout`) `CheckVisibility`
+  check on every snapshot read.
+- All three keys share one lease with TTL 90 s (Go's `SessionTTL`), kept alive every
   TTL/3. Not registered: `/topology/tidb/...` (TiProxy, TiCDC and Dashboard must not see the
-  node), `/tidb/server_id`, `/tidb/server/minstartts`, and no owner campaign of any kind.
+  node), `/tidb/server_id`, and no owner campaign of any kind.
 - On SIGINT or SIGTERM the node leaves synced mode and revokes the lease before closing
-  connections, which deletes both keys.
+  connections, which deletes all three keys.
 
 ### Schema domain (background, `SchemaSync::sync_loop`)
 
@@ -316,9 +324,11 @@ max 473 ms).
 
 ## Not done
 
-- **`/tidb/server/minstartts`.** GC does not know about our reads. That is fine as long as
-  no read lasts longer than `tidb_gc_life_time` (10 min by default); tidb-rs statements are
-  short autocommit reads.
+- **Standalone mode (`--schema-sync=false`) `minstartts`.** Synced mode now reports
+  `/tidb/server/minstartts/<ddl_id>` via the registration etcd lease (with Go's `9006` /
+  `9001` `CheckVisibility` check enforced in both synced and standalone modes); standalone mode
+  still writes nothing to etcd, so long-lived transactions there rely on `CheckVisibility`
+  to fail with `9006` instead of reading GC'd data.
 - **Incremental `SchemaDiff` application.** Every version is a full reload, which is fine
   for small catalogs. Large catalogs need Go's `infoschema.Builder` approach, and the reload
   time also adds to every DDL step.

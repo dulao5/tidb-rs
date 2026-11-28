@@ -149,6 +149,14 @@ pub trait SessionHandler: Send + 'static {
     /// `COM_INIT_DB` and the handshake's default database.
     fn use_db(&mut self, db: &str) -> impl Future<Output = Result<(), SqlError>> + Send;
 
+    /// `COM_RESET_CONNECTION`, after every open statement was closed: Go's
+    /// `handleResetConnection` closes the session (a transaction is rolled back) and opens a
+    /// new one for the same user, with the current database restored. The OK packet that
+    /// follows carries the new session's status flags. The default keeps the session.
+    fn reset_connection(&mut self) -> impl Future<Output = Result<(), SqlError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
     /// Called after a COM_QUERY / COM_STMT_EXECUTE response was flushed (also after errors):
     /// `write` is the time spent encoding and writing the response, `total` the time since the
     /// command packet was read. For statistics only; the default ignores it.

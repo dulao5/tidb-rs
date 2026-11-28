@@ -20,7 +20,7 @@
 //!   ignoring them (same result, possibly slower);
 //! - no commit TS in the result (`WithReturnCommitTS` fails as client-go fails when TiKV
 //!   returns none);
-//! - no GC safe-point check after the read (`KVStore.CheckVisibility`, as `copr`'s adapter);
+//! - GC safe-point visibility is checked after reads via [`SafePointCache`] (`CheckVisibility`);
 //! - the reads of one snapshot are serialized (client-go allows concurrent ones).
 
 // client-go identifiers for the constants (M-GONAME).
@@ -40,6 +40,7 @@ use tikv_client::{
 };
 
 use super::error::TiKVError;
+use super::safepoint::SafePointCache;
 use crate::copr::tikv::Variables;
 
 /// client-go `txnsnapshot.getMaxBackoff` / `batchGetMaxBackoff` (ms).
@@ -66,18 +67,46 @@ pub enum Priority {
 /// client-go `tikv.KVStore`: the client-rust transaction client.
 pub struct KVStore {
     client: Arc<TransactionClient>,
+    safe_point: Arc<SafePointCache>,
 }
 
 impl KVStore {
+    /// Constructs the store with a standalone [`SafePointCache`] that is not refreshed
+    /// automatically (reads fail with `9001` after 99 s unless updated; production callers
+    /// should use [`Self::new_with_safe_point`]).
     // glue: constructs the boundary over a client-rust TransactionClient
     pub fn new(client: Arc<TransactionClient>) -> Arc<KVStore> {
-        Arc::new(KVStore { client })
+        Self::new_with_safe_point(client, Arc::new(SafePointCache::new()))
+    }
+
+    /// Constructs the store sharing an externally managed [`SafePointCache`].
+    // glue: constructs the boundary with a shared safe point cache
+    pub fn new_with_safe_point(
+        client: Arc<TransactionClient>,
+        safe_point: Arc<SafePointCache>,
+    ) -> Arc<KVStore> {
+        Arc::new(KVStore { client, safe_point })
     }
 
     /// The client-rust client.
     // glue: accessor
     pub fn client(&self) -> &Arc<TransactionClient> {
         &self.client
+    }
+
+    /// The shared GC safe point cache.
+    // glue: accessor
+    pub fn safe_point_cache(&self) -> &Arc<SafePointCache> {
+        &self.safe_point
+    }
+
+    /// `KVStore.CheckVisibility(startTS)`: rejects snapshots below the cached GC safe point
+    /// (`ErrGCTooEarly`) or when the cache is stale (`ErrPDServerTimeout`).
+    // go-l3: ADR-0008 client-go tikv KVStore.CheckVisibility
+    pub fn check_visibility(&self, start_ts: u64) -> Result<(), TiKVError> {
+        self.safe_point
+            .check_visibility(start_ts)
+            .map_err(TiKVError::Plain)
     }
 
     /// `KVStore.GetSnapshot(ts)`: a snapshot reading at `ts` (`txnsnapshot.NewTiKVSnapshot`).
@@ -472,10 +501,12 @@ impl KVSnapshot {
     ) -> Result<ValueEntry, TiKVError> {
         let return_commit_ts = options.contains(&GetOption::ReturnCommitTS);
         self.check_supported()?;
+        let version = self.version();
         let value = {
             let mut inner = self.inner.lock().await;
             self.client_snapshot(&mut inner).get(k.to_vec()).await?
         };
+        self.store.check_visibility(version)?;
         let entry = match value {
             Some(v) if !v.is_empty() => tidb_kv::kv::new_value_entry(v, 0),
             _ => return Err(TiKVError::NotExist),
@@ -498,6 +529,7 @@ impl KVSnapshot {
             return Ok(m);
         }
         self.check_supported()?;
+        let version = self.version();
         let pairs: Vec<tikv_client::KvPair> = {
             let mut inner = self.inner.lock().await;
             self.client_snapshot(&mut inner)
@@ -505,6 +537,7 @@ impl KVSnapshot {
                 .await?
                 .collect()
         };
+        self.store.check_visibility(version)?;
         for pair in pairs {
             let (k, v) = (Vec::<u8>::from(pair.0), pair.1);
             if v.is_empty() {
@@ -685,5 +718,31 @@ mod tests {
         let o = TxnOptions::default();
         assert!(o.txn_scope.is_empty() && o.start_ts.is_none());
         assert_eq!(GlobalTxnScope, "global");
+    }
+
+    #[test]
+    fn safepoint_cache_visibility_errors_map_via_to_tidb_err() {
+        use std::time::Instant;
+        let cache = SafePointCache::new();
+        let sp = (1_700_000_060_000_u64 << 18) + 1;
+        cache.update(sp, Instant::now());
+        let err = cache
+            .check_visibility(sp - 10)
+            .map_err(TiKVError::Plain)
+            .unwrap_err();
+        let tidb_err = to_tidb_err(err);
+        assert_eq!(tidb_err.code(), tidb_base::errno::ErrGCTooEarly as isize);
+
+        cache.update(10, Instant::now() - Duration::from_secs(100));
+        let timeout_err = to_tidb_err(
+            cache
+                .check_visibility(20)
+                .map_err(TiKVError::Plain)
+                .unwrap_err(),
+        );
+        assert_eq!(
+            timeout_err.code(),
+            tidb_base::errno::ErrPDServerTimeout as isize
+        );
     }
 }

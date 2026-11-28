@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 pub mod keys;
+pub mod min_start_ts;
 pub mod ported_domain;
 pub mod privilege_loader;
 mod registry;
@@ -29,6 +30,10 @@ mod sync;
 pub mod systable_io;
 pub mod sysvar_loader;
 
+pub use crate::min_start_ts::{
+    DEFAULT_GC_MAX_WAIT_SECS, DEFAULT_MIN_START_TS_INTERVAL, MinStartTsTracker, StartTsGuard,
+    compute_min_start_ts,
+};
 pub use crate::privilege_loader::PrivilegeSync;
 pub use crate::registry::Admission;
 pub use crate::registry::DEF_SCHEMA_LEASE;

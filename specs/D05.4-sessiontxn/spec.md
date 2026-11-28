@@ -106,3 +106,92 @@ tidb-rs 是只读节点；显式事务里的写语句和加锁读由会话拒绝
 ## 5. 测试
 
 `crates/sessiontxn/tests/providers.rs`：模拟会话、存储、TSO，按 Go `isolation/*_test.go` 的场景覆盖 autocommit 读与 TSO 预取、点查 MaxTS、RR 显式事务一个 ts、RC 每条语句一个 ts（BEGIN 后与 lazy 事务两种）、`tidb_snapshot`、`autocommit=0` 与低精度 TSO、D11 的拒绝、staleness 骨架。Go 的这些测试依赖 testkit / store，不能直接移植；SQL 级对照随 VS1-14。
+
+## 6. 显式只读事务与 `autocommit=0`（原型路径，#547）
+
+状态：本节随 #547 实现（2026-11-28）。
+
+**问题**：pymysql 的默认设置和 MySQL Connector/Python（纯 Python 实现）在连接时发 `SET AUTOCOMMIT=0`，tidb-rs 原来回 1235（围栏 F2），默认设置下连接失败；Connector/Python 的 C 扩展忽略这个错误，会话实际仍是 autocommit，驱动却报告 `autocommit=False`，两边静默不一致。`BEGIN` 也是 1235。只读节点应当支持只读的事务。
+
+### 6.1 Go v8.5.8 的行为（照搬）
+
+| 项 | Go 的做法 | Go 依据 |
+|---|---|---|
+| `autocommit=0` 的事务何时开始 | 每条语句开始时 `PrepareTxnCtx` 进入一个"延迟"事务（`EnterNewTxnBeforeStmt`，不取 ts）；第一条**需要读 ts** 的语句激活它时才取 start ts，并在激活时置 `InTxn`。`SELECT 1`、`SET`、`USE` 不取 ts，不开始事务（语句结束时 pending 的事务被丢弃） | `pkg/session/session.go:4190-4212`；`pkg/sessiontxn/isolation/base.go:303-305`；`pkg/session/tidb.go:270-280` |
+| 延迟事务的模式 | `tidb_txn_mode = pessimistic` 时悲观，否则乐观；autocommit 的语句总是乐观（`pessimistic-auto-commit` 配置默认关） | `session.go:4196-4202` |
+| `BEGIN` / `START TRANSACTION [WITH CONSISTENT SNAPSHOT]` | 先提交当前事务（只读事务的提交什么也不做），再进入新事务并**在 BEGIN 时取 start ts**（`activeNow`），置 `InTxn`。`BEGIN PESSIMISTIC` / `OPTIMISTIC` 覆盖 `tidb_txn_mode`。`WITH CONSISTENT SNAPSHOT` 与 `BEGIN` 相同；`WITH CAUSAL CONSISTENCY ONLY` 只影响提交 | `pkg/executor/simple.go:618-643`；`base.go:76-139`；`canReuseTxnWhenExplicitBegin`（`base.go`）；`pkg/session/txnmanager.go:155-173` |
+| 读 ts（provider 的选择） | 乐观：所有语句读 start ts；悲观按 `IsolationLevelForNewTxn`：`READ-COMMITTED` 每条语句一个新 ts（延迟事务中激活它的那条语句读 start ts 本身，BEGIN 之后的第一条语句就取新 ts），`SERIALIZABLE` 和其余级别读 start ts | `txnmanager.go` `newProviderWithRequest`；`isolation/optimistic.go:46`、`repeatable_read.go:66`、`serializable.go:50`；`readcommitted.go:103`、`:142-158` |
+| MaxTS | 事务内（`InTxn` 或 autocommit 关）不用 MaxTS | `IsPointGetWithPKOrUniqueKeyByAutoCommit` / `IsAutoCommitTxn`（`pkg/planner/core/common_plans.go:1500-1502`） |
+| `COMMIT` / `ROLLBACK` | `SetInTxn(false)`，语句结束时 `autoCommitAfterStmt` 提交；只读事务的提交直接返回。不在事务中时什么也不做、回 OK。`COMMIT AND CHAIN` / `RELEASE` 与 `COMMIT` 相同（执行器不读 `CompletionType`） | `simple.go:778-815`；`tidb.go:310-334`；`session.go:500-513` |
+| `SET autocommit = 1` | 从关变为开时隐式提交当前事务（钩子置 `InTxn = false`，语句结束时提交）。`SET autocommit = 0` 不开始事务 | `pkg/sessionctx/variable/sysvar.go:1848-1855`；`tidb.go:325-334` |
+| 事务内语句出错 | 事务继续（只在 `!InTxn` 时回滚） | `tidb.go:310-322` |
+| 状态标志 | `InTxn` 即 OK / EOF 包的 `SERVER_STATUS_IN_TRANS` | `pkg/sessionctx/variable/session.go:2628-2640` |
+| 指标 | 提交时 `tidb_session_transaction_duration_seconds{txn_mode, type="commit"}`（从事务上下文创建时起），`ROLLBACK` 时 `{txn_mode, type="rollback"}`；都只在事务已激活（`txn.Valid()`）时记录。结束事务的语句（`SET autocommit = 1` 后面的赋值）失败时回滚，记 `type="abort"`。命令开始时的空闲时间按状态里的 `SERVER_STATUS_IN_TRANS` 记入 `tidb_server_conn_idle_duration_seconds{in_txn}` | `session.go:781-791`、`:839-841`、`:4369-4400`；`simple.go:801-815`；`tidb.go:327-330`；`pkg/server/conn.go:1319-1323` |
+
+### 6.2 已由负责人决定的部分（N11 D8，#146，2026-11-14）
+
+- `START TRANSACTION READ ONLY`：**始终接受**（Go 在 `tidb_enable_noop_functions` 关时报 1235）。tidb-rs 的事务都是只读的，所以 `READ ONLY` 与 `BEGIN` 行为相同。
+- 事务内（已在事务中，或 `autocommit=0`）的写语句（`INSERT`、`REPLACE`、`UPDATE`、`DELETE`、`LOAD DATA`）和加锁读 `SELECT ... FOR UPDATE`：**1792** `Cannot execute statement in a READ ONLY transaction.`（SQLSTATE 25006，Go 定义了但没有使用）。事务照常继续。
+- 不变的部分：DDL 等其余 F1 语句（委托给 Go TiDB）仍是 F1 的 1235；`FOR SHARE` / `LOCK IN SHARE MODE` 在 Go 里是 noop 函数、不加锁，原型照旧报 1235；`START TRANSACTION READ ONLY AS OF TIMESTAMP`（stale read 事务，本块第 2 部分）与原型的其他 stale read 一样报 1235 `AS OF TIMESTAMP (stale reads)`。
+
+### 6.3 路由（维护者已定，宪章第九条 2；#547 上请 Maya 确认）
+
+**显式事务和 `autocommit=0` 的语句由原型执行**，新栈暂不接手：
+
+1. §3a 与 VS1-14m 的完成条件：新栈会话的元数据锁登记上报给集群（D06.5 的 MDL 检查循环，桩 `report_metadata_locks`）之前，路由器不得把显式事务交给新栈；
+2. `BEGIN` / `COMMIT` 的执行器（`SimpleExec`，D12.12）还没有移植；
+3. 多数 SELECT 在新栈上仍会回退到原型（VS1-34 起逐步减少）。事务中的回退必须读同一个快照，只有一个引擎持有事务才能保证。
+
+所以路由器第 0 步的两个会话条件"explicit transaction"（`PocEngine::in_txn`，现在在原型持有事务时为真）和"autocommit=0"保持不变；原型持有事务状态。上面三条都满足后再把事务交给新栈（那时新栈的 `ExecuteStmt` 已按 Go 实现 `validateStatementInTxn` 与 1792）。
+
+### 6.4 原型中的实现（`crates/poc/session/src/txn.rs`，glue）
+
+- 事务状态：start ts、读 ts 的规则（start ts / 每条语句新 ts，按 6.1 的 provider 选择）、悲观与否（指标标签）、开始时间、start ts 上可见的 InfoSchema（读过一次后缓存）。
+- 事务内的读：**用读 ts 上可见的 schema 和该 ts 的快照**（ADR 0003 的路径：先用最新缓存的 schema 规划，同时校验它就是该 ts 可见的版本，否则按该 ts 的 schema 重新规划），不用同步模式的 schema，不登记元数据锁。读 start ts 的语句复用缓存的 InfoSchema，不再读 schema 版本键。
+- 延迟事务：激活它的语句取 TSO，成功后事务才算开始；该语句失败时不保留事务（见 6.5 第 4 条）。
+- `@@autocommit` 读会话变量（原来固定为 1）；`status_flags` 带上 `SERVER_STATUS_IN_TRANS`；`txn_timestamp` 返回原型事务的 start ts。
+- 指标按 6.1 记录；事务内的语句不再记成 autocommit 事务。`tidb_server_conn_idle_duration_seconds` 原来总记 `in_txn="0"`，现在照 Go 按状态标志分开（`crates/mysql-protocol` 的连接循环）。
+- 1792 作为 MySQL 错误直接发给客户端（相当于 Go 的 `mysql.NewErr(ErrCantExecuteInReadOnlyTransaction)`，`writeError` 原样发出）。Go 没有任何错误类注册 1792（v8.5.8 的 `ErrClassToMySQLCodes` 里没有），带这个码的 TiDB 错误经 `terror.ToSQLError` 会变成 1105，所以不用新栈的 `err_read_only_txn`（`ClassSession.NewStd`，调试构建里还会触发登记表的断言）；新栈接手事务时同样要按 MySQL 错误发出。
+- `COM_RESET_CONNECTION` 照 Go 的 `handleResetConnection`（`pkg/server/conn.go:2672-2701`）重开会话：关闭预处理语句，回滚事务（不记事务时长），用同一连接的信息打开新会话（`autocommit` 等变量回到全局值），再以 `USE` 恢复连接的数据库——即 Go 的 `cc.dbname`，只由握手和 `COM_INIT_DB` 在其 `USE` 成功后设置（`conn.go:641, 1502`；`COM_CHANGE_USER` 也会设，但本原型不支持该命令），SQL 的 `USE` 不改它，所以重置后回到的是连接的数据库而不是最后一次 `USE` 选的库（`conn.go:2693-2694`），这一步失败时 `cc.dbname` 仍保留；随后的 OK 包带新会话的状态标志（没有 `IN_TRANS`）。
+- 事务内的写语句检查在解析之后、降级之前（`tidb_sql::ir::writes_in_txn`）：`--new-stack=off` 在原型的 `query_inner`，VS1 路由器在走原型的路径上（`PocEngine::txn_write_error`；事务中的语句按第 0 步都走原型）。
+
+### 6.5 与 Go 的差异（代码中已标注）
+
+1. **元数据锁与事务的 schema**：原型的事务不登记元数据锁，Go 上的 DDL 不等 tidb-rs 的事务结束（Go 会等，§3a）。读的结果也不同：
+   - 读 start ts 的事务（RR 等）用 **start ts 上可见的 schema**。Go 的事务 InfoSchema 是初始化时 domain 最新的（`pkg/sessiontxn/isolation/base.go:116`），MDL 开着（默认）时第一次访问一张表还会换成最新的表定义（`pkg/planner/core/preprocess.go:1667-1668`、`:2057-2185`）。所以 `BEGIN` 之后、第一次读这张表之前提交的 DDL：`ADD COLUMN` 在 Go 中可见、原型不可见；列 id 变化 Go 报 8028；表被删除 Go 报 1146，原型仍读旧表。
+   - RC 事务每条语句用自己 ts 上的 schema，事务进行中提交的 DDL 对后续语句可见（Go 中这个 DDL 会等到事务结束）。
+   临时差异，与新栈的 MDL（#252）一起解决；跟踪 issue #549。
+2. **minstartts**：已按负责人决定（#550，2026-11-28，N11 §4.5）在本分支实现（跟踪 issue #549 中的该项关闭）：
+   - 同步模式（`--schema-sync` 默认开启）通过已有的注册 etcd lease 上报 `/tidb/server/minstartts/<ddl_id>`（注册成功后立即写入，随后每 30 s 更新，遵循 `tidb_gc_max_wait_time` 下界；覆盖开启中的只读事务与原型 / 新栈非 MaxTS 的自动提交读语句），GC worker 计算安全点时会将其计入并留出缓冲（`minstartts - 1`）。
+   - 同时保留 Go 的 `CheckVisibility` 检查（`crates/store/src/driver/safepoint.rs` + `poc-kv` 每 10 s 从 `/tidb/store/gcworker/saved_safe_point` 刷新）：缓存超期（> 99 s）报 `9001`（`ErrPDServerTimeout`），`start_ts < safe_point` 时对点查、批量点查、扫描与 coprocessor 均报 `9006`（`ErrGCTooEarly`）。
+   - 边界：单机模式（`--schema-sync=false`）不建立 etcd 租约，不上报 `/tidb/server/minstartts/<id>`，仅保留 `9006` / `9001` 的 `CheckVisibility` 检查。
+3. **同步模式**：事务内读 schema 版本键（RC 的每条语句、RR 的第一条），meta region 不可用时这些语句会等待；autocommit 语句在同步模式下不读（#136）。
+4. 延迟事务中激活事务的语句在取得 start ts 之后失败（例如读 TiKV 出错）时，Go 保留事务（`base.go:303-305`），原型不保留，下一条语句重新开始事务。
+5. 每个事务的语句数直方图（`tidb_session_transaction_statement_num`）不记录（autocommit 语句也不记录）。
+6. 不变：`SET TRANSACTION ISOLATION LEVEL`（one-shot）、`tidb_snapshot`、`tidb_read_staleness`、`tx_read_ts`、`tidb_txn_mode` 的会话 `SET` 在原型里仍是 1235，所以只有 `BEGIN PESSIMISTIC/OPTIMISTIC`、集群的 `tidb_txn_mode` 全局值和会话的 `transaction_isolation` 决定读 ts 的规则。
+7. **预处理语句**：原型不能预处理写语句，所以事务内预处理写语句在 `PREPARE` 时就报 1792；Go 的 `PREPARE` 成功，1792 在 `EXECUTE` 时（`validateStatementInTxn`）。VS1 路由器中只能由新栈执行的预处理语句（`Owner::New`）在事务中或 `autocommit=0` 时报 1235 "nothing to fall back"（第 0 步把事务留在原型，`router/mod.rs` 的 `Owner::New` 分支）；新栈接手事务后消失。
+8. **`USE` / `PREPARE` 的 schema**：事务内的 `USE` 和 `PREPARE` 用同步的或新取 TSO 的 schema（`name_schema`），Go 用事务的 InfoSchema（`executeUse` 读 `e.is`，`pkg/executor/simple.go:590-600`）。
+9. **事务内的 DDL**：Go 先隐式提交当前事务再执行 DDL（`pkg/executor/ddl.go:93-100`）；原型对 DDL 报 F1 的 1235，事务保留。
+10. **`START TRANSACTION READ ONLY` 与 `tidb_enable_noop_functions = WARN`**：Go 加一条警告（`pkg/executor/simple.go:619-626`）；原型按 D8 始终接受，不加警告。
+11. **`tidb_rc_read_check_ts = ON`**：原型忽略（RC 照常每条语句取新 ts）；N11 D11 要求报不支持。Go 在 `pkg/sessiontxn/isolation/readcommitted.go:96-98` 使用它。
+12. **1792 不进语句指标**：1792 在语句开始计时之前返回（原型的 `query_inner`、路由器的 `query_inner`），Go 把它记为一条出错的语句。
+13. **`--new-stack=off` 下会话变量还没建好时**：`status_flags` 报 AUTOCOMMIT，即使集群的全局 `autocommit` 是 OFF（变量在第一条需要它们的语句时才建）。
+14. **没有 `wait_timeout` / `tidb_idle_transaction_timeout`**：空闲连接（包括事务中的）不会被关闭。Go 对空闲连接用 `wait_timeout`（默认 8 小时，`pkg/server/conn.go:540-549`），在事务中且 `tidb_idle_transaction_timeout` 大于 0 时改用它（`getWaitTimeout`，`pkg/server/conn.go:535-541`）。这个差异在本 PR 之前就有，事务使它更重要。
+15. **路由器模式下的对照**：`autocommit=0` 会话的所有语句按第 0 步留在原型（§6.3），驱动默认设置下的 A/B 对照中，原型子集之外的语句会是 1235，这是预期的。
+
+### 6.6 需要负责人决定
+
+- `READ ONLY` 与 1792 已由 D8 决定。
+- 6.5 第 2 条（GC 越过长事务的 start ts，结果错误的风险）已由负责人在 #550 决定并已在本分支实现：同步模式通过 etcd 租约上报 `/tidb/server/minstartts/<ddl_id>`，全路径保留 `9006` / `9001` `CheckVisibility` 检查。
+- 6.5 第 1 条的 RR schema 差异由负责人确认为已知差异，与 #252 关联。
+
+### 6.7 测试
+
+- `crates/poc/session/src/txn.rs`：按 6.1 的场景测试事务状态（BEGIN 与延迟事务、乐观 / RR / RC / SERIALIZABLE 的读 ts、`BEGIN PESSIMISTIC/OPTIMISTIC`、结束与指标标签）。
+- `crates/sql`：`BEGIN` 的选项、AS OF、事务内写语句与加锁读的判定。
+- `crates/poc/session/src/lib.rs`、`constant.rs`：`SET autocommit` 接受 Go 接受的值、`@@autocommit` 读会话值、驱动连接工作负载（`tools/ab/workloads/connect/`，新增 `pymysql.sql`：pymysql 默认设置连接时发的语句和一个只读事务）。
+- `crates/mysql-protocol/tests/integration.rs`：线上的状态标志（事务中 OK 包带 `IN_TRANS`），`COM_RESET_CONNECTION` 之后 OK / EOF 包只有 `AUTOCOMMIT`。
+- 路由器：事务内写语句（查询与 `PREPARE`）报 1792，逐字比对代码、SQLSTATE 和消息。
+- `crates/metrics`：`commit` / `rollback` / `abort` 与 `txn_mode` 标签、空闲时间的 `in_txn` 标签与 Go 相同。
+- `crates/poc/session/tests/cluster.rs`（需要集群，`TIDB_RS_PD` / `TIDB_RS_TIDB_PORT`）：RR 事务中两条 SELECT 之间 Go 插入的行不出现、RC 出现、`autocommit=0` 同样，事务内写 1792（完整消息），`SERVER_STATUS_IN_TRANS`；`BEGIN` 与 `autocommit=0` 取 start ts 的时机（`BEGIN` 之后、第一次读之前插入的行不可见，`SET autocommit=0` 之后插入的行可见）；事务中途 `COM_RESET_CONNECTION` 之后读不到旧快照、`@@autocommit` 回到全局值。
+- `crates/poc/domain` / `crates/store` / `crates/poc/kv` / `crates/poc/session`：`compute_min_start_ts` 与 `MinStartTsTracker` 守卫生命周期、`SafePointCache::check_visibility`（`9006` / `9001` 与 Go 消息一致）以及错误码透传的单元测试；`crates/poc/session/tests/schema_sync.rs` 中的真实集群集成测试（`BEGIN` / `autocommit=0` 时 `/tidb/server/minstartts/<ddl_id>` 持住长事务 `start_ts` 并在 `COMMIT`/`ROLLBACK`/`COM_RESET_CONNECTION`/`shutdown` 时释放、阻止 GC safe point 越过、以及安全点越过时点查和全表扫描均返回 `9006`）。

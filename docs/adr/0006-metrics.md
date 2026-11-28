@@ -125,7 +125,7 @@ the series: **faithful** = Go's semantics; **approx** = close, with the differen
 | `tidb_server_get_token_duration_seconds` | histogram, exp(1,2,30) | `server.go:232` | faithful: one observation of 0 per command. Go observes µs truncated, so 0 when not blocked. |
 | `tidb_server_query_total{type,result,resource_group}` | counter | `server.go:119` | faithful: by command (`CmdToString`), `OK`/`Error`. The 13 named commands × 2 are created at start, as in Go. |
 | `tidb_server_handle_query_duration_seconds{sql_type,db,resource_group}` | histogram, exp(0.0005,2,29) | `server.go:92` | faithful: per command, from packet read to response flushed. `sql_type` = the session's last statement type (Go's stale `StmtCtx.StmtType`), `general` after a prepare or before any statement. `db=""` (Go: `record-db-label` false). |
-| `tidb_server_conn_idle_duration_seconds{in_txn}` | histogram, exp(0.0005,2,29) | `server.go:302` | faithful: `in_txn="0"` (autocommit only). |
+| `tidb_server_conn_idle_duration_seconds{in_txn}` | histogram, exp(0.0005,2,29) | `server.go:302` | faithful: `in_txn="1"` while the session is in a read-only transaction (`SERVER_STATUS_IN_TRANS`, #547), else `"0"`. |
 | `tidb_server_execute_error_total{type,db,resource_group}` | counter | `server.go:150` | approx: `type` = Go's `class:code` for codes whose class is unambiguous (1064 parser, 1146/1049 schema, 1054/1046/1052 planner), otherwise `unknown`. |
 | `tidb_server_multi_query_num` | histogram, exp(1,2,20) | `server.go:241` | zero: multi-statements are rejected. |
 | `tidb_server_disconnection_total{result}` | counter | `server.go:135` | faithful: `ok` after COM_QUIT, `error` on read failure (EOF included, as in Go). `undetermined` is never counted. |

@@ -31,10 +31,15 @@ pub struct ExecContext {
     pub schema_version: i64,
 }
 
-/// Maps a read-path error to a client error.
+/// Maps a read-path error to a client error, preserving normalized TiDB error codes
+/// (such as `9006` `ErrGCTooEarly` and `9001` `ErrPDServerTimeout`).
 pub fn distsql_error(e: tidb_distsql::Error) -> SqlError {
     match e {
         tidb_distsql::Error::Unsupported(s) => SqlError::not_supported(s),
+        tidb_distsql::Error::Kv(ref kv) => match kv.as_tidb_error() {
+            Some(err) => SqlError::from_tidb_error(err),
+            None => SqlError::unknown(kv.to_string()),
+        },
         other => SqlError::unknown(other.to_string()),
     }
 }
@@ -165,4 +170,36 @@ pub async fn execute(
     // without yielding in the PoC.
     let Ok(()) = tidb_runtime::checkpoint(&()).await;
     finish(plan, rows, cx.dag.new_collation_enabled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn distsql_error_preserves_safepoint_9006_and_9001() {
+        let cache = poc_kv::SafePointCache::new();
+        let sp = (1_700_000_060_000_u64 << 18) + 1;
+        cache.update(sp, Instant::now());
+        let e_9006 = cache.check_visibility(sp - 10).unwrap_err();
+        let sql_9006 = distsql_error(tidb_distsql::Error::Kv(poc_kv::Error::SafePoint(Box::new(
+            e_9006.clone(),
+        ))));
+        assert_eq!(sql_9006.code, 9006);
+        assert_eq!(sql_9006.state, "HY000");
+        assert_eq!(sql_9006.message, String::from_utf8_lossy(&e_9006.get_msg()));
+        assert!(sql_9006.source_err.is_some());
+
+        let stale = poc_kv::SafePointCache::new();
+        stale.update(10, Instant::now() - Duration::from_secs(100));
+        let e_9001 = stale.check_visibility(20).unwrap_err();
+        let sql_9001 = distsql_error(tidb_distsql::Error::Kv(poc_kv::Error::Copr(e_9001)));
+        assert_eq!(sql_9001.code, 9001);
+        assert_eq!(sql_9001.state, "HY000");
+        assert_eq!(
+            sql_9001.message,
+            "PD server timeout: start timestamp may fall behind safe point"
+        );
+    }
 }

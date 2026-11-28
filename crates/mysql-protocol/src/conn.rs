@@ -1059,7 +1059,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
             };
             // Go `clientConn.Run` / `dispatch` / `addMetrics`.
             let start = Instant::now();
-            tidb_metrics::command_started(start.saturating_duration_since(self.last_active));
+            tidb_metrics::command_started(
+                start.saturating_duration_since(self.last_active),
+                in_txn,
+            );
             // Go `dispatch`: `token := cc.server.getToken()` before running the command; it
             // waits, never rejects. `releaseToken` is in `command_metrics` (Go's defer).
             self.token = Some(crate::admission::HeldToken::acquire(self.admission.as_ref()).await);
@@ -1281,6 +1284,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                 for id in std::mem::take(&mut self.stmts).into_keys() {
                     self.handler.close(id);
                 }
+                self.handler.reset_connection().await?;
                 self.write_ok(&OkInfo::default()).await
             }
             command::FIELD_LIST => Err(SqlError::not_supported("COM_FIELD_LIST").into()),

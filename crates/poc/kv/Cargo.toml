@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+etcd-client = "0.14"
 futures = { workspace = true }
 thiserror = { workspace = true }
 tikv-client = { workspace = true }

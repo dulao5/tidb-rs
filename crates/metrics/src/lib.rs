@@ -385,6 +385,8 @@ static CONN_IDLE: LazyLock<HistogramVec> = LazyLock::new(|| {
 });
 static CONN_IDLE_NOT_IN_TXN: LazyLock<Histogram> =
     LazyLock::new(|| CONN_IDLE.with_label_values(&["0"]));
+static CONN_IDLE_IN_TXN: LazyLock<Histogram> =
+    LazyLock::new(|| CONN_IDLE.with_label_values(&["1"]));
 
 static SERVER_INFO: LazyLock<prometheus::GaugeVec> = LazyLock::new(|| {
     register(
@@ -708,10 +710,15 @@ fn query_duration_child(t: StmtType) -> &'static Histogram {
 }
 
 /// Start of a command (Go `clientConn.dispatch`): the idle time since the previous command
-/// ended. The statement-admission token is recorded separately ([`token_acquired`] /
+/// ended, labelled by whether the session status has `SERVER_STATUS_IN_TRANS`. The
+/// statement-admission token is recorded separately ([`token_acquired`] /
 /// [`token_released`]), as Go's `getToken` / `releaseToken` do.
-pub fn command_started(idle: Duration) {
-    CONN_IDLE_NOT_IN_TXN.observe(idle.as_secs_f64());
+pub fn command_started(idle: Duration, in_txn: bool) {
+    if in_txn {
+        CONN_IDLE_IN_TXN.observe(idle.as_secs_f64());
+    } else {
+        CONN_IDLE_NOT_IN_TXN.observe(idle.as_secs_f64());
+    }
 }
 
 /// A statement-admission token was obtained after waiting `wait` (Go `server.getToken`):
@@ -787,6 +794,35 @@ pub fn transaction(d: Duration, committed: bool) {
     } else {
         TXN_OPTIMISTIC_ABORT.observe(d.as_secs_f64());
     }
+}
+
+/// How a transaction ended (the `type` label of `tidb_session_transaction_duration_seconds`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxnEnd {
+    /// Committed: Go's `recordOnTransactionExecution` at `CommitTxn`.
+    Commit,
+    /// `ROLLBACK`: the rollback executor's observation.
+    Rollback,
+    /// Rolled back after a statement that ended it failed: Go's `recordAbortTxnDuration`.
+    Abort,
+}
+
+/// An explicit or `autocommit = 0` transaction that took a start timestamp ended, labelled
+/// by `TxnCtx.IsPessimistic` and how it ended.
+pub fn transaction_ended(d: Duration, pessimistic: bool, end: TxnEnd) {
+    let mode = if pessimistic {
+        "pessimistic"
+    } else {
+        "optimistic"
+    };
+    let tp = match end {
+        TxnEnd::Commit => "commit",
+        TxnEnd::Rollback => "rollback",
+        TxnEnd::Abort => "abort",
+    };
+    TRANSACTION_DURATION
+        .with_label_values(&[mode, tp, GENERAL])
+        .observe(d.as_secs_f64());
 }
 
 /// A statement took at least [`SLOW_THRESHOLD`] (total cost, Go `LogSlowQuery`).

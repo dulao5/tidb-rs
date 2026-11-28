@@ -237,7 +237,8 @@ pub fn to_tidb_err(err: TiKVError) -> Error {
         return ErrTiKVServerTimeout.clone();
     }
 
-    // *tikverr.ErrPDServerTimeout: client-rust's PD errors keep their message.
+    // *tikverr.ErrPDServerTimeout is returned as TiKVError::Plain by SafePointCache::check_visibility;
+    // client-rust's PD errors keep their message.
     // tikverr.ErrTiFlashServerTimeout: TiFlash is DEF.MPP.
     // tikverr.ErrQueryInterruptedWithSignal{...}: client-rust has no SQL killer hook (KILL
     // stops a read by dropping its future, N3).
@@ -247,8 +248,7 @@ pub fn to_tidb_err(err: TiKVError) -> Error {
     }
 
     // tikverr.ErrTiFlashServerBusy: TiFlash.
-    // *tikverr.ErrGCTooEarly: client-rust has no GC safe-point check (client-go-parity.md §4,
-    // CheckVisibility).
+    // *tikverr.ErrGCTooEarly is returned as TiKVError::Plain by SafePointCache::check_visibility.
 
     if matches!(e, ClientGoError::TiKVStaleCommand) {
         return ErrTiKVStaleCommand.clone();

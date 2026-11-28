@@ -19,7 +19,7 @@ tidb-rs 现在是只读计算节点：写路径、DDL、ANALYZE、导入、备�
   `SHOW WARNINGS` 等读语句和会话语句放行。
 - **理由**：ROADMAP "不移植（X）"：写路径、DDL、ANALYZE、导入、BRIE 由 Go TiDB 承担（D09.15、
   D09.17、D11.3、D12.14 等 X 块）；宪章第四条 3 "委托"：SQL 入口报明确的错误。
-- **围栏位置**：`crates/sql/src/ir.rs:326`（`ast::Stmt::Unported` → `unsupported`）。
+- **围栏位置**：`crates/sql/src/ir.rs:352`（`ast::Stmt::Unported` → `unsupported`）。
 - **用户看到的确切错误**：`ERROR 1235 (42000): This version of TiDB doesn't yet support
   '<语句节点> statements (read-only prototype)'`，例如 `INSERT` 为
   `'InsertIntoStmt#0 statements (read-only prototype)'`，`ALTER TABLE` 为
@@ -29,28 +29,21 @@ tidb-rs 现在是只读计算节点：写路径、DDL、ANALYZE、导入、备�
   （D05.3）取代时，按 N11 D8 的决定改用统一的写语句错误码。
 - **测试**：`crates/sql/tests/fences.rs::writes_and_ddl_answer_1235`（21 种语句，逐字比对消息）。
 
-## F2 显式事务（只读节点只有 autocommit）
+## F2 显式事务（已撤销，#547）
 
-- **边界**：`BEGIN`、`START TRANSACTION`、`COMMIT`、`ROLLBACK`、`SET autocommit = 0`（`OFF`、
-  `'false'` 等同）。`SET autocommit = 1` / `DEFAULT` 放行，非布尔值按 MySQL 报 1231。
-- **理由**：只读节点不持有事务状态，每条语句在 autocommit 下执行；事务中的写和加锁读属于写路径
-  （X）。显式只读事务的语法和错误码等例外 N11 D8 定稿（草案）。
-- **围栏位置**：`crates/poc/session/src/lib.rs:512`（`txn_fence`，由 `run_stmt` 在 `:771` 调用）、
-  `:524`（`autocommit_fence`，由 `check_set` 在 `:1230` 调用），错误由 `:502` 的 `not_in_txn` 构造。
-- **用户看到的确切错误**：`ERROR 1235 (42000): This version of TiDB doesn't yet support
-  '<语句>: explicit transactions are not supported by the read-only node (every statement runs in
-  autocommit mode)'`，`<语句>` 为 `BEGIN/START TRANSACTION`、`COMMIT`、`ROLLBACK` 或 `autocommit=0`。
-- **重开条件**：N11 D8 定稿（显式只读事务）；或会话层 D05.3 取代原型会话。
-- **测试**：`crates/poc/session/src/lib.rs::explicit_transactions_answer_1235`、
-  `::autocommit_off_answers_1235`（模块 `fence_tests`）。
+原来 `BEGIN`、`START TRANSACTION`、`COMMIT`、`ROLLBACK`、`SET autocommit = 0` 报 1235（"只读节点只有
+autocommit"）。显式只读事务的例外 N11 D8 已由负责人批准（#146），原型会话现在支持只读事务
+（D05.4 spec §6），这个围栏撤销。事务中（或 `autocommit = 0`）的写语句和 `SELECT ... FOR UPDATE`
+报 Go 的 1792（D8 的决定，不是 1235 围栏）；DDL 仍归 F1；`BEGIN ... AS OF TIMESTAMP` 由原型通用的
+`AS OF TIMESTAMP (stale reads)`（1235）挡住。
 
 ## F3 ROLLBACK TO SAVEPOINT（写路径）
 
 - **边界**：`ROLLBACK TO [SAVEPOINT] <名字>`。`SAVEPOINT <名字>` 本身由 F1 挡住。
 - **理由**：savepoint 是事务内写缓冲的检查点，属于写路径（X；D05.2 plan 第 237 行建议 Savepoint 归 X）。
-- **围栏位置**：`crates/sql/src/ir.rs:304`。
+- **围栏位置**：`crates/sql/src/ir.rs:330`。
 - **用户看到的确切错误**：`ERROR 1235 (42000): This version of TiDB doesn't yet support 'ROLLBACK TO SAVEPOINT'`。
-- **重开条件**：同 F2。
+- **重开条件**：负责人决定 tidb-rs 承担写路径（结束只读阶段）；或原型会话被移植的会话层（D05.3）取代。
 - **测试**：`crates/sql/tests/fences.rs::rollback_to_savepoint_answers_1235`。
 
 ## 其余条目（今天从 SQL 走不到围栏，或还没有围栏）
@@ -65,5 +58,5 @@ tidb-rs 现在是只读计算节点：写路径、DDL、ANALYZE、导入、备�
 | B3 / B4 cascades 优化器 | 不移植；设置 `tidb_enable_cascades_planner` 的处理待 spec | 新栈照 Go 接受该变量；`go-exception: EXC.B3` 标注的函数不移植 |
 | B5 代价模型 v1 | `tidb_cost_model_version = 1` 在使用时报错 | 新栈照 Go 接受，没有围栏 |
 | D1 TiFlash / MPP | 只读阶段不做，边界桩隔开 | 读 TiFlash 副本的路径由 `blocked-by` 桩和原型的通用"不支持"挡住 |
-| N11 D8 / D10 | 显式只读事务的语法与错误码；`tidb_replica_read` 非 leader 值报错 | 草案；现状见 F2 和 `docs/compatibility.md` "TiKV client gaps" |
+| N11 D10 | `tidb_replica_read` 非 leader 值报错 | 草案；现状见 `docs/compatibility.md` "TiKV client gaps"（显式只读事务的 D8 已定稿并实现，见 F2） |
 | X：`SET GLOBAL`（原型会话） | 原型会话不支持 | 临时缺口（D05.3 之前），不是永久围栏：`crates/poc/session/src/lib.rs:1202` |

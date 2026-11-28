@@ -460,6 +460,11 @@ fn main() {
             new_collation_enabled: new_collation,
             ..DagContext::select_utc()
         };
+        // The sessions read the cluster's global variables (`mysql.global_variables`) from
+        // the sysvar cache the loader keeps in step with the cluster, as Go's domain does
+        // (D06.5 spec §8), in every `--new-stack` mode. Started before `SchemaSync` so
+        // `tidb_gc_max_wait_time` is visible to `minstartts` reporting from the first tick.
+        let sys_vars = poc_domain::SysVarSync::start(kv.clone(), args.pd.clone());
         let sync = if args.schema_sync {
             let ip = advertise_ip(&args, &effective_host);
             let info = ServerInfo::new(
@@ -476,6 +481,7 @@ fn main() {
             cfg.stall_file = args.schema_sync_stall_file.clone();
             // The new stack's InfoSchema (the ported domain) only when the new stack is on.
             cfg.ported_domain = new_stack.uses_ported_domain();
+            cfg.sys_var_cache = Some(std::sync::Arc::clone(sys_vars.cache()));
             let sync = SchemaSync::start(kv.clone(), cfg)
                 .await
                 .map_err(|e| std::io::Error::other(format!("start schema sync: {e}")))?;
@@ -489,10 +495,6 @@ fn main() {
         let priv_sync = poc_domain::PrivilegeSync::start(kv.clone(), args.pd.clone())
             .await
             .map_err(|e| std::io::Error::other(format!("load mysql.* privilege tables: {e}")))?;
-        // The sessions read the cluster's global variables (`mysql.global_variables`) from
-        // the sysvar cache the loader keeps in step with the cluster, as Go's domain does
-        // (D06.5 spec §8), in every `--new-stack` mode.
-        let sys_vars = poc_domain::SysVarSync::start(kv.clone(), args.pd.clone());
         let factory = Factory::new(Shared {
             kv,
             schema,

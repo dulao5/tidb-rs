@@ -32,6 +32,9 @@ use tokio::task::JoinHandle;
 use crate::Error;
 use crate::Result;
 use crate::keys;
+use crate::min_start_ts::{
+    DEFAULT_MIN_START_TS_INTERVAL, MinStartTsTracker, gc_max_wait_time_secs,
+};
 use crate::registry::Limits;
 use crate::registry::MdlJob;
 use crate::registry::Registry;
@@ -46,7 +49,7 @@ const PUT_MONO_RETRY_INTERVAL: Duration = Duration::from_millis(30);
 const JOB_CACHE_LIMIT: usize = 1000;
 
 /// Settings of [`SchemaSync`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SyncConfig {
     /// PD client URLs (PD embeds the cluster's etcd).
     pub pd_endpoints: Vec<String>,
@@ -66,6 +69,28 @@ pub struct SyncConfig {
     /// Build and reload the ported domain (D06.5 part 1) for the new stack: only when the
     /// new stack is on (`--new-stack` not `off`). Off by default.
     pub ported_domain: bool,
+    /// Reporting period of `/tidb/server/minstartts/<ddl_id>` (Go: `infosync.ReportInterval`, 30 s).
+    pub min_start_ts_interval: Duration,
+    /// Optional global sysvar cache for reading live `tidb_gc_max_wait_time` (defaults to 86400s).
+    pub sys_var_cache: Option<Arc<tidb_systable::sysvar_cache::SysVarCache>>,
+}
+
+impl std::fmt::Debug for SyncConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncConfig")
+            .field("pd_endpoints", &self.pd_endpoints)
+            .field("info", &self.info)
+            .field("lease_ttl", &self.lease_ttl)
+            .field("tick", &self.tick)
+            .field("mdl_recheck", &self.mdl_recheck)
+            .field("limits", &self.limits)
+            .field("dag", &self.dag)
+            .field("stall_file", &self.stall_file)
+            .field("ported_domain", &self.ported_domain)
+            .field("min_start_ts_interval", &self.min_start_ts_interval)
+            .field("has_sys_var_cache", &self.sys_var_cache.is_some())
+            .finish()
+    }
 }
 
 impl SyncConfig {
@@ -80,6 +105,8 @@ impl SyncConfig {
             dag,
             stall_file: None,
             ported_domain: false,
+            min_start_ts_interval: DEFAULT_MIN_START_TS_INTERVAL,
+            sys_var_cache: None,
         }
     }
 }
@@ -148,6 +175,7 @@ impl SchemaSync {
         let loop_handle = tokio::spawn(inner.clone().sync_loop());
         *inner.sync_loop_handle.lock().await = Some(loop_handle);
         tokio::spawn(inner.clone().watchdog());
+        tokio::spawn(inner.clone().report_min_start_ts_loop());
         tidb_base::log_info!(
             "schema sync started",
             "ddl_id" => inner.cfg.info.ddl_id.as_str(),
@@ -165,6 +193,17 @@ impl SchemaSync {
 
     pub fn registry(&self) -> &Arc<Registry> {
         &self.inner.registry
+    }
+
+    /// Active `start_ts` tracker reported to `/tidb/server/minstartts/<ddl_id>`.
+    pub fn min_start_ts_tracker(&self) -> &Arc<MinStartTsTracker> {
+        self.inner.registry.min_start_ts_tracker()
+    }
+
+    /// Computes and writes `/tidb/server/minstartts/<ddl_id>` once using the current etcd
+    /// registration lease (`Ok(None)` when not currently registered).
+    pub async fn report_min_start_ts_now(&self) -> Result<Option<u64>> {
+        self.inner.report_min_start_ts_now().await
     }
 
     pub fn ddl_id(&self) -> &str {
@@ -619,6 +658,13 @@ impl Inner {
         let epoch = self.registry.registered(Instant::now(), deadline);
         let keepalive = tokio::spawn(self.clone().keep_alive(lease, epoch));
         *reg = Some(Registration { lease, keepalive });
+        if let Err(e) = self.report_min_start_ts_with_lease(lease).await {
+            let err_str = e.to_string();
+            tidb_base::log_warn!(
+                "reporting initial minStartTS in etcd failed",
+                "error" => err_str.as_str(),
+            );
+        }
         let lease_hex = format!("{lease:x}");
         tidb_base::log_info!(
             "registered in etcd",
@@ -707,8 +753,64 @@ impl Inner {
         }
     }
 
+    async fn report_min_start_ts_loop(self: Arc<Self>) {
+        let mut stop = self.stop.subscribe();
+        let period = self
+            .cfg
+            .min_start_ts_interval
+            .max(Duration::from_millis(10));
+        let mut ticker = tokio::time::interval(period);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+        while !self.stopped() {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = stop.changed() => break,
+            }
+            if self.stopped() {
+                break;
+            }
+            if let Err(e) = self.report_min_start_ts_now().await {
+                let err_str = e.to_string();
+                tidb_base::log_warn!(
+                    "update minStartTS failed",
+                    "error" => err_str.as_str(),
+                );
+            }
+        }
+    }
+
+    async fn report_min_start_ts_now(&self) -> Result<Option<u64>> {
+        let lease = self.registration.lock().await.as_ref().map(|r| r.lease);
+        let Some(lease) = lease else {
+            return Ok(None);
+        };
+        let min_ts = self.report_min_start_ts_with_lease(lease).await?;
+        Ok(Some(min_ts))
+    }
+
+    async fn report_min_start_ts_with_lease(&self, lease: i64) -> Result<u64> {
+        let current_ts = self.kv.current_ts().await?;
+        let gc_max_wait_secs = gc_max_wait_time_secs(self.cfg.sys_var_cache.as_deref());
+        let min_ts = self
+            .registry
+            .min_start_ts_tracker()
+            .compute(current_ts, gc_max_wait_secs);
+        if !self.registry.is_registered() {
+            return Ok(min_ts);
+        }
+        timeout(self.etcd().put(
+            keys::min_start_ts(&self.cfg.info.ddl_id),
+            min_ts.to_string(),
+            Some(PutOptions::new().with_lease(lease)),
+        ))
+        .await?;
+        Ok(min_ts)
+    }
+
     /// Leave synced mode (new epoch: in-flight synced statements' results are refused) and
-    /// revoke the lease, which deletes the server-info and `all_schema_versions` keys.
+    /// revoke the lease, which deletes the server-info, `all_schema_versions`, and
+    /// `minstartts` keys.
     async fn deregister(&self, why: &str) {
         let mut reg = self.registration.lock().await;
         let was = self.registry.deregister();
@@ -732,6 +834,11 @@ impl Inner {
                 let _ = timeout(
                     self.etcd()
                         .delete(keys::self_schema_version(&self.cfg.info.ddl_id), None),
+                )
+                .await;
+                let _ = timeout(
+                    self.etcd()
+                        .delete(keys::min_start_ts(&self.cfg.info.ddl_id), None),
                 )
                 .await;
             }

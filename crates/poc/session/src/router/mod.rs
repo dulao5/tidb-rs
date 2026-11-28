@@ -264,6 +264,13 @@ pub trait PocEngine: Send {
     fn set_cacheability(&mut self, stmt_id: u32, c: crate::plan_cache::PrepareCacheability) {
         let _ = (stmt_id, c);
     }
+    /// The error of a statement that writes or takes locks while the PoC's session is in a
+    /// read-only transaction (D05.4 spec §6.2: 1792), checked after parsing and before
+    /// lowering; `None` for any other statement.
+    fn txn_write_error(&mut self, stmt: &ast::Stmt) -> Option<SqlError> {
+        let _ = stmt;
+        None
+    }
     /// The previous statement's state (VS1 plan §4.5: the PoC writes it into its own
     /// fields), before the PoC runs a statement that may read it.
     fn set_prev_stmt(&mut self, last: &LastStmtInfo) {
@@ -958,6 +965,11 @@ impl Router {
                 stmt
             }
         };
+        // A write in the PoC's read-only transaction (D05.4 spec §6.2): the statements of a
+        // transaction stay on the PoC (step 0), so this is the only place it is checked.
+        if let Some(e) = poc.txn_write_error(&stmt) {
+            return self.fail(e);
+        }
         let lowered = match tidb_sql::ir::lower_statement(&stmt, sql) {
             Ok(l) => l,
             Err(e) => return self.fail(e),
@@ -1054,6 +1066,12 @@ impl Router {
     ) -> Result<PreparedInfo, SqlError> {
         let opts = self.parse_options();
         let stmt = tidb_sql::ir::parse_one_with(sql, &opts)?;
+        // A write in the PoC's read-only transaction (D05.4 spec §6.2): 1792 at PREPARE, since
+        // neither engine prepares a write here (Go's comes at EXECUTE; spec §6.5).
+        if let Some(e) = poc.txn_write_error(&stmt) {
+            poc.clear_warnings();
+            return Err(e);
+        }
         // Not on the new stack when the InfoSchema versions differ: its column definitions
         // would come from another version, and a later fallback would fail check_columns.
         // Nor when the schema lease is not admissible (step 0). Nor before the session's global

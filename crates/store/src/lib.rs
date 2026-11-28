@@ -10,3 +10,5 @@ pub mod copr;
 pub mod distsql;
 pub mod driver;
 pub mod util;
+
+pub use driver::safepoint::SafePointCache;
