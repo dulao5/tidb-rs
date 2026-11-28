@@ -98,12 +98,17 @@ impl SqlError {
         )
     }
 
-    /// Error 1044 (`ER_DBACCESS_DENIED_ERROR`) with TiDB's message format.
+    /// Error 1044 (`ER_DBACCESS_DENIED_ERROR`) with TiDB's message format and `ClassExecutor`
+    /// `terror` (Go `exeerrors.ErrDBaccessDenied` -> `[executor:1044]`).
     pub fn db_access_denied(user: &str, host: &str, db: &str) -> Self {
+        let src = tidb_base::dbterror::exeerrors::ErrDBaccessDenied.gen_with_stack_by_args(
+            tidb_base::go_args![user.to_owned(), host.to_owned(), db.to_owned()],
+        );
         Self::new(
             code::ER_DBACCESS_DENIED,
             format!("Access denied for user '{user}'@'{host}' to database '{db}'"),
         )
+        .with_source_err(src)
     }
 
     /// Error 1142 (`ER_TABLEACCESS_DENIED_ERROR`) with TiDB's message format.
@@ -150,9 +155,8 @@ impl SqlError {
             return String::from_utf8_lossy(&src.error()).into_owned();
         }
         match self.code {
-            code::ER_DBACCESS_DENIED
-            | code::ER_ACCESS_DENIED
-            | code::ER_ACCOUNT_HAS_BEEN_LOCKED => {
+            code::ER_DBACCESS_DENIED => format!("[executor:{}]{}", self.code, self.message),
+            code::ER_ACCESS_DENIED | code::ER_ACCOUNT_HAS_BEEN_LOCKED => {
                 format!("[privilege:{}]{}", self.code, self.message)
             }
             code::ER_BAD_DB => format!("[schema:{}]{}", self.code, self.message),
