@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "tools", "tikv-patched.sh")
 VERSION_FILE = os.path.join(ROOT, "tools", "tikv-patched.version")
 
-PATCHED_COMMIT = "a87863eb7ce3b848f1d9ea964e4a84c823da2359"
+PATCHED_COMMIT = "8cc700315265662ebae73bd68b3045552cfb85a2"
 STOCK_COMMIT = "a1fdd6a59bb9c8a282c15677e1894501a52425cf"
 
 
@@ -145,6 +145,16 @@ class TikvPatchedTest(unittest.TestCase):
         self.assertEqual(doc["branch"], "rust-tidb/v8.5.8-stable-rpn-fn")
         self.assertEqual(doc["version"], "8.5.8")
         self.assertEqual(doc["commit"], PATCHED_COMMIT)
+        with open(VERSION_FILE) as f:
+            kv = dict(
+                line.strip().split("=", 1)
+                for line in f
+                if line.strip() and not line.lstrip().startswith("#")
+            )
+        for key in ("sha256_linux_amd64", "sha256_linux_arm64", "sha256_darwin_arm64"):
+            val = kv[key]
+            self.assertEqual(len(val), 64, f"{key} must be a 64-hex SHA-256, got {val!r}")
+            int(val, 16)
 
     def test_malformed_version_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as d:
