@@ -52,6 +52,7 @@ fn main() {
     let mut p = Parser::new();
     let opts = |w: bool| ParseOptions {
         window_functions: w,
+        ..Default::default()
     };
     let cases: Vec<Case> = load()
         .into_iter()

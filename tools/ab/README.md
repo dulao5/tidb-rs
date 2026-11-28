@@ -9,8 +9,8 @@ run sysbench against both.
 ```sh
 source <toolchains>/tidb-rs-env.sh
 
-# 1. Cluster: tiup playground v8.5.8, tag maya-ab, port offset 23000
-#    -> PD 127.0.0.1:25379, Go TiDB 127.0.0.1:27000 (auto-TLS on)
+# 1. Cluster: tiup playground v8.5.8 with patched TiKV (tools/tikv-patched.version),
+#    tag maya-ab, port offset 23000 -> PD 127.0.0.1:25379, Go TiDB 127.0.0.1:27000 (auto-TLS on)
 scripts/playground.sh start            # status | stop | clean; -t tag -o offset -v version
 
 # 2. Data, loaded through Go TiDB: sbtest1, 100k rows (ids 1..100000), split into 8 regions
@@ -57,8 +57,8 @@ parameters):
   vertical-slice plan §4.7).
 - errors: both fail with the same code, SQLSTATE and message => `both_error` (counts as
   agreement); B fails with a not-implemented 1235 (a boundary stub's `blocked-by:` answer or one
-  of the prototype's fixed answers in `prototype-not-supported.txt`) while A did not answer 1235
-  => `unsupported` (tolerance T1); any other 1235 is a normal error; anything else (one side errors, another code / SQLSTATE / message, connection errors,
+  of the prototype's fixed answers in `prototype-not-supported.txt`) while A did not answer the
+  same 1235 => `unsupported` (tolerance T1; A answering 1235 with another text counts the same); any other 1235 is a normal error; anything else (one side errors, another code / SQLSTATE / message, connection errors,
   timeouts) => `mismatch`.
 - OK packets: affected rows and warning count. Warnings: when either side reports any, `SHOW
   WARNINGS` runs on both and must be identical, except (tolerance T6, prototype path only) A's
@@ -208,7 +208,11 @@ Outcome per statement:
   `mysqltest::affects_results`), so B's session no longer answers like A's. Reads in that
   connection are skipped until the variable is set again on both sides, or set back to `DEFAULT`
   on A (B never changed it). Rejected settings of other variables (cost model, concurrency,
-  chunk sizes, ...) do not stop the comparison. `SET GLOBAL` is a write, not tracked: B
+  chunk sizes, plan cache switches, ...) do not stop the comparison, except for the reads of
+  where the last plan came from (`@@last_plan_from_cache`, `@@last_plan_from_binding`): those
+  are skipped (`session diverged`) after such a rejected setting, until it is set again on both
+  sides or back to `DEFAULT`, and after a session binding A created (`CREATE [SESSION]
+  BINDING`, a write B never runs). `SET GLOBAL` is a write, not tracked: B
   rejecting one shows up as mismatches in later connections, not as skipped reads.
 - `write`: a session or write statement that A ran as the test expected.
 
@@ -266,9 +270,18 @@ Only `new_stack` statements the comparator judged equal count as new-stack cover
 
 ## Scripts
 
+- `tools/tikv-patched.sh`: resolves and verifies the patched TiKV v8.5.8 binary pinned in
+  `tools/tikv-patched.version` (from `dulao5/tikv`, carrying the `#523`/`#524` fixes), caches it
+  under `~/.cache/tidb-rs/tikv/<tag>/tikv-server` after SHA-256 and `--version` verification, and
+  prints its path. Override with `TIDB_RS_TIKV_BIN=/path/to/tikv-server` (or
+  `TIDB_RS_TIKV_SRC=/path/to/dulao5-tikv`) when testing a local TiKV build; the commit hash is still
+  checked. `--check-pd <pd>` / `--check-status <host:port>` / `--check-log <tikv.log>` verify that
+  a running cluster uses the pinned TiKV build and fail hard otherwise.
 - `scripts/playground.sh start|stop|status|clean [-t tag] [-o offset] [-v version] [-c toml]`: defaults
   maya-ab / 23000 / v8.5.8. Starts `tiup playground` in the background (no TiFlash, no
-  monitor) with Go TiDB `security.auto-tls`, waits until TiDB answers, prints the addresses.
+  monitor) passing `--kv.binpath "$(tools/tikv-patched.sh)"` and Go TiDB `security.auto-tls`, waits
+  until TiDB answers, verifies the running TiKV stores through PD and their startup logs, and
+  prints the addresses.
   `stop` interrupts the playground and then kills whatever is left of that tag only (processes
   whose arguments point into `~/.tiup/data/<tag>/`). `clean` also runs `tiup clean <tag>`.
   `-c` appends a TOML file to Go TiDB's config.

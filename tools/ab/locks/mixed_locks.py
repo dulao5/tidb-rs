@@ -279,6 +279,13 @@ def main():
     ap.add_argument("--base-row", type=int, default=0, help="first row id to lock (default: from the clock)")
     args = ap.parse_args()
 
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    subprocess.run(
+        [os.path.join(repo_root, "tools", "tikv-patched.sh"), "--check-pd", args.pd],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
     run = Run(args)
     results = []
     mismatches = 0

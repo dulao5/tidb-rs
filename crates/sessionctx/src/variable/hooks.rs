@@ -288,15 +288,19 @@ fn v_tidb_read_consistency(
 
 /// `init_connect` must parse as SQL (`parser.New().ParseSQL` with the session's SQL mode and
 /// parser config). The faithful parser driver is block D02.2; until then this uses the
-/// PoC parser of tidb-parser, which accepts the same grammar (parser.y port).
+/// PoC parser of tidb-parser, which accepts the same grammar (parser.y port) with `sql_mode`.
 // go-part: defaultSysVars (sysvar.go:L635 InitConnect.Validation closure) L2 (PoC parse entry point until D02.2)
 fn v_init_connect(
-    _vars: &mut SessionVars,
+    vars: &mut SessionVars,
     normalized_value: &str,
     _o: &str,
     _scope: ScopeFlag,
 ) -> ValResult {
-    if tidb_parser::parse(normalized_value, &tidb_parser::ParseOptions::default()).is_err() {
+    let opts = tidb_parser::ParseOptions {
+        window_functions: vars.enable_window_function,
+        sql_mode: tidb_base::mysql::SQLMode(vars.sql_mode),
+    };
+    if tidb_parser::parse(normalized_value, &opts).is_err() {
         return fail(
             normalized_value,
             ErrWrongTypeForVar.gen_with_stack_by_args(vec![a(InitConnect)]),
@@ -1700,4 +1704,67 @@ fn v_secure_auth(
         normalized_value,
         ErrWrongValueForVar.gen_with_stack_by_args(vec![a(SecureAuth), a(original_value)]),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::variable::get_sys_var;
+    use crate::variable::session::GlobalVarAccessor;
+
+    struct DummyGlobals;
+
+    impl GlobalVarAccessor for DummyGlobals {
+        fn get_global_sys_var(&self, name: &str) -> Result<String, Error> {
+            get_sys_var(name)
+                .map(|sv| sv.value.clone())
+                .ok_or_else(|| ErrUnknownSystemVar.gen_with_stack_by_args(vec![a(name)]))
+        }
+        fn set_global_sys_var_only(&mut self, _: &str, _: &str, _: bool) -> Result<(), Error> {
+            Ok(())
+        }
+        fn get_tidb_table_value(&self, _: &str) -> Result<String, Error> {
+            Ok(String::new())
+        }
+        fn set_tidb_table_value(&mut self, _: &str, _: &str, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn init_connect_validation_uses_session_sql_mode() {
+        let mut vars = SessionVars::new(Box::new(DummyGlobals));
+        let init_connect = get_sys_var(InitConnect).expect("init_connect sysvar");
+
+        // Under NO_BACKSLASH_ESCAPES, `SET @a = '\'` is valid while `SET @a = '\'x'` fails.
+        vars.sql_mode = 0;
+        assert!(
+            init_connect
+                .validate(&mut vars, r"SET @a = '\'", ScopeGlobal)
+                .1
+                .is_err()
+        );
+        vars.sql_mode = tidb_base::mysql::ModeNoBackslashEscapes.0;
+        assert!(
+            init_connect
+                .validate(&mut vars, r"SET @a = '\'", ScopeGlobal)
+                .1
+                .is_ok()
+        );
+        assert!(
+            init_connect
+                .validate(&mut vars, r"SET @a = '\'x'", ScopeGlobal)
+                .1
+                .is_err()
+        );
+
+        // Under ANSI_QUOTES, double-quoted identifiers work in `CREATE TABLE` / `SET`.
+        vars.sql_mode = tidb_base::mysql::ModeANSIQuotes.0;
+        assert!(
+            init_connect
+                .validate(&mut vars, r#"SET @"x" = 1"#, ScopeGlobal)
+                .1
+                .is_ok()
+        );
+    }
 }

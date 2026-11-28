@@ -14,8 +14,6 @@ nightly = ["codec/nightly", "tidb_query_datatype/nightly"]
 base64 = "0.13"
 bstr = "0.2.8"
 byteorder = "1.2"
-chrono = { workspace = true }
-chrono-tz = "0.5.1"
 codec = { workspace = true }
 crypto = { workspace = true }
 file_system = { workspace = true }
@@ -28,7 +26,6 @@ num = { version = "0.3", default-features = false }
 num-traits = "0.2"
 openssl = { workspace = true }
 protobuf = "2"
-rand = "0.8"
 regex = "1.1"
 serde = "1.0"
 serde_json = "1.0"
@@ -39,7 +36,7 @@ tidb_query_datatype = { workspace = true }
 tikv_util = { workspace = true }
 time = { workspace = true }
 tipb = { workspace = true }
-uuid = { version = "1.7.0", features = ["v1", "v4", "std"] }
+uuid = { version = "0.8.1", features = ["v4"] }
 
 [dev-dependencies]
 bstr = "0.2.8"

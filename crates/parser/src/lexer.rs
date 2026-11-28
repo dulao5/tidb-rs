@@ -3,18 +3,22 @@
 //! Mirrors the *token classification* rules of TiDB `lexer.go`/`misc.go` that matter for
 //! grammar acceptance (not literal value conversion):
 //!   * keywords from `tokenMap` (case-insensitive), not when adjacent to '.'
-//!   * `btFuncTokenMap` keywords only when immediately followed by '('
+//!   * `btFuncTokenMap` keywords only when followed by '(' (allowing whitespace under `IGNORE_SPACE`)
 //!   * `windowFuncTokenMap` keywords only when window functions are enabled
 //!   * multi-token fusion: AS OF, MEMBER OF, TO TIMESTAMP <str>, TO TSO <int>,
 //!     OPTIONALLY ENCLOSED BY, FULL OUTER JOIN
-//!   * `||` -> pipesAsOr (default sql_mode), `_charset'str'` / N'str' -> underscoreCS
+//!   * `||` -> pipes (under `PIPES_AS_CONCAT`) or pipesAsOr, `NOT` -> not2 (under
+//!     `HIGH_NOT_PRECEDENCE`), `"..."` -> identifier (under `ANSI_QUOTES`), `\` in strings
+//!     kept literal (under `NO_BACKSLASH_ESCAPES`), `_charset'str'` / N'str' -> underscoreCS
 //!   * `/*! ... */`, `/*T![..] ... */` are transparent; `/*+ ... */` -> hintComment after
 //!     SELECT/INSERT/REPLACE/UPDATE/DELETE/CREATE/PARTITION, otherwise a comment
 //!   * @var / @@[global.|session.|local.]var, numbers (int/dec/float/hex/bit), strings, `quoted`
 //!
-//! Not handled (deliberately out of scope): ANSI_QUOTES / HIGH_NOT_PRECEDENCE / IGNORE_SPACE
-//! sql modes, literal value conversion, client charset decoding, `/*T!` feature gating.
+//! Not handled (deliberately out of scope): literal value conversion, client charset decoding,
+//! `/*T!` feature gating.
 use std::collections::{HashMap, HashSet};
+
+use tidb_base::mysql::SQLMode;
 
 use crate::keywords_gen::{BUILTIN_FUNCS, HINTED_TOKENS, KEYWORDS, WINDOW_FUNCS};
 use crate::token_map::TOKEN_IDS;
@@ -51,6 +55,9 @@ pub(crate) struct Ids {
     pub(crate) hint_comment: u32,
     pub(crate) invalid: u32,
     pub(crate) null: u32,
+    pub(crate) not: u32,
+    pub(crate) not2: u32,
+    pub(crate) pipes: u32,
     pub(crate) pipes_as_or: u32,
     pub(crate) andand: u32,
     pub(crate) andnot: u32,
@@ -115,6 +122,9 @@ impl TokenTable {
             hint_comment: id("hintComment"),
             invalid: id("invalid"),
             null: id("null"),
+            not: id("not"),
+            not2: id("not2"),
+            pipes: id("pipes"),
             pipes_as_or: id("pipesAsOr"),
             andand: id("andand"),
             andnot: id("andnot"),
@@ -195,6 +205,12 @@ fn is_user_var_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c == b'.' || c >= 0x80
 }
 
+/// ASCII whitespace as matched by Go's `unicode.IsSpace(rune(b))` for single bytes (`\t`, `\n`,
+/// `\v` = 0x0b, `\f` = 0x0c, `\r`, `' '`).
+fn is_go_ascii_space(c: u8) -> bool {
+    c.is_ascii_whitespace() || c == 0x0b
+}
+
 pub struct Lexer<'a> {
     tt: &'a TokenTable,
     s: &'a [u8],
@@ -202,12 +218,13 @@ pub struct Lexer<'a> {
     p: usize,
     in_bang: bool,
     pub window_funcs: bool,
+    sql_mode: SQLMode,
     out: Vec<Tok>,
     upper: String,
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(tt: &'a TokenTable, src: &'a str, window_funcs: bool) -> Self {
+    pub fn new(tt: &'a TokenTable, src: &'a str, window_funcs: bool, sql_mode: SQLMode) -> Self {
         Lexer {
             tt,
             s: src.as_bytes(),
@@ -215,6 +232,7 @@ impl<'a> Lexer<'a> {
             p: 0,
             in_bang: false,
             window_funcs,
+            sql_mode,
             out: Vec::with_capacity(src.len() / 3),
             upper: String::new(),
         }
@@ -255,8 +273,8 @@ impl<'a> Lexer<'a> {
     fn tokenize_inner(&mut self) -> Result<(), LexError> {
         let t = self.tt.t;
         loop {
-            // whitespace
-            while self.p < self.s.len() && self.s[self.p].is_ascii_whitespace() {
+            // whitespace (Go Scanner.skipWhitespace uses unicode.IsSpace, including 0x0b '\v')
+            while self.p < self.s.len() && is_go_ascii_space(self.s[self.p]) {
                 self.p += 1;
             }
             if self.p >= self.s.len() {
@@ -267,7 +285,7 @@ impl<'a> Lexer<'a> {
             match c {
                 b'#' => self.skip_line(),
                 b'-' if self.peek_at(1) == b'-'
-                    && (self.p + 2 >= self.s.len() || self.peek_at(2).is_ascii_whitespace()) =>
+                    && (self.p + 2 >= self.s.len() || is_go_ascii_space(self.peek_at(2))) =>
                 {
                     self.skip_line()
                 }
@@ -288,7 +306,13 @@ impl<'a> Lexer<'a> {
                 b'@' => self.at()?,
                 b'\'' | b'"' => {
                     self.string()?;
-                    self.push(t.string_lit, start)
+                    // go-part: pkg/parser/lexer.go Scanner.Lex L1 (ANSI_QUOTES double-quoted identifier)
+                    let tok = if c == b'"' && self.sql_mode.has_ansi_quotes_mode() {
+                        t.identifier
+                    } else {
+                        t.string_lit
+                    };
+                    self.push(tok, start)
                 }
                 b'`' => {
                     self.quoted_ident()?;
@@ -380,10 +404,15 @@ impl<'a> Lexer<'a> {
 
     fn string(&mut self) -> Result<(), LexError> {
         let q = self.peek();
+        let backslash_escape = !self.sql_mode.has_no_backslash_escapes_mode();
         self.p += 1;
         while self.p < self.s.len() {
             let c = self.s[self.p];
-            if c == b'\\' {
+            if c == b'\\' && backslash_escape {
+                if self.p + 1 >= self.s.len() {
+                    self.p = self.s.len();
+                    break;
+                }
                 self.p += 2;
                 continue;
             }
@@ -579,8 +608,16 @@ impl<'a> Lexer<'a> {
         self.upper.push_str(lit);
         self.upper.make_ascii_uppercase();
         let up = self.upper.as_str();
+        let mut check_bt_func = self.peek() == b'(';
+        if !check_bt_func && self.sql_mode.has_ignore_space_mode() {
+            let mut q = self.p;
+            while q < self.s.len() && is_go_ascii_space(self.s[q]) {
+                q += 1;
+            }
+            check_bt_func = self.s.get(q) == Some(&b'(');
+        }
         let mut id = None;
-        if self.peek() == b'(' {
+        if check_bt_func {
             id = self.tt.builtins.get(up).copied();
         }
         if id.is_none() {
@@ -589,7 +626,11 @@ impl<'a> Lexer<'a> {
         if id.is_none() && self.window_funcs {
             id = self.tt.windows.get(up).copied();
         }
-        self.push(id.unwrap_or(t.identifier), start)
+        let mut tok = id.unwrap_or(t.identifier);
+        if tok == t.not && self.sql_mode.has_high_not_precedence_mode() {
+            tok = t.not2;
+        }
+        self.push(tok, start)
     }
 
     fn char_tok(&self, c: u8) -> u32 {
@@ -602,9 +643,14 @@ impl<'a> Lexer<'a> {
         let t = self.tt.t;
         let start = self.p;
         let rest = &self.s[self.p..];
+        let pipes_tok = if self.sql_mode.has_pipes_as_concat_mode() {
+            t.pipes
+        } else {
+            t.pipes_as_or
+        };
         let two: &[(&[u8], u32)] = &[
             (b"<=>", t.nulleq),
-            (b"||", t.pipes_as_or),
+            (b"||", pipes_tok),
             (b"&&", t.andand),
             (b"&^", t.andnot),
             (b":=", t.assignment_eq),

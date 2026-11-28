@@ -35,6 +35,7 @@ fn corpus(filter: &str) {
         let src = v["src"].as_str().unwrap();
         let opts = ParseOptions {
             window_functions: v["window"].as_bool().unwrap(),
+            ..Default::default()
         };
         let (tag, got) = match parse(src, &opts).map(|o| restore_all(&o.stmts)) {
             Err(e) => (format!("parse error: {e}"), String::new()),

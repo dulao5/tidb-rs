@@ -17,7 +17,7 @@ tools/ab/faults/run.sh -b path/to/tidb-server -s kill_tikv,net_cut -p 10 -k
 
 `run.sh` is the single entry point, meant for the weekly build:
 
-1. It starts (or reuses) a tiup playground v8.5.8 with 1 PD, 3 TiKV and Go TiDB. The tag is `maya-faults` with port offset 24000: Go TiDB is on 28000 and PD on 26379. `scripts/playground.sh` reads `PLAYGROUND_KV`.
+1. It starts (or reuses) a tiup playground v8.5.8 with 1 PD, 3 TiKV (patched v8.5.8 via `tools/tikv-patched.sh`, verified against PD before scenarios start) and Go TiDB. The tag is `maya-faults` with port offset 24000: Go TiDB is on 28000 and PD on 26379. `scripts/playground.sh` reads `PLAYGROUND_KV`.
 2. It loads `sbtest.sbtest1` (100k rows, 8 regions).
 3. It starts tidb-rs on 28001 and runs `faults.py`.
 4. It writes `target/faults/<timestamp>.json` / `.log`.
