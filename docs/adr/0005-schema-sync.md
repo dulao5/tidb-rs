@@ -316,9 +316,13 @@ max 473 ms).
 
 ## Not done
 
-- **`/tidb/server/minstartts`.** GC does not know about our reads. That is fine as long as
-  no read lasts longer than `tidb_gc_life_time` (10 min by default); tidb-rs statements are
-  short autocommit reads.
+- **`/tidb/server/minstartts`.** GC does not know about our reads. That was acceptable
+  while every tidb-rs statement was a short autocommit read. Since #547 the prototype runs
+  read-only transactions (`BEGIN`, pymysql's default `autocommit = 0`), which can stay open
+  far longer than `tidb_gc_life_time` (10 min by default); once the GC safe point passes a
+  transaction's start ts, its reads can return wrong rows. The maintainer decided on #550
+  to report the min start ts through the existing etcd lease (N11 §4.5) and keep Go's 9006
+  check; tracked in #549.
 - **Incremental `SchemaDiff` application.** Every version is a full reload, which is fine
   for small catalogs. Large catalogs need Go's `infoschema.Builder` approach, and the reload
   time also adds to every DDL step.

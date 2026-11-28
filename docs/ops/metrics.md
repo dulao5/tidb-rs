@@ -107,7 +107,7 @@ Not exercised: the `tiup cluster` path (`additional_scrape_conf`) needs a deploy
 
 | Row | Panels |
 |---|---|
-| Query Summary | Duration, Command Per Second, QPS (by statement type), CPS By Instance, Connection Idle Duration (`in_txn=0`), 999/99/95/80 Duration |
+| Query Summary | Duration, Command Per Second, QPS (by statement type), CPS By Instance, Connection Idle Duration (`in_txn=0`, and `in_txn=1` inside a read-only transaction), 999/99/95/80 Duration |
 | Query Detail | Duration 80/95/99/999 By Instance |
 | Server | TiDB Server Status, Uptime, CPU Usage (+ quota from `tidb_server_maxprocs`), Memory Usage (RSS line), Open FD Count, Connection Count (incl. tokens), Disconnection Count, Get Token Duration, Client Data Traffic |
 | Transaction | Transaction OPS / Duration (`optimistic`/`commit`, `general`: autocommit statements that took a TSO; MaxTS point gets do not start a transaction, as in Go. Read-only transactions (`BEGIN`, `autocommit = 0`; #547) record `commit` / `rollback` / `abort` with `txn_mode` `optimistic` or `pessimistic`, as Go's `CommitTxn` and rollback executor do) |
