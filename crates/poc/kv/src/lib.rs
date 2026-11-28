@@ -277,6 +277,9 @@ impl KvClient {
 
     /// Connect to the PD endpoints, opening `store_connections` gRPC connections to each TiKV
     /// store (client-go: `grpc-connection-count`, default 4). Requests are spread over them.
+    /// Also starts the background GC safe-point checker against `pd_endpoints` (an empty list
+    /// would leave the [`SafePointCache`] unrefreshed, though PD connection rejects empty
+    /// endpoints first).
     pub async fn connect_with(
         pd_endpoints: Vec<String>,
         store_connections: usize,

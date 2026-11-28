@@ -71,6 +71,9 @@ pub struct KVStore {
 }
 
 impl KVStore {
+    /// Constructs the store with a standalone [`SafePointCache`] that is not refreshed
+    /// automatically (reads fail with `9001` after 99 s unless updated; production callers
+    /// should use [`Self::new_with_safe_point`]).
     // glue: constructs the boundary over a client-rust TransactionClient
     pub fn new(client: Arc<TransactionClient>) -> Arc<KVStore> {
         Self::new_with_safe_point(client, Arc::new(SafePointCache::new()))

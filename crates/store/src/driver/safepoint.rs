@@ -147,12 +147,38 @@ mod tests {
         let sql_err = tidb_base::terror::to_sql_error(&err);
         assert_eq!(sql_err.code, 9006);
         assert_eq!(sql_err.state, "HY000");
-        let want = format!(
-            "GC life time is shorter than transaction duration, transaction starts at {}, GC safe point is {}",
-            oracle_ts_to_go_time_string(start_ts),
-            oracle_ts_to_go_time_string(safe_point),
-        );
-        assert_eq!(String::from_utf8_lossy(&sql_err.message), want);
+        // Compare against Go's exact `time.Unix(sec, nsec).In(loc).String()` format literal
+        // (independent of `oracle_ts_to_go_time_string`) under UTC, and check structure under
+        // any non-UTC local timezone.
+        let t1_utc = tidb_base::gostd::time::unix(1_700_000_000, 123_000_000)
+            .in_loc(&tidb_base::gostd::time::utc())
+            .string();
+        let t2_utc = tidb_base::gostd::time::unix(1_700_000_060, 456_000_000)
+            .in_loc(&tidb_base::gostd::time::utc())
+            .string();
+        assert_eq!(t1_utc, "2023-11-14 22:13:20.123 +0000 UTC");
+        assert_eq!(t2_utc, "2023-11-14 22:14:20.456 +0000 UTC");
+
+        let msg = String::from_utf8_lossy(&sql_err.message);
+        if tidb_base::gostd::time::local().string() == "UTC" {
+            assert_eq!(
+                msg,
+                "GC life time is shorter than transaction duration, transaction starts at \
+                 2023-11-14 22:13:20.123 +0000 UTC, GC safe point is \
+                 2023-11-14 22:14:20.456 +0000 UTC"
+            );
+        } else {
+            let rest = msg
+                .strip_prefix(
+                    "GC life time is shorter than transaction duration, transaction starts at ",
+                )
+                .unwrap_or_else(|| panic!("unexpected 9006 prefix: {msg}"));
+            let (s1, s2) = rest
+                .split_once(", GC safe point is ")
+                .unwrap_or_else(|| panic!("unexpected 9006 separator: {msg}"));
+            assert!(s1.contains(".123 "), "expected .123 ms in {s1:?}");
+            assert!(s2.contains(".456 "), "expected .456 ms in {s2:?}");
+        }
     }
 
     #[test]

@@ -50,8 +50,10 @@ pub struct TikvStore {
 }
 
 impl TikvStore {
-    /// A store over a connected client-rust client; Go's `TiKVDriver.OpenWithOptions`
-    /// (part 2) builds it from a path.
+    /// A store over a connected client-rust client with a standalone [`SafePointCache`] that
+    /// is not refreshed automatically (reads fail with `9001` after 99 s unless updated;
+    /// production callers should use [`Self::new_with_safe_point`]). Go's
+    /// `TiKVDriver.OpenWithOptions` (part 2) builds it from a path.
     // glue: stand-in for TiKVDriver.OpenWithOptions (D07.1 part 2)
     pub fn new(client: Arc<TransactionClient>, pool: Option<ExecPool>) -> Result<TikvStore, Error> {
         Self::new_with_safe_point(client, pool, Arc::new(SafePointCache::new()))

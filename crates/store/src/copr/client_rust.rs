@@ -101,6 +101,9 @@ pub struct ClientRustStore {
 }
 
 impl ClientRustStore {
+    /// Constructs the boundary with a standalone [`SafePointCache`] that is not refreshed by a
+    /// background checker (suitable for tests and short-lived callers; reads fail with `9001`
+    /// after 99 s unless updated). Production callers should use [`Self::with_safe_point`].
     // glue: constructs the boundary over a client-rust TransactionClient
     pub fn new(client: Arc<TransactionClient>) -> Result<ClientRustStore, Error> {
         Self::with_safe_point(client, Arc::new(SafePointCache::new()))

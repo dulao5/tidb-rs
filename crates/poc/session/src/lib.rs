@@ -816,7 +816,9 @@ impl Session {
         match &lowered.stmt {
             Statement::Select(sel) => self.select(sel, params, ts).await.map(Response::ResultSet),
             Statement::Use(db) => {
-                self.use_db(db).await?;
+                // SQL `USE` changes only `current_db` (Go `CurrentDB`), not `conn_db` (Go
+                // `cc.dbname`), and `run()` already records `StmtType::Use`.
+                self.use_db_inner(db).await?;
                 Ok(ok())
             }
             Statement::Set(assignments) => {
@@ -1136,6 +1138,7 @@ impl Session {
     > {
         if let Some(is) = known {
             let start_ts = self.wait_read_ts(ts).await?;
+            let _ts_guard = self.track_start_ts(start_ts);
             let plan = self.plan(sel, &is, params)?;
             self.timer.set_kind(Kind::of(&plan));
             self.timer.mark(Phase::Plan);
