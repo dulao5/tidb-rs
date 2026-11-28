@@ -24,6 +24,10 @@ pub struct AccountAuth {
     pub auth_host: Option<String>,
     /// True when `mysql.user.Account_locked == 'Y'` (checked after password verification -> 3118).
     pub account_locked: bool,
+    /// True when the account's password is expired (checked after password verification and
+    /// `account_locked` -> 1862, matching Go `CheckPasswordExpired` under default
+    /// `disconnect_on_expired_password = ON`).
+    pub password_expired: bool,
 }
 
 impl From<Credential> for AccountAuth {
@@ -33,6 +37,7 @@ impl From<Credential> for AccountAuth {
             auth_user: None,
             auth_host: None,
             account_locked: false,
+            password_expired: false,
         }
     }
 }

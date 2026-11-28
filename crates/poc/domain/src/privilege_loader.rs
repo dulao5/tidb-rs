@@ -648,10 +648,16 @@ fn col_str(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> String {
 }
 
 /// Decodes `mysql.user.password_last_changed` (`TIMESTAMP`, decoded in UTC by [`RowDecoder`])
-/// into UTC Unix seconds. Returns `None` for SQL `NULL`, zero timestamps (`0000-00-00 00:00:00`),
-/// missing column, or invalid/unexpected datum types (which fail closed when effective lifetime > 0).
+/// into a `gotime::Time` in `gotime::local()`, matching Go `decodeUserTableRow`
+/// (`pkg/privilege/privileges/cache.go:1070-1075`: instant decoded in `time.Local` so
+/// `AddDate(0, 0, lifetime)` follows local calendar days and DST transitions).
+/// Returns `None` for SQL `NULL`, zero timestamps (`0000-00-00 00:00:00`), missing column, or
+/// invalid/unexpected datum types (which treat the password as expired when effective lifetime > 0).
 #[allow(non_upper_case_globals)]
-fn decode_password_last_changed(row: &HashMap<i64, Datum>, col_id: Option<i64>) -> Option<i64> {
+fn decode_password_last_changed(
+    row: &HashMap<i64, Datum>,
+    col_id: Option<i64>,
+) -> Option<tidb_base::gostd::time::Time> {
     let d = col_id.and_then(|id| row.get(&id))?;
     if d.is_null() {
         return None;
@@ -666,7 +672,7 @@ fn decode_password_last_changed(row: &HashMap<i64, Datum>, col_id: Option<i64>) 
             if err.is_err() {
                 return None;
             }
-            Some(gt.unix())
+            Some(gt.in_loc(&tidb_base::gostd::time::local()))
         }
         _ => None,
     }
@@ -1726,11 +1732,11 @@ mod tests {
         assert!(restricted_rec.password_expired);
         assert_eq!(restricted_rec.password_lifetime, Some(30));
         assert!(!restricted_rec.password_lifetime_invalid);
-        assert_eq!(restricted_rec.password_last_changed, None);
+        assert!(restricted_rec.password_last_changed.is_none());
         assert!(restricted_rec.has_failed_login_policy);
         assert_eq!(snap.default_password_lifetime(), Some(90));
 
-        // Verify UTC `Password_last_changed` decoding (concrete timestamp vs zero timestamp).
+        // Verify `Password_last_changed` decoding (exact instant in `local()` vs zero timestamp).
         let app_rec = snap.match_user("u_app", "127.0.0.1").unwrap();
         let (expected_gt, err) = new_time(
             from_date_checked(2026, 11, 1, 12, 30, 45, 0).0,
@@ -1739,9 +1745,12 @@ mod tests {
         )
         .go_time(&utc());
         err.unwrap();
-        assert_eq!(app_rec.password_last_changed, Some(expected_gt.unix()));
+        assert_eq!(
+            app_rec.password_last_changed.as_ref().map(|t| t.unix()),
+            Some(expected_gt.unix())
+        );
         let role_rec = snap.match_user("r_reader", "127.0.0.1").unwrap();
-        assert_eq!(role_rec.password_last_changed, None);
+        assert!(role_rec.password_last_changed.is_none());
 
         // Verify unparseable `default_password_lifetime` fails closed (`None`).
         let bad_gv_rows = vec![encode_v2_record(

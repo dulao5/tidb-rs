@@ -152,6 +152,7 @@ impl SessionFactory for Factory {
                 auth_user: Some(self.shared.user.clone()),
                 auth_host: Some("%".to_owned()),
                 account_locked: false,
+                password_expired: false,
             });
         };
         // Read directly from the in-memory cache (same as Go's `ConnectionVerification`).
