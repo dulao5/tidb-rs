@@ -77,9 +77,9 @@ Placeholder (grammar accepted, AST is a `Node`/stub type from `src/gen_types.rs`
 else, notably DDL, INSERT/UPDATE/DELETE, EXPLAIN, ADMIN, GRANT, SET PASSWORD/ROLE/CONFIG, SHOW
 GRANTS FOR / CREATE USER / PROFILE, TABLESAMPLE, SELECT ... INTO, LATERAL, optimizer hints
 (the nested hint grammar is not ported). Restore reports any placeholder it meets as
-`unported ...`, so a statement is either fully inside the ported subset or flagged. Only the
-default parser mode is supported (`ParseOptions::window_functions`; no MariaDB / REAL_AS_FLOAT /
-ANSI_QUOTES / charset options yet).
+`unported ...`, so a statement is either fully inside the ported subset or flagged. `ParseOptions`
+supports `window_functions` and `sql_mode` (`ANSI_QUOTES`, `PIPES_AS_CONCAT`, `HIGH_NOT_PRECEDENCE`,
+`NO_BACKSLASH_ESCAPES`, `IGNORE_SPACE`, `REAL_AS_FLOAT`; no MariaDB / client-charset decoding yet).
 
 Semantic actions that reject input in Go but are placeholders here make us accept some invalid
 statements: 616 of 706 invalid corpus statements are rejected today.

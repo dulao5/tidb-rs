@@ -4241,4 +4241,88 @@ fn point_get_executor_reuse_blocked_immediately_after_revoke() {
     s2.drop_prepared_stmt(p_other.stmt_id).unwrap();
 }
 
+/// #509 Step 2: `Session::prepare_stmt` (both table preloading and `PrepareExec::next`) respects
+/// the session's `sql_mode` for every parser/lexer mode bit.
+#[test]
+fn prepare_stmt_and_execute_respect_session_sql_mode() {
+    use tidb_base::mysql::{
+        ModeANSIQuotes, ModeHighNotPrecedence, ModeIgnoreSpace, ModeNoBackslashEscapes,
+        ModePipesAsConcat, ModeRealAsFloat, TypeDouble, TypeFloat, TypeVarString,
+    };
+    use tidb_types::datum::new_int_datum;
+
+    let _serial = PREPARED_COUNT.lock();
+    let store = MockStore::new(10);
+    put_row(&store, 110, 1, 2, "one");
+
+    // 1. ANSI_QUOTES: quoted column & table identifiers resolve and execute against sbtest1.
+    let mut s = session(&store);
+    s.set_domain_info_schema(sbtest_info_schema());
+    s.load_common_global_variables_if_needed().unwrap();
+    s.vars_mut().current_db = "test".to_owned();
+    s.vars_mut().sql_mode = ModeANSIQuotes.0;
+    let info = block_on(s.prepare_stmt(r#"SELECT "c" FROM "sbtest1" WHERE "id" = ?"#)).unwrap();
+    assert_eq!(info.fields[0].column_name.o, "c");
+    let mut rs = block_on(s.execute_prepared_stmt(info.stmt_id, vec![new_int_datum(1)]))
+        .unwrap()
+        .expect("result set");
+    let mut chk = rs.new_chunk().unwrap();
+    block_on(rs.next(&mut s, &mut chk)).unwrap();
+    assert_eq!(chk.num_rows(), 1);
+    assert_eq!(chk.get_row(0).get_string(0), b"one");
+    block_on(rs.close(&mut s)).unwrap();
+    s.drop_prepared_stmt(info.stmt_id).unwrap();
+
+    // 2. REAL_AS_FLOAT: `CAST(? AS REAL)` produces `TypeFloat` vs `TypeDouble` under default mode.
+    s.vars_mut().sql_mode = 0;
+    let def_real = block_on(s.prepare_stmt("SELECT CAST(? AS REAL)")).unwrap();
+    assert_eq!(def_real.fields[0].column_type.get_type(), TypeDouble);
+    s.drop_prepared_stmt(def_real.stmt_id).unwrap();
+
+    s.vars_mut().sql_mode = ModeRealAsFloat.0;
+    let flt_real = block_on(s.prepare_stmt("SELECT CAST(? AS REAL)")).unwrap();
+    assert_eq!(flt_real.fields[0].column_type.get_type(), TypeFloat);
+    s.drop_prepared_stmt(flt_real.stmt_id).unwrap();
+
+    // 3. IGNORE_SPACE: `CAST (? AS CHAR)` fails syntax check without IGNORE_SPACE (D02.1) and
+    //    succeeds with it.
+    s.vars_mut().sql_mode = 0;
+    let err = block_on(s.prepare_stmt("SELECT CAST (? AS CHAR)"))
+        .err()
+        .unwrap();
+    assert_eq!(blocked_by(&err), Some("D02.1"), "{err}");
+
+    s.vars_mut().sql_mode = ModeIgnoreSpace.0;
+    let ign = block_on(s.prepare_stmt("SELECT CAST (? AS CHAR)")).unwrap();
+    assert_eq!(ign.fields[0].column_type.get_type(), TypeVarString);
+    s.drop_prepared_stmt(ign.stmt_id).unwrap();
+
+    // 4. HIGH_NOT_PRECEDENCE, NO_BACKSLASH_ESCAPES, PIPES_AS_CONCAT during prepare & execute.
+    s.vars_mut().sql_mode = ModeHighNotPrecedence.0;
+    let high_not = block_on(s.prepare_stmt("SELECT NOT ? BETWEEN -5 AND 5")).unwrap();
+    let mut rs = block_on(s.execute_prepared_stmt(high_not.stmt_id, vec![new_int_datum(1)]))
+        .unwrap()
+        .expect("result set");
+    assert_eq!(drain(&mut s, &mut rs), vec![1]);
+    block_on(rs.close(&mut s)).unwrap();
+    s.drop_prepared_stmt(high_not.stmt_id).unwrap();
+
+    s.vars_mut().sql_mode = ModeNoBackslashEscapes.0;
+    let nbe = block_on(s.prepare_stmt(r"SELECT '\n'")).unwrap();
+    let mut rs = block_on(s.execute_prepared_stmt(nbe.stmt_id, vec![]))
+        .unwrap()
+        .expect("result set");
+    let mut chk = rs.new_chunk().unwrap();
+    block_on(rs.next(&mut s, &mut chk)).unwrap();
+    assert_eq!(chk.get_row(0).get_string(0), br"\n");
+    block_on(rs.close(&mut s)).unwrap();
+    s.drop_prepared_stmt(nbe.stmt_id).unwrap();
+
+    s.vars_mut().sql_mode = ModePipesAsConcat.0;
+    let concat = block_on(s.prepare_stmt("SELECT 'a' || 'b'")).err().unwrap();
+    // `concatFunctionClass` is not ported (D08.6) -> prepare reaches rewriter and stops cleanly
+    // instead of preparing `OR`.
+    assert_eq!(blocked_by(&concat), Some("D08.6"), "{concat}");
+}
+
 mod sbtest_results;

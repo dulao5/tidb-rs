@@ -15,12 +15,18 @@ use crate::{
 /// Source text handle passed to actions as `$lexer`.
 pub struct Src<'a> {
     pub src: &'a str,
+    pub no_backslash_escapes: bool,
 }
 
 impl SrcText for Src<'_> {
     #[inline]
     fn src_str(&self, span: Span) -> &str {
         &self.src[span.start()..span.end()]
+    }
+
+    #[inline]
+    fn no_backslash_escapes(&self) -> bool {
+        self.no_backslash_escapes
     }
 }
 
@@ -108,7 +114,10 @@ pub struct Driver {
 impl Driver {
     pub fn parse(&mut self, src: &str, toks: &[Tok], ctx: &Ctx) -> Outcome {
         let t = tables();
-        let lx = Src { src };
+        let lx = Src {
+            src,
+            no_backslash_escapes: ctx.sql_mode.has_no_backslash_escapes_mode(),
+        };
         self.states.clear();
         self.vals.clear();
         self.spans.clear();

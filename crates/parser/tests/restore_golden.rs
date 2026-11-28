@@ -43,6 +43,7 @@ fn restore_matches_tidb() {
     for c in &cases {
         let opts = ParseOptions {
             window_functions: c.window,
+            ..Default::default()
         };
         let out = parse(&c.src, &opts).unwrap_or_else(|e| panic!("{:?}: {e}", c.src));
         // Err = the statement touches a production that is still a placeholder.

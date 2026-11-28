@@ -246,6 +246,13 @@ pub struct PlanCacheStmt {
     /// the different between NormalizedSQL, NormalizedSQL4PC and StmtText: see Go.
     pub stmt_text: String,
 
+    /// The `sql_mode` active when `PREPARE` parsed `stmt_text` into `prepared_ast`.
+    /// Included in `PlanCacheKey` alongside execution-time `vars.sql_mode` so that
+    /// executing a statement prepared under one `sql_mode` after `SET sql_mode = ...`
+    /// cannot poison the instance plan cache entry for a later `PREPARE` of the same text
+    /// under the new `sql_mode` (#509).
+    pub parse_sql_mode: i64,
+
     /// dbName and tbls are used to add metadata lock.
     pub db_name: Vec<CIStr>,
     pub tbls: Vec<Arc<TableInfo>>,
@@ -285,6 +292,7 @@ impl Default for PlanCacheStmt {
             sql_digest: String::new(),
             for_update_read: false,
             stmt_text: String::new(),
+            parse_sql_mode: 0,
             db_name: Vec::new(),
             tbls: Vec::new(),
             cache_key: PlanCacheKey::default(),
@@ -558,6 +566,7 @@ pub fn generate_plan_cache_stmt_with_ast(
         stmt_db: vars.current_db.clone(),
         visit_infos,
         stmt_text: param_sql.to_owned(),
+        parse_sql_mode: vars.sql_mode,
         normalized_sql,
         sql_digest: digest,
         for_update_read,
@@ -1070,6 +1079,7 @@ pub fn new_plan_cache_key(
     key.push_str(&prune_mode);
     // Only be set in rc or for update read and leave it default otherwise.
     key.push_u64(latest_schema_version as u64);
+    key.push_u64(stmt.parse_sql_mode as u64);
     key.push_u64(vars.sql_mode as u64);
     key.push_u64(timezone_offset as u64);
     key.env.push(engine_bits);
