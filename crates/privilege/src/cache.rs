@@ -230,10 +230,16 @@ pub struct UserRecord {
     pub auth_plugin: String,
     pub account_locked: bool,
     pub password_expired: bool,
+    /// `mysql.user.password_last_changed` as UTC Unix seconds (`None` for SQL `NULL`,
+    /// zero timestamp `0000-00-00 00:00:00`, or missing/unparseable value).
+    pub password_last_changed: Option<i64>,
     /// `mysql.user.password_lifetime`: `None` (SQL `NULL`) inherits global
     /// `default_password_lifetime`; `Some(0)` means `PASSWORD EXPIRE NEVER`; `Some(n)` (`n > 0`)
     /// configures per-account expiration after `n` days.
     pub password_lifetime: Option<u16>,
+    /// True when `mysql.user.password_lifetime` held an unexpected non-null datum type
+    /// (fails closed as expired).
+    pub password_lifetime_invalid: bool,
     pub has_failed_login_policy: bool,
 }
 
@@ -251,7 +257,9 @@ impl UserRecord {
             auth_plugin: "mysql_native_password".to_owned(),
             account_locked: false,
             password_expired: false,
+            password_last_changed: None,
             password_lifetime: None,
+            password_lifetime_invalid: false,
             has_failed_login_policy: false,
         }
     }
@@ -289,10 +297,24 @@ impl UserRecord {
         self
     }
 
+    /// Sets `mysql.user.password_last_changed` (UTC Unix seconds; `None` = NULL/zero/missing).
+    // glue: builder helper for password_last_changed
+    pub fn with_password_last_changed(mut self, unix_secs: Option<i64>) -> Self {
+        self.password_last_changed = unix_secs;
+        self
+    }
+
     /// Sets `mysql.user.password_lifetime` (`None` = SQL `NULL`, `Some(0)` = NEVER, `Some(n)` = days).
     // glue: builder helper for password_lifetime
     pub fn with_password_lifetime(mut self, lifetime: Option<u16>) -> Self {
         self.password_lifetime = lifetime;
+        self
+    }
+
+    /// Marks `mysql.user.password_lifetime` as unparseable/invalid (fails closed as expired).
+    // glue: builder helper for password_lifetime_invalid
+    pub fn with_password_lifetime_invalid(mut self, invalid: bool) -> Self {
+        self.password_lifetime_invalid = invalid;
         self
     }
 
@@ -524,7 +546,7 @@ impl RoleGraphEdgesTable {
 }
 
 /// MySQLPrivilege is the in-memory cache of MySQL grant tables.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct MySQLPrivilege {
     user: HashMap<String, Vec<UserRecord>>,
     global_priv: HashMap<String, Vec<GlobalPrivRecord>>,
@@ -534,8 +556,26 @@ pub struct MySQLPrivilege {
     dynamic_priv: HashMap<String, Vec<DynamicPrivRecord>>,
     default_roles: HashMap<String, Vec<DefaultRoleRecord>>,
     role_graph: HashMap<RoleKey, RoleGraphEdgesTable>,
-    /// Cluster `@@global.default_password_lifetime` loaded from `mysql.global_variables` (0 = never).
-    default_password_lifetime: u64,
+    /// Cluster `@@global.default_password_lifetime` loaded from `mysql.global_variables`.
+    /// `Some(0)` disables default expiration, `Some(n)` expires after `n` days, and `None`
+    /// indicates an unparseable value (fails closed for accounts inheriting the default).
+    default_password_lifetime: Option<u64>,
+}
+
+impl Default for MySQLPrivilege {
+    fn default() -> Self {
+        Self {
+            user: HashMap::new(),
+            global_priv: HashMap::new(),
+            db: HashMap::new(),
+            tables_priv: HashMap::new(),
+            columns_priv: HashMap::new(),
+            dynamic_priv: HashMap::new(),
+            default_roles: HashMap::new(),
+            role_graph: HashMap::new(),
+            default_password_lifetime: Some(0),
+        }
+    }
 }
 
 impl MySQLPrivilege {
@@ -548,13 +588,58 @@ impl MySQLPrivilege {
     /// Sets the cluster `default_password_lifetime` (days; `0` disables default expiration).
     // glue: global variable helper
     pub fn set_default_password_lifetime(&mut self, days: u64) {
+        self.default_password_lifetime = Some(days);
+    }
+
+    /// Marks cluster `default_password_lifetime` as unparseable/invalid (fails closed for
+    /// accounts whose `password_lifetime` is `NULL`).
+    // glue: global variable helper
+    pub fn set_default_password_lifetime_invalid(&mut self) {
+        self.default_password_lifetime = None;
+    }
+
+    /// Sets the cluster `default_password_lifetime` directly (`None` = invalid/fail-closed).
+    // glue: global variable helper
+    pub fn set_default_password_lifetime_opt(&mut self, days: Option<u64>) {
         self.default_password_lifetime = days;
     }
 
-    /// Returns the cluster `default_password_lifetime` (days; `0` = never expires by default).
+    /// Returns the cluster `default_password_lifetime` (`Some(0)` = never expires by default,
+    /// `Some(n)` = expires after `n` days, `None` = unparseable/fail-closed).
     // glue: global variable helper
-    pub fn default_password_lifetime(&self) -> u64 {
+    pub fn default_password_lifetime(&self) -> Option<u64> {
         self.default_password_lifetime
+    }
+
+    /// Computes whether `rec`'s password is expired at `now_unix_secs` (UTC Unix seconds),
+    /// matching Go TiDB v8.5.8 `pkg/privilege/privileges/privileges.go` (`isPasswordExpired`):
+    /// - `password_expired = 'Y'` or invalid `password_lifetime` -> expired (`true`).
+    /// - `password_lifetime == Some(0)` (`PASSWORD EXPIRE NEVER`) -> not expired (`false`),
+    ///   overriding `@@global.default_password_lifetime`.
+    /// - Effective lifetime `days > 0`: expired iff `password_last_changed` is missing/NULL/zero
+    ///   or `now_unix_secs - password_last_changed >= days * 86_400`.
+    /// - Unparseable `@@global.default_password_lifetime` (`None`) fails closed (`true`) for
+    ///   accounts whose `password_lifetime` is `None`.
+    // go: UserPrivileges.isPasswordExpired L2 (takes explicit UTC Unix seconds for deterministic tests)
+    pub fn is_password_expired_at(&self, rec: &UserRecord, now_unix_secs: i64) -> bool {
+        if rec.password_expired || rec.password_lifetime_invalid {
+            return true;
+        }
+        let effective_days = match rec.password_lifetime {
+            Some(0) => return false,
+            Some(days) => u64::from(days),
+            None => match self.default_password_lifetime {
+                None => return true,
+                Some(0) => return false,
+                Some(days) => days,
+            },
+        };
+        let Some(last_changed) = rec.password_last_changed else {
+            return true;
+        };
+        let lifetime_secs = i128::from(effective_days).saturating_mul(86_400);
+        let elapsed_secs = i128::from(now_unix_secs) - i128::from(last_changed);
+        elapsed_secs >= lifetime_secs
     }
 
     /// Appends a `mysql.user` record without sorting; caller must invoke [`Self::sort_all`].
@@ -1097,5 +1182,89 @@ impl Handle {
     pub fn replace(&self, mut next: MySQLPrivilege) {
         next.sort_all();
         self.priv_.store(Arc::new(next));
+    }
+}
+
+#[cfg(test)]
+mod password_expiry_tests {
+    use super::*;
+    use tidb_base::mysql::SelectPriv;
+
+    const DAY: i64 = 86_400;
+    const NOW: i64 = 1_800_000_000;
+
+    #[test]
+    fn password_expiration_matches_go_semantics() {
+        let mut mp = MySQLPrivilege::new();
+        assert_eq!(mp.default_password_lifetime(), Some(0));
+
+        // Explicit `password_expired = 'Y'` always expires, even with PASSWORD EXPIRE NEVER.
+        let exp_y = UserRecord::new("%", "u_exp", SelectPriv)
+            .with_password_expired(true)
+            .with_password_lifetime(Some(0))
+            .with_password_last_changed(Some(NOW));
+        assert!(mp.is_password_expired_at(&exp_y, NOW));
+
+        // Invalid `password_lifetime` fails closed even with a fresh timestamp.
+        let bad_lt = UserRecord::new("%", "u_bad_lt", SelectPriv)
+            .with_password_lifetime_invalid(true)
+            .with_password_last_changed(Some(NOW));
+        assert!(mp.is_password_expired_at(&bad_lt, NOW));
+
+        // Explicit 30-day lifetime: before / at / after 30-day boundary, future clock skew, and NULL ts.
+        let u30_fresh = UserRecord::new("%", "u30", SelectPriv)
+            .with_password_lifetime(Some(30))
+            .with_password_last_changed(Some(NOW - 30 * DAY + 1));
+        assert!(!mp.is_password_expired_at(&u30_fresh, NOW));
+
+        let u30_exact = UserRecord::new("%", "u30", SelectPriv)
+            .with_password_lifetime(Some(30))
+            .with_password_last_changed(Some(NOW - 30 * DAY));
+        assert!(mp.is_password_expired_at(&u30_exact, NOW));
+
+        let u30_old = UserRecord::new("%", "u30", SelectPriv)
+            .with_password_lifetime(Some(30))
+            .with_password_last_changed(Some(NOW - 31 * DAY));
+        assert!(mp.is_password_expired_at(&u30_old, NOW));
+
+        let u30_future = UserRecord::new("%", "u30", SelectPriv)
+            .with_password_lifetime(Some(30))
+            .with_password_last_changed(Some(NOW + 60));
+        assert!(!mp.is_password_expired_at(&u30_future, NOW));
+
+        let u30_null = UserRecord::new("%", "u30", SelectPriv)
+            .with_password_lifetime(Some(30))
+            .with_password_last_changed(None);
+        assert!(mp.is_password_expired_at(&u30_null, NOW));
+
+        // NULL per-account lifetime inherits global default_password_lifetime = 0 -> not expired even with NULL ts.
+        let u_def_null_ts = UserRecord::new("%", "u_def", SelectPriv);
+        assert!(!mp.is_password_expired_at(&u_def_null_ts, NOW));
+
+        // Enable cluster-wide default_password_lifetime = 90 days.
+        mp.set_default_password_lifetime(90);
+        assert!(mp.is_password_expired_at(&u_def_null_ts, NOW));
+
+        let u_def_fresh = UserRecord::new("%", "u_def", SelectPriv)
+            .with_password_last_changed(Some(NOW - 89 * DAY));
+        assert!(!mp.is_password_expired_at(&u_def_fresh, NOW));
+
+        let u_def_expired = UserRecord::new("%", "u_def", SelectPriv)
+            .with_password_last_changed(Some(NOW - 90 * DAY));
+        assert!(mp.is_password_expired_at(&u_def_expired, NOW));
+
+        // PASSWORD EXPIRE NEVER (`Some(0)`) overrides global default_password_lifetime = 90.
+        let u_never = UserRecord::new("%", "u_never", SelectPriv)
+            .with_password_lifetime(Some(0))
+            .with_password_last_changed(Some(NOW - 500 * DAY));
+        assert!(!mp.is_password_expired_at(&u_never, NOW));
+
+        // Unparseable global default_password_lifetime fails closed for NULL-lifetime accounts
+        // while keeping explicit `Some(0)` and valid explicit `Some(30)` unaffected.
+        mp.set_default_password_lifetime_invalid();
+        assert_eq!(mp.default_password_lifetime(), None);
+        assert!(mp.is_password_expired_at(&u_def_fresh, NOW));
+        assert!(!mp.is_password_expired_at(&u_never, NOW));
+        assert!(!mp.is_password_expired_at(&u30_fresh, NOW));
     }
 }

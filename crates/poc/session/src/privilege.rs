@@ -11,6 +11,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use poc_domain::PrivilegeSync;
 use tidb_base::mysql::SelectPriv;
@@ -60,7 +61,10 @@ impl PrivilegeSource {
 ///   preventing empty-password bypass on `auth_socket`, `tidb_auth_token`, LDAP, `tidb_sm3_password`, etc.
 /// - Malformed `authentication_string` for the account's plugin.
 /// - `mysql.global_priv` rows with `REQUIRE SSL/X509/CIPHER/SAN` or broken JSON.
-/// - `mysql.user.password_expired = 'Y'` or non-zero `password_lifetime`.
+/// - Expired passwords (`mysql.user.password_expired = 'Y'` or elapsed time since
+///   `password_last_changed` meeting the effective lifetime from `password_lifetime` /
+///   `@@global.default_password_lifetime`, or missing/NULL `password_last_changed` under a
+///   positive effective lifetime; interactive sandbox mode is not supported on the read-only node).
 /// - `mysql.user.User_attributes` failed-login lockout policy or auto-lock state.
 ///
 /// Locked accounts (`Account_locked = 'Y'`) are returned with `account_locked = true` so the
@@ -70,6 +74,21 @@ pub fn authenticate_user_record(
     snap: &MySQLPrivilege,
     user: &str,
     host: &str,
+) -> Option<AccountAuth> {
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(i64::MAX);
+    authenticate_user_record_at(snap, user, host, now_unix_secs)
+}
+
+/// Deterministic variant of [`authenticate_user_record`] evaluating password expiration at
+/// `now_unix_secs` (UTC Unix seconds).
+pub fn authenticate_user_record_at(
+    snap: &MySQLPrivilege,
+    user: &str,
+    host: &str,
+    now_unix_secs: i64,
 ) -> Option<AccountAuth> {
     let rec = snap.match_user(user, host)?;
     let credential = match rec.auth_plugin.as_str() {
@@ -81,14 +100,7 @@ pub fn authenticate_user_record(
         }
         _ => return None,
     };
-    let lifetime_active = match rec.password_lifetime {
-        // `PASSWORD EXPIRE NEVER` explicitly overrides global `default_password_lifetime`.
-        Some(0) => false,
-        Some(_) => true,
-        // SQL `NULL` (CREATE USER default) inherits `@@global.default_password_lifetime`.
-        None => snap.default_password_lifetime() > 0,
-    };
-    if rec.password_expired || lifetime_active || rec.has_failed_login_policy {
+    if snap.is_password_expired_at(rec, now_unix_secs) || rec.has_failed_login_policy {
         return None;
     }
     if let Some(gp) = snap.match_global_priv(&rec.base.user, &rec.base.host)
@@ -563,12 +575,19 @@ mod tests {
 
     #[test]
     fn fail_closed_login_rules_reject_non_native_ssl_expired_and_lockout() {
+        const DAY: i64 = 86_400;
+        const NOW: i64 = 1_800_000_000;
+
         let mut mp = MySQLPrivilege::new();
         mp.add_user(
             UserRecord::new("%", "root", SelectPriv)
-                .with_auth_string("*23AE809DDACAF96AF0FD78ED04B6A265E05AA257"),
+                .with_auth_string("*23AE809DDACAF96AF0FD78ED04B6A265E05AA257")
+                .with_password_last_changed(Some(NOW - 10 * DAY)),
         );
-        mp.add_user(UserRecord::new("10.%", "u_net", SelectPriv));
+        mp.add_user(
+            UserRecord::new("10.%", "u_net", SelectPriv)
+                .with_password_last_changed(Some(NOW - 100 * DAY)),
+        );
         mp.add_user(UserRecord::new("%", "u_locked", SelectPriv).with_account_locked(true));
         mp.add_user(
             UserRecord::new("%", "u_token", SelectPriv).with_auth_plugin("tidb_auth_token"),
@@ -600,38 +619,55 @@ mod tests {
         );
         mp.add_user(UserRecord::new("%", "u_expired", SelectPriv).with_password_expired(true));
         mp.add_user(
-            UserRecord::new("%", "u_lifetime", SelectPriv).with_password_lifetime(Some(30)),
+            UserRecord::new("%", "u_lifetime_fresh", SelectPriv)
+                .with_password_lifetime(Some(30))
+                .with_password_last_changed(Some(NOW - 29 * DAY)),
         );
-        mp.add_user(UserRecord::new("%", "u_never_lt", SelectPriv).with_password_lifetime(Some(0)));
+        mp.add_user(
+            UserRecord::new("%", "u_lifetime_expired", SelectPriv)
+                .with_password_lifetime(Some(30))
+                .with_password_last_changed(Some(NOW - 30 * DAY)),
+        );
+        mp.add_user(
+            UserRecord::new("%", "u_lifetime_null_ts", SelectPriv).with_password_lifetime(Some(30)),
+        );
+        mp.add_user(
+            UserRecord::new("%", "u_never_lt", SelectPriv)
+                .with_password_lifetime(Some(0))
+                .with_password_last_changed(Some(NOW - 365 * DAY)),
+        );
         mp.add_user(UserRecord::new("%", "u_lockpol", SelectPriv).with_failed_login_policy(true));
         mp.add_user(UserRecord::new("%", "u_ssl", SelectPriv));
         mp.add_global_priv(GlobalPrivRecord::new("u_ssl", "%", true, false));
         mp.add_user(UserRecord::new("%", "u_broken_gp", SelectPriv));
         mp.add_global_priv(GlobalPrivRecord::new("u_broken_gp", "%", true, true));
 
-        // Normal native user & IPv4-mapped IPv6 host match succeed when default_password_lifetime == 0.
-        let root_auth = authenticate_user_record(&mp, "root", "127.0.0.1").unwrap();
+        // Normal native user, IPv4-mapped IPv6 host match, and non-expired per-account lifetime succeed.
+        let root_auth = authenticate_user_record_at(&mp, "root", "127.0.0.1", NOW).unwrap();
         assert!(!root_auth.account_locked);
         assert_eq!(root_auth.auth_user.as_deref(), Some("root"));
         assert_eq!(root_auth.auth_host.as_deref(), Some("%"));
-        assert!(authenticate_user_record(&mp, "u_net", "::ffff:10.0.0.5").is_some());
-        assert!(authenticate_user_record(&mp, "u_never_lt", "127.0.0.1").is_some());
+        assert!(authenticate_user_record_at(&mp, "u_net", "::ffff:10.0.0.5", NOW).is_some());
+        assert!(authenticate_user_record_at(&mp, "u_lifetime_fresh", "127.0.0.1", NOW).is_some());
+        assert!(authenticate_user_record_at(&mp, "u_never_lt", "127.0.0.1", NOW).is_some());
 
         // Locked account returns Some(AccountAuth { account_locked: true }) so password check runs
         // before returning 3118.
-        let locked = authenticate_user_record(&mp, "u_locked", "127.0.0.1").unwrap();
+        let locked = authenticate_user_record_at(&mp, "u_locked", "127.0.0.1", NOW).unwrap();
         assert!(locked.account_locked);
 
         // Valid caching_sha2_password accounts (hashed and empty-password) are accepted.
-        let sha2_valid = authenticate_user_record(&mp, "u_sha2_valid", "127.0.0.1").unwrap();
+        let sha2_valid =
+            authenticate_user_record_at(&mp, "u_sha2_valid", "127.0.0.1", NOW).unwrap();
         assert!(matches!(
             sha2_valid.credential,
             Credential::CachingSha2Password(Some(_))
         ));
-        let sha2_empty = authenticate_user_record(&mp, "u_sha2_empty", "127.0.0.1").unwrap();
+        let sha2_empty =
+            authenticate_user_record_at(&mp, "u_sha2_empty", "127.0.0.1", NOW).unwrap();
         assert_eq!(sha2_empty.credential, Credential::CachingSha2Password(None));
 
-        // Every unported auth plugin / malformed hash / login restriction fails closed (None -> 1045).
+        // Every unported auth plugin / malformed hash / login restriction / expired password fails closed (None -> 1045).
         for denied in [
             "u_token",
             "u_socket",
@@ -639,23 +675,32 @@ mod tests {
             "u_sm3",
             "u_sha2_bad",
             "u_expired",
-            "u_lifetime",
+            "u_lifetime_expired",
+            "u_lifetime_null_ts",
             "u_lockpol",
             "u_ssl",
             "u_broken_gp",
         ] {
             assert!(
-                authenticate_user_record(&mp, denied, "127.0.0.1").is_none(),
+                authenticate_user_record_at(&mp, denied, "127.0.0.1", NOW).is_none(),
                 "{denied} must fail closed"
             );
         }
 
-        // When global `default_password_lifetime > 0`, accounts with `password_lifetime IS NULL`
-        // (such as `root` / `u_net`) fail closed, while `PASSWORD EXPIRE NEVER` (`Some(0)`) is allowed.
+        // When global `default_password_lifetime = 90`:
+        // - `root` (changed 10d ago) stays allowed,
+        // - `u_net` (changed 100d ago) is expired -> rejected,
+        // - `u_never_lt` (`PASSWORD EXPIRE NEVER`, changed 365d ago) stays allowed.
         mp.set_default_password_lifetime(90);
-        assert!(authenticate_user_record(&mp, "root", "127.0.0.1").is_none());
-        assert!(authenticate_user_record(&mp, "u_net", "10.0.0.5").is_none());
-        assert!(authenticate_user_record(&mp, "u_never_lt", "127.0.0.1").is_some());
+        assert!(authenticate_user_record_at(&mp, "root", "127.0.0.1", NOW).is_some());
+        assert!(authenticate_user_record_at(&mp, "u_net", "10.0.0.5", NOW).is_none());
+        assert!(authenticate_user_record_at(&mp, "u_never_lt", "127.0.0.1", NOW).is_some());
+
+        // Unparseable global `default_password_lifetime` fails closed for NULL-lifetime accounts.
+        mp.set_default_password_lifetime_invalid();
+        assert!(authenticate_user_record_at(&mp, "root", "127.0.0.1", NOW).is_none());
+        assert!(authenticate_user_record_at(&mp, "u_never_lt", "127.0.0.1", NOW).is_some());
+        assert!(authenticate_user_record_at(&mp, "u_lifetime_fresh", "127.0.0.1", NOW).is_some());
     }
 
     #[test]

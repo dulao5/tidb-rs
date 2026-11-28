@@ -64,10 +64,10 @@ impl SessionHandler for AuthTestSession {
     }
     fn close(&mut self, _stmt_id: u32) {}
     async fn use_db(&mut self, db: &str) -> Result<(), SqlError> {
-        if db == "test" {
-            Ok(())
-        } else {
-            Err(SqlError::bad_db(db))
+        match db {
+            "test" => Ok(()),
+            "forbidden" => Err(SqlError::db_access_denied("root", "127.0.0.1", db)),
+            _ => Err(SqlError::bad_db(db)),
         }
     }
 }
@@ -279,7 +279,28 @@ async fn handshake_eof_auth_failure_and_lifecycle_logs_match_go() {
         ]
     );
 
-    // 7. Successful connection + clean disconnect.
+    // 7. Handshake use_db access denied (1044): Go `exeerrors.ErrDBaccessDenied` emits
+    //    `[executor:1044]` on both handshake WARN lines.
+    let denied_db_opts = Opts::from(
+        OptsBuilder::default()
+            .ip_or_hostname("127.0.0.1")
+            .tcp_port(addr.port())
+            .user(Some("root"))
+            .db_name(Some("forbidden")),
+    );
+    assert!(mysql_async::Conn::new(denied_db_opts).await.is_err());
+
+    let denied_db_lines = take_lines(&sink, 3).await;
+    assert_eq!(
+        denied_db_lines,
+        vec![
+            "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]",
+            "[WARN] [conn.rs:LINE] [\"open new session or authentication failure\"] [conn=7] [error=\"[executor:1044]Access denied for user 'root'@'127.0.0.1' to database 'forbidden'\"]",
+            "[WARN] [conn.rs:LINE] [\"Server.onConn handshake\"] [conn=7] [error=\"[executor:1044]Access denied for user 'root'@'127.0.0.1' to database 'forbidden'\"] [\"remote addr\"=127.0.0.1:PORT]",
+        ]
+    );
+
+    // 8. Successful connection + clean disconnect.
     let ok_opts = Opts::from(
         OptsBuilder::default()
             .ip_or_hostname("127.0.0.1")
@@ -294,16 +315,16 @@ async fn handshake_eof_auth_failure_and_lifecycle_logs_match_go() {
         ok_lines,
         vec![
             "[DEBUG] [server.rs:LINE] [\"accept new connection success\"]",
-            "[DEBUG] [conn.rs:LINE] [\"new connection\"] [conn=7] [remoteAddr=127.0.0.1:PORT]",
-            "[DEBUG] [conn.rs:LINE] [\"connection closed\"] [conn=7]",
+            "[DEBUG] [conn.rs:LINE] [\"new connection\"] [conn=8] [remoteAddr=127.0.0.1:PORT]",
+            "[DEBUG] [conn.rs:LINE] [\"connection closed\"] [conn=8]",
         ]
     );
 
-    // 8 & 9. caching_sha2_password empty auth (`[]` from drivers and `[0x00]` from libmysqlclient)
-    //        against a non-empty hash: both pin `[privilege:1045]...(using password: NO)` on wire
-    //        and in whole-line handshake logs.
+    // 9 & 10. caching_sha2_password empty auth (`[]` from drivers and `[0x00]` from libmysqlclient)
+    //         against a non-empty hash: both pin `[privilege:1045]...(using password: NO)` on wire
+    //         and in whole-line handshake logs.
     for (idx, empty_payload) in [&b""[..], &b"\0"[..]].into_iter().enumerate() {
-        let conn_id = 8 + idx;
+        let conn_id = 9 + idx;
         let stream = TcpStream::connect(addr).await.unwrap();
         let mut io = PacketIo::new(stream, 1 << 20);
         let _hs = io.read_packet().await.unwrap();
