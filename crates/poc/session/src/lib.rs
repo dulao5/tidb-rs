@@ -264,6 +264,10 @@ impl SessionFactory for Factory {
             prev_stmt: router::LastStmtInfo::default(),
             set_applied: 0,
             txn: None,
+            reopen: Reopen {
+                factory: self.clone(),
+                info: info.clone(),
+            },
         };
         if self.new_stack != NewStackMode::Off {
             let domain = self
@@ -364,9 +368,19 @@ pub struct Session {
     /// How many assignments of the current statement's `SET` were applied (`run_set`); 0 for
     /// any other statement.
     set_applied: usize,
+    /// How to open this session anew (`COM_RESET_CONNECTION`).
+    reopen: Reopen,
     /// The read-only transaction the session is in (`BEGIN`, or `autocommit = 0` after a
     /// statement took a start ts; Go's `InTxn`), D05.4 spec §6.
     txn: Option<PocTxn>,
+}
+
+/// What `COM_RESET_CONNECTION` opens a new session with (Go's `handleResetConnection` calls
+/// `OpenCtx` with the connection's id, capability and collation, then
+/// `AuthWithoutVerification` for the same user).
+struct Reopen {
+    factory: Factory,
+    info: ConnectionInfo,
 }
 
 /// A statement the prototype prepared.
@@ -1626,6 +1640,21 @@ impl SessionHandler for Session {
         }
     }
 
+    // glue: handleResetConnection (pkg/server/conn.go:2672-2701; the server block's part 2, D03.1) on the prototype session
+    async fn reset_connection(&mut self) -> Result<(), SqlError> {
+        // `cc.ctx.Close()`: the transaction is rolled back (`RollbackTxn`, which records no
+        // transaction duration).
+        drop(self.txn.take());
+        let db = self.current_db.clone();
+        let new = self.reopen.factory.open_session(&self.reopen.info)?;
+        *self = new;
+        // `cc.useDB(cc.dbname)`: the current database is restored, as a `USE` statement.
+        if let Some(db) = db {
+            SessionHandler::use_db(self, &db).await?;
+        }
+        Ok(())
+    }
+
     async fn use_db(&mut self, db: &str) -> Result<(), SqlError> {
         // COM_INIT_DB and the handshake's database: Go runs them as a `USE` statement.
         tidb_metrics::statement(StmtType::Use);
@@ -1790,7 +1819,12 @@ impl Session {
         // warnings stay.
         let opts = self.parse_options()?;
         let stmt = tidb_sql::ir::parse_one_with(sql, &opts)?;
-        let lowered = match tidb_sql::ir::lower_statement(&stmt, sql) {
+        // A write in a read-only transaction (D05.4 spec §6.2): the prototype cannot prepare
+        // a write, so its 1792 comes at PREPARE (Go's at EXECUTE; spec §6.5).
+        let lowered = match self
+            .txn_write_error(&stmt)
+            .map_or_else(|| tidb_sql::ir::lower_statement(&stmt, sql), Err)
+        {
             Ok(l) => l,
             Err(e) => {
                 self.warnings.clear();

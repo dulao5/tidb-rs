@@ -766,6 +766,17 @@ fn write_in_the_pocs_transaction_is_1792() {
             let e = block_on(r.query(&mut p, sql)).unwrap_err();
             assert_eq!((e.code, e.state), (1792, "25006"), "{mode:?} {sql}");
         }
+        // The prepared path too: the PoC cannot prepare a write, so 1792 comes at PREPARE.
+        let e = block_on(r.prepare(&mut p, 7, insert)).unwrap_err();
+        assert_eq!(
+            (e.code, e.state, e.message.as_str()),
+            (
+                1792,
+                "25006",
+                "Cannot execute statement in a READ ONLY transaction."
+            ),
+            "{mode:?}"
+        );
         // DDL keeps the fence; a read runs on the PoC.
         let e = block_on(r.query(&mut p, "CREATE TABLE u (id INT)")).unwrap_err();
         assert_eq!(e.code, 1235, "{mode:?}");

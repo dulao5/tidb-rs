@@ -525,7 +525,15 @@ async fn read_only_transactions_read_one_snapshot() {
         .query(&format!("INSERT INTO {TXN_DB}.t VALUES (9)"))
         .await
         .unwrap_err();
-    assert_eq!((e.code, e.state), (1792, "25006"), "{e:?}");
+    assert_eq!(
+        (e.code, e.state, e.message.as_str()),
+        (
+            1792,
+            "25006",
+            "Cannot execute statement in a READ ONLY transaction."
+        ),
+        "{e:?}"
+    );
     let e = session
         .query(&format!("{select} FOR UPDATE"))
         .await
@@ -570,6 +578,35 @@ async fn read_only_transactions_read_one_snapshot() {
     ok!("BEGIN");
     assert_eq!(ids!(), [1, 2, 3, 4, 5]);
     ok!("COMMIT");
+
+    // When the start ts is taken: BEGIN takes it at once, so a row inserted between BEGIN
+    // and the first read is not seen (Go's `activeNow`); `autocommit = 0` takes it at the
+    // first read, so a row inserted between the SET and that read is seen.
+    ok!("SET transaction_isolation = 'REPEATABLE-READ'");
+    ok!("BEGIN");
+    insert(6);
+    assert_eq!(ids!(), [1, 2, 3, 4, 5]);
+    ok!("COMMIT");
+    ok!("SET autocommit = 0");
+    insert(7);
+    assert_eq!(ids!(), [1, 2, 3, 4, 5, 6, 7]);
+    ok!("COMMIT");
+
+    // COM_RESET_CONNECTION mid-transaction (a pool returning the connection): Go opens a new
+    // session, so the next borrower does not read the old snapshot, `autocommit` is the
+    // global value again and the status has no IN_TRANS.
+    assert_eq!(ids!(), [1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(session.status_flags() & IN_TRANS, IN_TRANS);
+    insert(8);
+    assert_eq!(ids!(), [1, 2, 3, 4, 5, 6, 7]);
+    session.reset_connection().await.unwrap();
+    assert_eq!(session.status_flags() & (AUTOCOMMIT | IN_TRANS), AUTOCOMMIT);
+    let (_, r) = rows(session.query("SELECT @@autocommit").await.unwrap());
+    assert_eq!(r, vec![vec![Value::Int(1)]]);
+    assert_eq!(ids!(), [1, 2, 3, 4, 5, 6, 7, 8]);
+    ok!("BEGIN");
+    session.reset_connection().await.unwrap();
+    assert_eq!(session.status_flags() & IN_TRANS, 0);
 
     go_sql(&port, &format!("DROP DATABASE {TXN_DB}"));
 }

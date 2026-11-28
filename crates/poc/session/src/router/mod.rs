@@ -1066,6 +1066,12 @@ impl Router {
     ) -> Result<PreparedInfo, SqlError> {
         let opts = self.parse_options();
         let stmt = tidb_sql::ir::parse_one_with(sql, &opts)?;
+        // A write in the PoC's read-only transaction (D05.4 spec §6.2): 1792 at PREPARE, since
+        // neither engine prepares a write here (Go's comes at EXECUTE; spec §6.5).
+        if let Some(e) = poc.txn_write_error(&stmt) {
+            poc.clear_warnings();
+            return Err(e);
+        }
         // Not on the new stack when the InfoSchema versions differ: its column definitions
         // would come from another version, and a later fallback would fail check_columns.
         // Nor when the schema lease is not admissible (step 0). Nor before the session's global

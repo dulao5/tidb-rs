@@ -1284,6 +1284,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, H: SessionHandler> Conn<S, H> {
                 for id in std::mem::take(&mut self.stmts).into_keys() {
                     self.handler.close(id);
                 }
+                self.handler.reset_connection().await?;
                 self.write_ok(&OkInfo::default()).await
             }
             command::FIELD_LIST => Err(SqlError::not_supported("COM_FIELD_LIST").into()),
