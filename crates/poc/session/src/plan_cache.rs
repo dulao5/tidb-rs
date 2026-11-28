@@ -12,8 +12,9 @@
 //!
 //! Inputs (maintainer decision on #512): with `fallback` / `strict` the router passes the new
 //! session's synced variables and the ported domain's InfoSchema; with `off` there is neither,
-//! so the prototype uses a session with Go's default variables (the prototype rejects every
-//! `SET` of a variable the decision reads) and no InfoSchema, which leaves out the table checks
+//! so the prototype uses a session with the cluster's global variables (the sysvar cache of
+//! `mysql.global_variables`, D06.5 spec §8; Go's defaults until it is first built; the
+//! prototype rejects every `SET` of a variable the decision reads) and no InfoSchema, which leaves out the table checks
 //! of `checkTableCacheable` (partitioned, generated-column and temporary tables). That is a
 //! listed known difference of the prototype path.
 
@@ -100,16 +101,33 @@ impl WarnAppender for Sink {
     }
 }
 
+/// A session with the compiled default global values (Go's defaults): the input of the
+/// plan-cache decision while the cluster's global variables are not loaded (D06.5 spec
+/// §8.3), and of the router's probe of a rejected value.
+// glue: a session over ClusterGlobals::compiled_defaults (D06.5 spec §8.3)
+pub(crate) fn compiled_defaults_session() -> Result<tidb_session::Session, SqlError> {
+    let mut s = tidb_session::Session::new(
+        tidb_session::Dialect::MySQL,
+        Box::new(crate::router::newstack::ClusterGlobals::compiled_defaults()),
+    );
+    s.load_common_global_variables_if_needed()
+        .map_err(|e| crate::router::sql_error(&e))?;
+    Ok(s)
+}
+
 #[cfg(test)]
 mod tests {
     use tidb_session::{Dialect, Session};
 
     use super::*;
-    use crate::router::newstack::DefaultGlobals;
+    use crate::router::newstack::ClusterGlobals;
 
     /// A session with Go's default variables, as the off-mode PREPARE uses.
     fn defaults() -> Session {
-        let mut s = Session::new(Dialect::MySQL, Box::new(DefaultGlobals));
+        let mut s = Session::new(
+            Dialect::MySQL,
+            Box::new(ClusterGlobals::compiled_defaults()),
+        );
         s.load_common_global_variables_if_needed().unwrap();
         s
     }

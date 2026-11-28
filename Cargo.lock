@@ -2530,6 +2530,7 @@ dependencies = [
  "tidb-infoschema",
  "tidb-kv",
  "tidb-meta",
+ "tidb-metrics",
  "tidb-model",
  "tidb-mysql-protocol",
  "tidb-parser",
@@ -2629,6 +2630,7 @@ dependencies = [
  "tidb-sessiontxn",
  "tidb-sql",
  "tidb-store",
+ "tidb-systable",
  "tokio",
 ]
 

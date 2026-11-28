@@ -473,7 +473,7 @@ async fn load_mysql_table_infos(kv: &KvClient, ts: u64) -> Result<HashMap<String
     load_mysql_table_infos_filtered(kv, ts, LOADED_MYSQL_TABLES).await
 }
 
-async fn load_mysql_table_infos_filtered(
+pub(crate) async fn load_mysql_table_infos_filtered(
     kv: &KvClient,
     ts: u64,
     wanted: &[&str],
@@ -508,7 +508,7 @@ async fn load_mysql_table_infos_filtered(
 }
 
 /// Scans all record keys `t<table_id>_r...` of `table_id` at snapshot `ts`.
-async fn scan_table_records(
+pub(crate) async fn scan_table_records(
     kv: &KvClient,
     ts: u64,
     table_id: i64,

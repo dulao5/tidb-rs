@@ -47,6 +47,15 @@ pub trait GlobalVarAccessor: Send {
     // go-part: GlobalVarAccessor.SetTiDBTableValue (interface method)
     fn set_tidb_table_value(&mut self, name: &str, value: &str, comment: &str)
     -> Result<(), Error>;
+    /// `domain.GetDomain(s).GetSessionCache()`: a copy of the domain's session sysvar cache,
+    /// which a new session copies into its `systems` (`loadCommonGlobalVariablesIfNeeded`).
+    /// The Rust session has no domain handle, so the accessor that reads the domain's sysvar
+    /// cache hands it over; `None` (the default) when the accessor has no such cache, and
+    /// the session then builds the map from `get_global_sys_var` (tidb-session's stand-in).
+    // glue: Domain.GetSessionCache reached through the accessor (the session holds no domain, D06.5 spec §8.2)
+    fn session_cache(&self) -> Option<Result<HashMap<String, String>, Error>> {
+        None
+    }
 }
 
 /// The fields of `SessionVars` the D05.1 validation hooks use.

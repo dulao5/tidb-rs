@@ -133,7 +133,7 @@ Go v8.5.8 只用第一条被关闭语句的 `PlanCacheStmt` 计算 key，之后�
 10. 原型路径（§4.4）在 `off` 模式下不查表：Go 的 `IsASTCacheable`（`pkg/planner/core/plan_cacheable_checker.go` 的 `cacheableChecker.Enter` 对 `TableName` 调用 `checkTableCacheable`）会检查分区表（static 分区裁剪模式）、生成列（`Fix45798`）、临时表和"表不存在"，原型没有已移植的 InfoSchema，按 Go 对 nil schema 的做法跳过这些检查（`plan_cacheable_checker.go` 中 `checker.schema != nil` 的判断）。所以分区表（static 模式）、有生成列的表、临时表上由原型答复的预处理语句会少 Go 的那条 warning，引用不存在的表时原型在 PREPARE 就报错（原型准备语句时解析表名）。
 11. 原型路径没有优化时才产生的原因：Go 在 `generateNewPlan` / 优化器中（`pkg/planner/core/plan_cache.go`、`plan_cacheable_checker.go` 的 `isPlanCacheable` / `isPhysicalPlanCacheable`，以及 `expression` 中 "may be converted to INT"）发出的 `skip prepared plan-cache`（TableDual、`LIMIT 0`、整型转换、点查等），原型不会发出。ab 的容忍条目等负责人批准（#512）。
 12. `fallback` / `strict` 下没有可接受的 InfoSchema（没有 domain、schema 租约过期、版本与原型不一致）时，判断也不查表，同第 10 条。
-13. `off` 模式用 Go 的默认全局变量（`DefaultGlobals`），不读集群上的全局值：集群上把 `tidb_enable_prepared_plan_cache` 或 `tidb_opt_fix_control` 的全局值改掉时，原型的原因可能与 Go 不同（Go 读 `GlobalVarAccessor`，`pkg/session/session.go` 的 `loadCommonGlobalVariablesIfNeeded`）。`fallback` / `strict` 用新会话同步的全局值，没有这个差异。
+13. （#521 后缩小，D06.5 spec §8）`off` 模式现在也从 sysvar 缓存读集群的全局值（`ClusterGlobals`），原型会话在第一次 PREPARE 时取一次。只剩一种情况与 Go 不同：节点启动后缓存从未建立（读不到 `mysql.global_variables`）时，原型用 Go 的默认全局值（`ClusterGlobals::compiled_defaults`），进程内记一次 WARN；Go 在这种情况下不启动（`pkg/session/session.go` 第 3723 行）。集群上把 `tidb_enable_prepared_plan_cache` 或 `tidb_opt_fix_control` 的全局值改掉时，这期间原型的原因可能与 Go 不同。`fallback` / `strict` 的新会话在缓存建立前固定走原型，没有这个差异。
 14. 原型失败的语句不把错误加进 warning 列表：Go 的 SHOW WARNINGS 在失败语句之后列出这个错误（Error 级别），原型列表为空（原来就如此，本项没有改变）。
 
 ## 6. 边界桩（登记在 tracker `data/stubs.tsv`）

@@ -559,8 +559,12 @@ impl SessCtx {
     /// variables into a session that has not set them, running each variable's SetSession
     /// hook (so e.g. `tidb_enable_prepared_plan_cache` is on as in Go). The bootstrap
     /// branch (`sessionctx.Initing`) does not apply: the new session never bootstraps.
-    /// The session cache is [`session_cache`]'s stand-in for the domain's.
-    // go: session.loadCommonGlobalVariablesIfNeeded L2 (domain.GetSessionCache is a stand-in: the domain's sysvar cache is D06.5)
+    /// The session cache is the domain's (`GetSessionCache`), handed over by the session's
+    /// `GlobalVarAccessor` (the PoC router's reads the loader's sysvar cache of
+    /// `mysql.global_variables`, D06.5 spec §8); an accessor without one gets
+    /// [`session_cache`]'s stand-in. An error (the cache was never built) leaves the session
+    /// unloaded, and the router keeps it on the PoC.
+    // go: session.loadCommonGlobalVariablesIfNeeded L2 (domain.GetSessionCache through the accessor, D06.5 spec §8.2)
     #[allow(clippy::collapsible_if)] // Go's nested ifs
     fn load_common_global_variables_if_needed(&mut self) -> Result<(), Error> {
         let vars = &mut self.vars;
@@ -571,7 +575,10 @@ impl SessCtx {
         self.common_global_loaded = true;
 
         // Deep copy sessionvar cache
-        let session_cache = session_cache(vars)?;
+        let session_cache = match vars.global_vars_accessor.session_cache() {
+            Some(cache) => cache?,
+            None => session_cache(vars)?,
+        };
         for (var_name, var_val) in &session_cache {
             if !vars.get_system_var(var_name).1 {
                 if let Err(err) = vars.set_system_var_with_relaxed_validation(var_name, var_val) {
@@ -609,13 +616,13 @@ impl SessCtx {
     }
 }
 
-/// `domain.GetDomain(s).GetSessionCache()`: the session values of every variable that is
-/// not skipped at init, as the domain's `rebuildSysVarCache` builds them from
-/// `mysql.global_variables` (a variable without a row keeps its default). The domain's
-/// sysvar cache is D06.5; here a global variable's value comes from the session's
-/// `GlobalVarAccessor` (the PoC router's stand-in answers the compiled defaults, the PoC
-/// reads no `mysql.global_variables` either), and a session-only variable has its default.
-// glue: stand-in for Domain.GetSessionCache (the domain's sysvar cache, D06.5)
+/// `domain.GetDomain(s).GetSessionCache()` for an accessor that has no sysvar cache (the
+/// unit tests' accessors): the session values of every variable that is not skipped at
+/// init, as the domain's `rebuildSysVarCache` builds them from `mysql.global_variables` (a
+/// variable without a row keeps its default); a global variable's value comes from the
+/// session's `GlobalVarAccessor`, and a session-only variable has its default. The PoC
+/// router's accessor hands over the real cache ([`GlobalVarAccessor::session_cache`]).
+// glue: stand-in for Domain.GetSessionCache (accessors without the domain's sysvar cache, D06.5 spec §8.2)
 fn session_cache(vars: &SessionVars) -> Result<HashMap<String, String>, Error> {
     let mut cache = HashMap::new();
     for sv in tidb_sessionctx::variable::variable::get_sys_vars() {

@@ -54,8 +54,9 @@ fn set(vars: &mut SessionVars, diverged: &mut BTreeSet<String>, name: &str, valu
 }
 
 /// The text Go's `SET` would store for a literal value; `None` when the router cannot tell
-/// (an expression): the variable diverges.
-fn value_text(name: &str, v: &SetValue) -> Option<String> {
+/// (an expression), or when the global value of `SET x = DEFAULT` cannot be read: the
+/// variable diverges.
+fn value_text(vars: &mut SessionVars, name: &str, v: &SetValue) -> Option<String> {
     match v {
         SetValue::Literal(Literal::Int(i)) => Some(i.to_string()),
         SetValue::Literal(Literal::UInt(u)) => Some(u.to_string()),
@@ -63,10 +64,11 @@ fn value_text(name: &str, v: &SetValue) -> Option<String> {
         SetValue::Literal(Literal::Str(s)) | SetValue::Ident(s) => Some(s.clone()),
         // `SET character_set_results = NULL`: Go stores the empty string.
         SetValue::Literal(Literal::Null) if name == "character_set_results" => Some(String::new()),
-        // `SET x = DEFAULT`: the global value (here the compiled default).
-        SetValue::Default => {
-            tidb_sessionctx::variable::get_sys_var(name).map(|sv| sv.value.clone())
-        }
+        // `SET x = DEFAULT` of a session variable: the global value (Go
+        // `SetExecutor.getVarValue` with no sysVar: `GetGlobalSystemVar`), read from the
+        // cluster's `mysql.global_variables` through the new session's accessor (the
+        // loader's sysvar cache, D06.5 spec §8).
+        SetValue::Default => vars.get_global_system_var(name).ok(),
         _ => None,
     }
 }
@@ -116,7 +118,7 @@ pub(super) fn sync_set(
                 name,
                 global: false,
                 value,
-            } => match value_text(name, value) {
+            } => match value_text(vars, name, value) {
                 Some(v) => set(vars, diverged, name, &v),
                 None => {
                     diverged.insert(name.clone());

@@ -14,6 +14,8 @@
 //! - [`ServerInfo`]: the `/tidb/server/info/<ddl_id>` record.
 //! - [`Registry`]: the loaded schema, the health state machine and the in-flight statements.
 //! - [`SchemaSync`]: the etcd registration, reload loop, MDL reports and watchdog.
+//! - [`SysVarSync`]: the sysvar cache of `mysql.global_variables` the new stack's sessions
+//!   read their global values from, kept in step like Go's domain (D06.5 spec §8).
 
 #![forbid(unsafe_code)]
 
@@ -25,6 +27,7 @@ mod schema_validator;
 pub mod serverinfo;
 mod sync;
 pub mod systable_io;
+pub mod sysvar_loader;
 
 pub use crate::privilege_loader::PrivilegeSync;
 pub use crate::registry::Admission;
@@ -40,6 +43,7 @@ pub use crate::schema_validator::SchemaCheckRetry;
 pub use crate::serverinfo::ServerInfo;
 pub use crate::sync::SchemaSync;
 pub use crate::sync::SyncConfig;
+pub use crate::sysvar_loader::SysVarSync;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
