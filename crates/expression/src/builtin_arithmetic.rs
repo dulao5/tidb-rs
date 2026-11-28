@@ -779,7 +779,16 @@ pub fn minus_decimal(
 }
 
 /// returns true when overflowed
-// go: builtinArithmeticMinusIntSig.overflowCheck L1
+///
+/// Divergence ruling R37 (#499, owner decision 2026-11-28): for two signed operands Go v8.5.8
+/// tests `a > 0 && b < 0`, so `0 - (-9223372036854775808)` wraps to `-9223372036854775808`
+/// with no error. tidb-rs tests `a >= 0`, so that difference, 2^63, reaches the
+/// `res_unsigned` check below and is reported as `BIGINT value is out of range` (1690), as
+/// MySQL does and as TiKV does when the expression is pushed down (`IntIntMinus` is
+/// `checked_sub`). Every other input gives Go's result: with `a = 0` and `b > i64::MIN`, `-b`
+/// fits in a BIGINT. The row driver, the vector driver and constant folding all evaluate
+/// through this function.
+// go: builtinArithmeticMinusIntSig.overflowCheck L2 (a >= 0 instead of Go's a > 0 for two signed operands: 0 - MinInt64 overflows, #499 / ruling R37)
 fn minus_overflow_check(
     is_lhs_unsigned: bool,
     is_rhs_unsigned: bool,
@@ -813,7 +822,8 @@ fn minus_overflow_check(
         if (a.wrapping_sub(i64::MIN) as u64) < ub {
             return true;
         }
-    } else if a > 0 && b < 0 {
+    } else if a >= 0 && b < 0 {
+        // Go: `a > 0` (ruling R37, see the doc comment).
         res_unsigned = true;
     } else if a < 0 && b > 0 && res >= 0 {
         return true;
@@ -1424,5 +1434,106 @@ mod tests {
             check(a, i64::MAX.wrapping_sub(a).wrapping_add(b % 4));
             check(a, a.wrapping_neg().wrapping_add(b % 4));
         }
+    }
+
+    /// Go v8.5.8's `builtinArithmeticMinusIntSig.overflowCheck` as written (with `a > 0` for
+    /// two signed operands), transcribed comparison by comparison.
+    fn go_minus_overflow_check(lu: bool, ru: bool, signed: bool, a: i64, b: i64) -> bool {
+        let res = a.wrapping_sub(b);
+        let (ua, ub) = (a as u64, b as u64);
+        let mut res_unsigned = false;
+        if lu {
+            if ru {
+                if ua < ub {
+                    if res >= 0 {
+                        return true;
+                    }
+                } else {
+                    res_unsigned = true;
+                }
+            } else if b >= 0 {
+                if ua > ub {
+                    res_unsigned = true;
+                }
+            } else {
+                if test_if_sum_overflows_ull(ua, b.wrapping_neg() as u64) {
+                    return true;
+                }
+                res_unsigned = true;
+            }
+        } else if ru {
+            if (a.wrapping_sub(i64::MIN) as u64) < ub {
+                return true;
+            }
+        } else if a > 0 && b < 0 {
+            res_unsigned = true;
+        } else if a < 0 && b > 0 && res >= 0 {
+            return true;
+        }
+        (!signed && !res_unsigned && res < 0)
+            || (signed && res_unsigned && (res as u64) > i64::MAX as u64)
+    }
+
+    /// Ruling R37 (#499): the overflow check differs from Go's only on `0 - i64::MIN` with two
+    /// signed operands, and for two signed operands it is exactly "the true difference is
+    /// outside BIGINT" (TiKV's `checked_sub`).
+    #[test]
+    fn minus_int_overflow_differs_from_go_only_on_zero_minus_min() {
+        let mut edges = vec![
+            0,
+            1,
+            -1,
+            2,
+            -2,
+            i64::MAX,
+            i64::MAX - 1,
+            i64::MIN,
+            i64::MIN + 1,
+            u64::MAX as i64,
+            (1i64 << 62),
+            -(1i64 << 62),
+        ];
+        let extra: Vec<i64> = edges
+            .iter()
+            .flat_map(|&x| [x.wrapping_add(3), x.wrapping_sub(3)])
+            .collect();
+        edges.extend(extra);
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            edges.push(x as i64);
+        }
+        let small = &edges[..36];
+        let mut differ = Vec::new();
+        for (i, &a) in edges.iter().enumerate() {
+            let bs = if i < small.len() { &edges[..] } else { small };
+            for &b in bs.iter().chain([a, a.wrapping_add(i64::MIN)].iter()) {
+                for (lu, ru, force) in [
+                    (false, false, false),
+                    (false, true, false),
+                    (true, false, false),
+                    (true, true, false),
+                    (false, true, true),
+                    (true, false, true),
+                    (true, true, true),
+                ] {
+                    let signed = force || (!lu && !ru);
+                    let got = minus_overflow_check(lu, ru, signed, a, b);
+                    if got != go_minus_overflow_check(lu, ru, signed, a, b) {
+                        differ.push((lu, ru, signed, a, b));
+                    }
+                    if !lu && !ru {
+                        let exact = !(i128::from(i64::MIN)..=i128::from(i64::MAX))
+                            .contains(&(i128::from(a) - i128::from(b)));
+                        assert_eq!(got, exact, "signed {a} - {b}");
+                    }
+                }
+            }
+        }
+        differ.sort();
+        differ.dedup();
+        assert_eq!(differ, vec![(false, false, true, 0, i64::MIN)]);
     }
 }

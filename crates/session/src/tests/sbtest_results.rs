@@ -1623,3 +1623,121 @@ fn prepared_unsigned_parameter_selected_as_a_column() {
         s.clean_closed_prepared_stmts();
     }
 }
+
+/// The error a statement returns while it starts or while its rows are read (an expression
+/// error in a projection comes from `next`); the result set is closed after it, as the
+/// connection does.
+fn exec_error(s: &mut Session, started: Result<Option<crate::ExecStmtResult>, Error>) -> Error {
+    let mut rs = match started {
+        Err(e) => return e,
+        Ok(rs) => rs.expect("a result set"),
+    };
+    let mut chk = rs.new_chunk().unwrap();
+    let err = loop {
+        match block_on(rs.next(s, &mut chk)) {
+            Err(e) => break e,
+            Ok(()) if chk.num_rows() == 0 => panic!("the statement returned no error"),
+            Ok(()) => {}
+        }
+    };
+    block_on(rs.close(s)).unwrap();
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+    err
+}
+
+/// Ruling R37 (#499, owner decision 2026-11-28): signed BIGINT `0 - (-9223372036854775808)`
+/// is `ERROR 1690 (22003) BIGINT value is out of range in '(0 - -9223372036854775808)'`, as in
+/// MySQL and TiKV, where Go v8.5.8 wraps it to `-9223372036854775808` (its overflow check
+/// tests `a > 0`, not `a >= 0`, `builtinArithmeticMinusIntSig.overflowCheck`). Pinned for an
+/// operand computed from a column (the projection's row and vector drivers), for constants
+/// (constant folding fails, so the expression stays and fails when it runs, as Go's
+/// `foldConstant` keeps an expression whose evaluation fails) and for prepared parameters
+/// (with the plan cache on: a cached plan fails the same way). The neighbouring values, one
+/// away from the limit, still give Go's result.
+#[test]
+fn signed_zero_minus_min_bigint_is_out_of_range() {
+    let _serial = PREPARED_COUNT.lock();
+    let (_store, mut s) = sysbench_cached_session();
+    let out_of_range = |what: &str, e: &Error, expr: &str| {
+        assert_eq!(e.code(), 1690, "{what}: {e}");
+        assert_eq!(
+            String::from_utf8_lossy(&e.error()),
+            format!("[types:1690]BIGINT value is out of range in '{expr}'"),
+            "{what}"
+        );
+    };
+    let max = "9223372036854775807";
+
+    // An operand computed from a column; both drivers of the projection.
+    for vectorized in [true, false] {
+        s.vars_mut().enable_vectorized_expression = vectorized;
+        for (sql, expr) in [
+            (
+                "SELECT 0 - (-9223372036854775807 - id) FROM sbtest1 WHERE id = 1",
+                "(0 - minus(-9223372036854775807, test.sbtest1.id))",
+            ),
+            (
+                "SELECT (id - 1) - (-9223372036854775808) FROM sbtest1 WHERE id = 1",
+                "(minus(test.sbtest1.id, 1) - -9223372036854775808)",
+            ),
+        ] {
+            let what = format!("{sql} (vectorized {vectorized})");
+            let started = block_on(s.execute_stmt(parse(sql), sql));
+            let e = exec_error(&mut s, started);
+            out_of_range(&what, &e, expr);
+        }
+        for sql in [
+            "SELECT 0 - (-9223372036854775806 - id) FROM sbtest1 WHERE id = 1",
+            "SELECT (id - 1) - (-9223372036854775807) FROM sbtest1 WHERE id = 1",
+        ] {
+            let (_, rows) = run_text(&mut s, sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+            assert_eq!(rows, texts(&[&[max]]), "{sql} (vectorized {vectorized})");
+        }
+    }
+    s.vars_mut().enable_vectorized_expression = true;
+
+    // Constants.
+    for sql in [
+        "SELECT 0 - (-9223372036854775808)",
+        "SELECT 0 - CAST(-9223372036854775808 AS SIGNED)",
+    ] {
+        let started = block_on(s.execute_stmt(parse(sql), sql));
+        let e = exec_error(&mut s, started);
+        out_of_range(sql, &e, "(0 - -9223372036854775808)");
+    }
+    let sql = "SELECT 0 - (-9223372036854775807)";
+    let (_, rows) = run_text(&mut s, sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+    assert_eq!(rows, texts(&[&[max]]), "{sql}");
+
+    // Prepared parameters; the plan cache is on, so the later EXECUTEs reuse the plan.
+    let int = new_int_datum;
+    for (sql, err_params, ok_params) in [
+        (
+            "SELECT 0 - ? FROM sbtest1 WHERE id = ?",
+            vec![int(i64::MIN), int(1)],
+            vec![int(-i64::MAX), int(1)],
+        ),
+        (
+            "SELECT ? - ?",
+            vec![int(0), int(i64::MIN)],
+            vec![int(0), int(-i64::MAX)],
+        ),
+    ] {
+        let info = block_on(s.prepare_stmt(sql)).unwrap();
+        for params in [err_params.clone(), ok_params, err_params] {
+            let what = format!("EXECUTE {sql} {params:?}");
+            let fails = params.iter().any(|d| d.get_int64() == i64::MIN);
+            if fails {
+                let started = block_on(s.execute_prepared_stmt(info.stmt_id, params));
+                let e = exec_error(&mut s, started);
+                out_of_range(&what, &e, "(0 - -9223372036854775808)");
+            } else {
+                let (_, rows) = run_prepared(&mut s, info.stmt_id, params)
+                    .unwrap_or_else(|e| panic!("{what}: {e}"));
+                assert_eq!(rows, texts(&[&[max]]), "{what}");
+            }
+        }
+        s.drop_prepared_stmt(info.stmt_id).unwrap();
+        s.clean_closed_prepared_stmts();
+    }
+}

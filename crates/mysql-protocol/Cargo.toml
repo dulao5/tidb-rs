@@ -13,6 +13,7 @@ futures = { workspace = true }
 getrandom = "0.3"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 sha1 = "0.10"
+sha2 = "0.10"
 # The SQLSTATE of an error code (Go's `mysql.MySQLState`, pkg/parser/mysql/state.go).
 tidb-base = { workspace = true }
 tidb-metrics = { workspace = true }

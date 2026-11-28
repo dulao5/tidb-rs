@@ -28,7 +28,7 @@ mod server;
 pub mod tls;
 pub mod value;
 
-pub use auth::{AccountAuth, Credential};
+pub use auth::{AccountAuth, CachingSha2Hash, Credential};
 pub use conn::{
     QUERY_LOG_MAX_LEN, current_query_log_max_len, err_str_for_log, format_sql_for_conn_log,
     format_stmt_execute_sql_for_log,

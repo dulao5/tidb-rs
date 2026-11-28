@@ -99,6 +99,7 @@ pub mod command {
 /// Packet header bytes.
 pub mod header {
     pub const OK: u8 = 0x00;
+    pub const AUTH_MORE_DATA: u8 = 0x01;
     pub const EOF: u8 = 0xfe;
     pub const ERR: u8 = 0xff;
     pub const AUTH_SWITCH_REQUEST: u8 = 0xfe;
@@ -141,10 +142,13 @@ pub mod cursor_type {
     pub const SCROLLABLE: u8 = 4;
 }
 
-/// Authentication plugin names.
+/// Authentication plugin names and sub-protocol status bytes.
 pub mod auth_plugin {
     pub const MYSQL_NATIVE_PASSWORD: &str = "mysql_native_password";
     pub const CACHING_SHA2_PASSWORD: &str = "caching_sha2_password";
+    /// `caching_sha2_password` AuthMoreData status byte requesting full authentication
+    /// (plaintext over TLS or RSA-encrypted password; Go `mysql.CachingSha2PasswordPerformFullAuthentication`).
+    pub const CACHING_SHA2_PERFORM_FULL_AUTH: u8 = 0x04;
 }
 
 /// Largest payload of a single wire packet; longer payloads are split.

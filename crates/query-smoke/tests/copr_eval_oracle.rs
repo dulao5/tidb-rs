@@ -153,7 +153,6 @@ const KNOWN_MISMATCHES: &[(&str, &str, &str)] = &[
     ("LogicalAnd", "warning", "#493"),
     ("LogicalOr", "warning", "#493"),
     ("LogicalXor", "warning", "#493"),
-    ("MinusInt", "error", "#499"),
     ("MinusReal", "warning", "#493"),
     ("ModIntSignedSigned", "warning", "#493"),
     ("ModIntSignedUnsigned", "warning", "#493"),

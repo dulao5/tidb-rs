@@ -533,3 +533,19 @@ rationale = "Owner decision (2026-11-28, option B): closes a column-privilege by
 approver = "zhigang-du"
 approved = "2026-11-28"
 reopen = "Baseline upgraded to a Go TiDB version that checks column privileges in the LATERAL ON clause, a v8.5.8 reproduction shows that Go already rejects these statements, or owner changes the decision; wire test (and layer/unit/stmt if hit by ab) once the LATERAL join builder (part C of D09.3) is implemented."
+
+# ---- D08.5 arithmetic: signed BIGINT subtraction overflow (owner decision 2026-11-28, #499; docs/compatibility.md "Deliberate deviations") ----
+
+[[ruling]]
+id = "R37"
+name = "minus-int-zero-minus-min-int64-overflows"
+class = "divergence"
+plane = "error"
+layer = "none"
+test = "crates/session/src/tests/sbtest_results.rs::signed_zero_minus_min_bigint_is_out_of_range"
+source = "Constitution Article 1 item 2 (wrong result) and Article 9.1 (owner decision 2026-11-28, relayed by the maintainer on #499); specs/D08.5-arith/spec.md §4 item 12; docs/compatibility.md Deliberate deviations; #499"
+evidence = "In Go TiDB v8.5.8, builtinArithmeticMinusIntSig.overflowCheck (pkg/expression/builtin_arithmetic.go:498) tests a > 0 && b < 0 for two signed operands, so with a = 0 neither branch runs and 0 - (-9223372036854775808) wraps to -9223372036854775808 with no error; the row version, the vector version (builtin_arithmetic_vec.go:399) and constant folding share it. Verified on v8.5.8 by the maintainer: SELECT 0 - CAST(-9223372036854775808 AS SIGNED) returns -9223372036854775808. MySQL and TiKV (IntIntMinus, checked_sub; found by the coprocessor evaluation oracle, crates/query-smoke/tests/copr_eval_oracle.rs) return ERROR 1690 (22003) BIGINT value is out of range in '(0 - -9223372036854775808)'. tidb-rs tests a >= 0 and returns that error for column, constant and prepared operands; every other input gives Go's result."
+rationale = "Owner decision (2026-11-28): fix it. The true difference, 9223372036854775808, does not fit in a BIGINT, so Go returns a wrong value; the error matches MySQL and also what TiKV returns when the expression is pushed down, so the result no longer depends on where the expression runs."
+approver = "zhigang-du"
+approved = "2026-11-28"
+reopen = "Baseline upgraded to a Go TiDB version that reports this overflow, or owner changes the decision; set layer/unit/stmt if a test layer starts running 0 - (-9223372036854775808) on signed operands."

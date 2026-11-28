@@ -113,14 +113,15 @@ Go 的 `builtinLogic{And,Or}Sig.vecEvalInt` 自己求两个参数：先求 `args
 1. 第 3.4 节：复现 Go 读到的修改后的类型，而不是共享节点的原地修改（M-EXPR）。
 2. `RpnProgram` 的常量填充（`fill_constant`，D08.1）在 0 行时不再求值常量，同 Go `genVecFromConstExpr`（之前会在 0 行输入上报常量的错误）；本批的 govec 记录发现。
 3. 两个平台的记录有 5 条 `arbuild` 不同：DOUBLE 的无效运算（Inf/Inf、Inf-Inf、0*Inf）产生硬件默认 NaN，x86 是负号的 `0xFFF8000000000000`，ARM 是 `0x7FF8000000000000`。Go 和 Rust 都用硬件运算，各平台回放自己的文件（tracker `targetDiffs`）。同类问题见 #27。
-4. 没有面向用户的差异，`docs/compatibility.md` 不变。
+4. 第 1 批移植时没有面向用户的差异；之后的面向用户的差异见第 12 项（`docs/compatibility.md` 已登记）。
 5. （第 2 批）`unaryMinusFunctionClass.getFunction` 在构建前取 `args[0].GetType()`：一元负号不会把 DECIMAL 参数包成 REAL，所以 `PropagateType` 改不到它，直接用构建前的类型（§3.4 的情况不会发生）。
 6. （第 2 批）`isTrueOrFalseFunctionClass` 的 `unexpected types.EvalType %v` 与 `unaryNotFunctionClass` 的 `%s is not supported for unary not operator` 是普通错误（`Error::plain`），文字用 `EvalType.String()`，同 Go。
 7. （第 4 批）RAND 的 `mysqlRng` 放在 `SigExtra::Rand`（共享的 `Arc<Mutex<MysqlRng>>`），不是 D08.1 spec §3.5 原来计划的 `EvalState`。原因：Go 中这个生成器是共享的——`RAND()` 用的就是会话的 `ctx.Rng()`（同一会话的各个 `RAND()`、各条语句接着同一个序列往下取），`Clone` 也共用它。放进每个 worker 一份的 `EvalState` 会让克隆和原表达式各取各的序列，与 Go 不同。代价是表达式里有一处内部可变状态（互斥锁）；govec `mathclone` 覆盖克隆后交替求值（反证：克隆时复制一个新的生成器，199 条不一致）。D08.1 spec §3.5 已同步修改。
 8. （第 4 批）x86_64 上 Go 的 `Exp` 在运行时检查 CPU 是否有 AVX 和 FMA，选不同的路径，结果的最后一位可能不同。Rust 用 `is_x86_feature_detected!` 做同样的判断，所以结果与运行在同一台机器上的 Go 相同。amd64 向量由 CI（GitHub 的 x86 runner，有 AVX2/FMA）生成，所以只覆盖 FMA 路径；非 FMA 路径是逐条移植的，没有向量覆盖。
 9. （第 4 批）arm64 上 gc 融合的乘加有几处在数学上不可观察：`Exp` 中 `x - k*Ln2Hi`（`Ln2Hi` 的低 21 位为 0，`|k|` 不超过 1100，乘积是精确的）、`Pow` 的平方循环中 `x1*x1` 再加倍（加倍是精确的，两种写法总是相等），改回分开计算后向量没有不一致。arm64 `Exp` 的多项式（`exp_arm64.s` 的 FMADDD 链）改回分开计算后，6,000 条 `gomath` 加种子 1–4 也没有出现不一致（多项式项远小于结果，舍入差异被吸收），这一处只靠逐条对照汇编。这些位置仍按 objdump 写成融合形式；能观察到的位置都有反证：`Log` 的整段融合 7 条、`Tan` 76 条、`Exp` 的次正规数缩放 8 条。
 10. （第 4 批）`Atan(NaN)`：Go 经 `-satan(-x)` 两次取反，硬件传播 NaN 操作数，结果是参数本身（quiet）。Rust 不规定运算产生的 NaN 的符号，优化构建（`release-checked`）返回了取反的 NaN（arm64 CI 8 条不一致），所以显式返回 quiet 后的 x。
-11. 没有面向用户的偏离：§3.2 中的逐行 / 向量差异是 Go v8.5.8 自己的行为，tidb-rs 各自跟随，`docs/compatibility.md` 不变。
+11. 除第 12 项外没有面向用户的偏离：§3.2 中的逐行 / 向量差异是 Go v8.5.8 自己的行为，tidb-rs 各自跟随。
+12. **有符号 BIGINT 减法 `0 - (-9223372036854775808)` 报溢出（裁定 R37，#499，负责人 2026-11-28 决定修正；宪章第一条 2：结果错误）。** Go v8.5.8 的 `builtinArithmeticMinusIntSig.overflowCheck`（`pkg/expression/builtin_arithmetic.go:498`）对两个有符号参数只判断 `a > 0 && b < 0` 和 `a < 0 && b > 0`；被减数为 0、减数为 `-9223372036854775808` 时两支都不进，结果回绕成 `-9223372036854775808`，不报错（维护者已在 v8.5.8 上验证：`SELECT 0 - CAST(-9223372036854775808 AS SIGNED)` 返回 `-9223372036854775808`）。逐行版（`evalInt`）、向量版（`builtin_arithmetic_vec.go:399` 的 `vecEvalInt`）和常量折叠都调用这一个检查。tidb-rs 改为判断 `a >= 0 && b < 0`（`builtin_arithmetic.rs` 的 `minus_overflow_check`，标注改为 L2），真实的差 9223372036854775808 进入下面的 `resUnsigned` 检查，报 `ERROR 1690 (22003) BIGINT value is out of range in '(0 - -9223372036854775808)'`，与 MySQL 相同，也与下推到 TiKV 时 TiKV（`IntIntMinus`，`checked_sub`）的结果相同。其余输入的结果与 Go 相同：单元测试 `minus_int_overflow_differs_from_go_only_on_zero_minus_min` 对照 Go 原来的写法，只在这一个输入上不同，并且两个有符号参数时与"真实差超出 BIGINT"完全一致。Rust 的逐行驱动、向量驱动和常量折叠共用这个函数，所以三处同时修正；常量折叠出错时照 Go 保留原表达式，执行时报错。会话测试 `crates/session/src/tests/sbtest_results.rs::signed_zero_minus_min_bigint_is_out_of_range` 覆盖列（向量化开和关）、常量和预处理参数（含 plan cache 命中）三种形式。协处理器求值对照（`crates/query-smoke/tests/copr_eval_oracle.rs`）中 `MinusInt` 的已知不一致（#499）随之删除，`docs/testing/rulings_pushdown.tsv` 的 R37 行按 `tikv-oracle` 登记。govec `cast` 领域的记录不变（见 PR 正文）。
 
 ## 移植检查表（Lucky 评审 #100）
 
