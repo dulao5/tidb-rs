@@ -44,7 +44,6 @@ use tidb_types::datum::{
     Datum, KindInt64, KindMysqlEnum, KindMysqlJSON, KindMysqlSet, KindString, KindUint64,
 };
 use tokio::sync::Notify;
-use tracing::{debug, info, warn};
 
 use crate::{Error, Result, keys};
 
@@ -98,7 +97,7 @@ impl PrivilegeSync {
             PRIVILEGE_REFRESH_TICK_NO_ETCD
         };
         tokio::spawn(inner.clone().periodic_refresh_loop(tick));
-        info!("cluster privilege cache loaded from mysql.*");
+        tidb_base::log_info!("cluster privilege cache loaded from mysql.*");
         Ok(Self { inner })
     }
 
@@ -140,7 +139,11 @@ impl Inner {
                         return;
                     }
                     if let Err(e) = self.reload().await {
-                        warn!(error = %e, "periodic privilege reload failed; keeping previous snapshot");
+                        let err_str = e.to_string();
+                        tidb_base::log_warn!(
+                            "periodic privilege reload failed; keeping previous snapshot",
+                            "error" => err_str.as_str(),
+                        );
                     }
                 }
                 _ = self.reset_tick.notified() => {
@@ -162,10 +165,11 @@ impl Inner {
             {
                 Ok(()) => return,
                 Err(e) => {
-                    warn!(
-                        error = %e,
-                        retry_in_secs = backoff.as_secs(),
-                        "privilege etcd watch failed; retrying with backoff"
+                    let err_str = e.to_string();
+                    tidb_base::log_warn!(
+                        "privilege etcd watch failed; retrying with backoff",
+                        "error" => err_str.as_str(),
+                        "retry_in_secs" => backoff.as_secs(),
                     );
                 }
             }
@@ -210,7 +214,11 @@ impl Inner {
         // committed between startup (or a prior watch error/compaction) and `revision + 1` is
         // never missed.
         if let Err(e) = self.reload().await {
-            warn!(error = %e, "privilege reload on watch connect failed; keeping previous snapshot");
+            let err_str = e.to_string();
+            tidb_base::log_warn!(
+                "privilege reload on watch connect failed; keeping previous snapshot",
+                "error" => err_str.as_str(),
+            );
         } else {
             *backoff = Duration::from_secs(1);
             self.reset_tick.notify_one();
@@ -257,14 +265,15 @@ impl Inner {
                 }
             }
 
-            debug!(
-                events = batched,
-                "received /tidb/privilege notification; reloading privilege cache"
+            tidb_base::log_debug!(
+                "received /tidb/privilege notification; reloading privilege cache",
+                "events" => batched as u64,
             );
             if let Err(e) = self.reload().await {
-                warn!(
-                    error = %e,
-                    "privilege reload on etcd notification failed; keeping previous snapshot"
+                let err_str = e.to_string();
+                tidb_base::log_warn!(
+                    "privilege reload on etcd notification failed; keeping previous snapshot",
+                    "error" => err_str.as_str(),
                 );
             } else {
                 self.reset_tick.notify_one();
@@ -306,9 +315,9 @@ pub async fn load_privileges_from_kv(kv: &KvClient) -> Result<MySQLPrivilege> {
                 decoder(tbl, &rows, &mut mp)?;
             }
             None => {
-                warn!(
-                    table = name,
-                    "optional mysql privilege table not found in metadata"
+                tidb_base::log_warn!(
+                    "optional mysql privilege table not found in metadata",
+                    "table" => name,
                 );
             }
         }
@@ -588,7 +597,10 @@ pub fn decode_set_to_privilege(s: &str) -> PrivilegeType {
     for elem in s.split(',') {
         let (priv_, ok) = new_priv_from_set_enum(elem);
         if !ok {
-            warn!(privilege = elem, "unsupported privilege in SET column");
+            tidb_base::log_warn!(
+                "unsupported privilege in SET column",
+                "privilege" => elem,
+            );
             continue;
         }
         ret = PrivilegeType(ret.0 | priv_.0);
@@ -696,9 +708,9 @@ pub fn decode_mysql_global_variables(
             match trimmed.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => {
-                    warn!(
-                        value = %trimmed,
-                        "unparseable default_password_lifetime in mysql.global_variables; failing closed"
+                    tidb_base::log_warn!(
+                        "unparseable default_password_lifetime in mysql.global_variables; failing closed",
+                        "value" => trimmed,
                     );
                     u64::MAX
                 }
@@ -749,10 +761,10 @@ pub fn decode_mysql_global_priv(
                     (req, false)
                 }
                 _ => {
-                    warn!(
-                        user = %user,
-                        host = %host,
-                        "mysql.global_priv JSON is broken; forbidding login until fixed"
+                    tidb_base::log_warn!(
+                        "mysql.global_priv JSON is broken; forbidding login until fixed",
+                        "user" => user.as_str(),
+                        "host" => host.as_str(),
                     );
                     (true, true)
                 }

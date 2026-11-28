@@ -63,7 +63,7 @@ Everything that is specific to tidb-rs lives outside this directory:
   |---|---|
   | `tikv_util` | A small subset of TiKV's crate. These files are copied verbatim from `components/tikv_util/src` and refreshed by the sync script: `buffer_vec.rs`, `codec/{bytes,number}.rs`, `log.rs`, `macros.rs`. `codec/mod.rs` is upstream minus `stream_event`. `lib.rs` (`escape`, `time`, `deadline`) is hand-written. Its unit tests are disabled, because they need TiKV dev-dependencies and nightly. |
   | `tikv_alloc` | An empty crate. The global allocator is chosen by the binary. |
-  | `log_wrappers` | Hex `Value` and `hex_encode_upper` only. There is no redaction switch. |
+  | `log_wrappers` | Hex `Value` and `hex_encode_upper` with a log-only redaction provider hook (`set_redact_provider`, wired to `tidb_redact_log` at server startup). `slog::Value` redacts `ON` as `?` and `MARKER` as `‹HEX›`, while `Display`/`Debug` and `hex_encode_upper` remain raw so client-visible error texts and SQL `HEX()` are unchanged. |
   | `crypto` | `rand::rand_bytes` / `rand_u64` on `rand::rngs::OsRng`. TiKV uses OpenSSL RAND here. |
   | `file_system` | `calc_crc32_bytes` only. |
   | `api_version` | `KvFormat::parse_keyspace` and `ApiV1` only. Needed only for dependency resolution and the `coprocessor` features. |

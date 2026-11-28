@@ -10,7 +10,6 @@ publish.workspace = true
 [dependencies]
 parking_lot = "0.12"
 futures = { workspace = true }
-log = "0.4"
 tidb-distsql = { workspace = true }
 poc-domain = { workspace = true }
 poc-executor = { workspace = true }

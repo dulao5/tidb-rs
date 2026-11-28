@@ -174,8 +174,9 @@ tidb-server = { path = "crates/server" }
 # branch tidb-rs/perf-point-get, specs/VS1-vertical-slice/perf-point-select.md); TiKV requests over
 # BatchCommands streams as client-go sends them, TiKV stores only (client-rust#26, merged,
 # specs/D07.1-store/batch-commands.md); `CopRpcContext.addr` populated from resolved store
-# address (client-rust#27, merged, #418).
-tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "5cbc0d7fa3dece01002730d02e4ac3b3d13ab9c0", default-features = false, features = ["client-go-metrics"] }
+# address (client-rust#27, merged, #418); structured logging parity with client-go and quiet
+# `TransactionClient::current_timestamp_async` (client-rust#28, merged, #460).
+tikv-client = { git = "https://github.com/dulao5/client-rust.git", rev = "e210ec757496b23625787a3093b7d7ddec0917d0", default-features = false, features = ["client-go-metrics"] }
 # External crates.
 async-trait = "0.1"
 bytes = "1.11"

@@ -151,6 +151,14 @@ impl PdOracle {
         self.store.current_timestamp(txn_scope).await
     }
 
+    /// `GetTimestampAsync(ctx, &oracle.Option{TxnScope})`: an async TSO from PD without emitting
+    /// the synchronous `"get timestamp too slow"` warning (matching client-go
+    /// `pdOracle.GetTimestampAsync`, where slow-TSO warnings are emitted only by `GetTimestamp`).
+    // go-l3: ADR-0008 client-go oracle/oracles pdOracle.GetTimestampAsync
+    pub async fn get_timestamp_async(&self, _txn_scope: &str) -> Result<u64, TiKVError> {
+        Ok(self.store.client.current_timestamp_async().await?.version())
+    }
+
     /// `GetLowResolutionTimestamp`: client-go keeps the last TSO, refreshed in the
     /// background every `tidb_low_resolution_tso_update_interval`; client-rust has no such
     /// cache, so a read with `tidb_low_resolution_tso = ON` cannot get Go's timestamp. The

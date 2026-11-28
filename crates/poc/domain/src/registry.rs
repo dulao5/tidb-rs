@@ -14,8 +14,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use tidb_meta::InfoSchema;
-use tracing::info;
-use tracing::warn;
 
 use crate::schema_validator::CheckResult;
 use crate::schema_validator::SchemaCheckError;
@@ -464,15 +462,15 @@ impl Registry {
             match paused {
                 Some(reason) => {
                     self.count(|s| s.new_stack_pauses += 1);
-                    warn!(
-                        reason,
-                        loaded_version = loaded,
-                        "schema lease is not admissible, statements go to the PoC instead of the new stack"
+                    tidb_base::log_warn!(
+                        "schema lease is not admissible, statements go to the PoC instead of the new stack",
+                        "reason" => reason,
+                        "loaded_version" => loaded,
                     );
                 }
-                None => info!(
-                    loaded_version = loaded,
-                    "schema lease is admissible again, statements go to the new stack"
+                None => tidb_base::log_info!(
+                    "schema lease is admissible again, statements go to the new stack",
+                    "loaded_version" => loaded,
                 ),
             }
         }

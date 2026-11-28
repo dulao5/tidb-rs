@@ -28,7 +28,6 @@ use tidb_meta::SchemaCache;
 use tidb_mysql_protocol::constants::auth_plugin;
 use tidb_mysql_protocol::tls::{self, TlsConfig};
 use tidb_mysql_protocol::{Credential, Server, ServerConfig};
-use tracing::{error, info, warn};
 
 // Process-wide allocator: jemalloc (A1 / P0 decision D7), the same one the benchmarks use.
 #[global_allocator]
@@ -306,6 +305,11 @@ fn main() {
         eprintln!("init logger failed: {e}");
         std::process::exit(1);
     }
+    log_wrappers::set_redact_provider(|| match tidb_base::errors::redact_log_enabled_load() {
+        tidb_base::errors::RedactLogEnable => log_wrappers::RedactMode::On,
+        tidb_base::errors::RedactLogMarker => log_wrappers::RedactMode::Marker,
+        _ => log_wrappers::RedactMode::Off,
+    });
     tidb_log::print_tidb_info(&tidb_cfg);
 
     let effective_host = tidb_cfg.host.clone();
@@ -320,7 +324,13 @@ fn main() {
     let addr: SocketAddr = match format!("{effective_host}:{effective_port}").parse() {
         Ok(a) => a,
         Err(e) => {
-            error!(host = %effective_host, port = effective_port, error = %e, "invalid listen address");
+            let err_str = e.to_string();
+            tidb_base::log_error!(
+                "invalid listen address",
+                "host" => effective_host.as_str(),
+                "port" => u64::from(effective_port),
+                "error" => err_str.as_str(),
+            );
             let _ = tidb_log::sync();
             std::process::exit(2);
         }
@@ -328,13 +338,13 @@ fn main() {
     let new_stack = match new_stack_mode(&args.new_stack) {
         Ok(m) => m,
         Err(e) => {
-            error!(error = %e, "invalid TIDB_RS_NEW_STACK");
+            tidb_base::log_error!("invalid TIDB_RS_NEW_STACK", "error" => e.as_str());
             let _ = tidb_log::sync();
             std::process::exit(2);
         }
     };
     if let Err(e) = poc_kv::point_get_store_driver_from_env() {
-        error!(error = %e, "invalid TIDB_RS_POINT_GET");
+        tidb_base::log_error!("invalid TIDB_RS_POINT_GET", "error" => e.as_str());
         let _ = tidb_log::sync();
         std::process::exit(2);
     }
@@ -343,7 +353,8 @@ fn main() {
         Err(e) => {
             // Like TiDB: invalid configured certificates halt startup rather than silently
             // downgrading connections.
-            error!(error = %e, "failed to set up TLS");
+            let err_str = e.to_string();
+            tidb_base::log_error!("failed to set up TLS", "error" => err_str.as_str());
             let _ = tidb_log::sync();
             std::process::exit(2);
         }
@@ -371,7 +382,11 @@ fn main() {
     }) {
         Ok(rt) => rt,
         Err(e) => {
-            error!(error = %e, "failed to start the async runtime");
+            let err_str = e.to_string();
+            tidb_base::log_error!(
+                "failed to start the async runtime",
+                "error" => err_str.as_str(),
+            );
             let _ = tidb_log::sync();
             std::process::exit(1);
         }
@@ -388,7 +403,11 @@ fn main() {
     }) {
         Ok(a) => a,
         Err(e) => {
-            error!(error = %e, "invalid admission configuration");
+            let err_str = e.to_string();
+            tidb_base::log_error!(
+                "invalid admission configuration",
+                "error" => err_str.as_str(),
+            );
             let _ = tidb_log::sync();
             std::process::exit(2);
         }
@@ -425,7 +444,12 @@ fn main() {
         let new_collation = poc_session::detect_new_collation(&kv, &schema)
             .await
             .map_err(|e| std::io::Error::other(format!("read mysql.tidb: {e}")))?;
-        info!(pd = ?args.pd, new_collation, "connected to the cluster");
+        let pd_refs: Vec<&str> = args.pd.iter().map(String::as_str).collect();
+        tidb_base::log_info!(
+            "connected to the cluster",
+            "pd" => pd_refs.as_slice(),
+            "new_collation" => new_collation,
+        );
         let dag = DagContext {
             new_collation_enabled: new_collation,
             ..DagContext::select_utc()
@@ -451,7 +475,9 @@ fn main() {
                 .map_err(|e| std::io::Error::other(format!("start schema sync: {e}")))?;
             Some(sync)
         } else {
-            info!("schema sync is off: every statement checks the schema version (ADR 0003)");
+            tidb_base::log_info!(
+                "schema sync is off: every statement checks the schema version (ADR 0003)",
+            );
             None
         };
         let priv_sync = poc_domain::PrivilegeSync::start(kv.clone(), args.pd.clone())
@@ -473,11 +499,15 @@ fn main() {
         .with_new_stack(new_stack)
         .map_err(std::io::Error::other)?;
         if new_stack != poc_session::router::NewStackMode::Off {
-            info!(mode = ?new_stack, "VS1 router on: VS1-shaped SELECTs go to the new stack");
+            let mode_str = format!("{new_stack:?}");
+            tidb_base::log_info!(
+                "VS1 router on: VS1-shaped SELECTs go to the new stack",
+                "mode" => mode_str.as_str(),
+            );
         }
         if args.route_trace || std::env::var("TIDB_RS_ROUTE_TRACE").is_ok_and(|v| v == "1") {
             poc_session::router::trace::enable();
-            info!("route trace on: GET /debug/route?conn=<id> on the status port");
+            tidb_base::log_info!("route trace on: GET /debug/route?conn=<id> on the status port",);
         }
         if args.stmt_timing > 0 {
             poc_session::timing::set_enabled(true);
@@ -531,7 +561,11 @@ fn main() {
         };
         let shutdown = async {
             if let Err(e) = shutdown.await {
-                warn!(error = %e, "signal handling failed; shutting down");
+                let err_str = e.to_string();
+                tidb_base::log_warn!(
+                    "signal handling failed; shutting down",
+                    "error" => err_str.as_str(),
+                );
             }
             tidb_base::log_info!("setting tidb-server to report unhealthy (shutting-down)");
             // Stop the status/RPC server and wait for its shutdown WARNs before draining
@@ -555,7 +589,13 @@ fn main() {
     });
     let _ = tidb_log::sync();
     if let Err(e) = result {
-        error!(%addr, error = %e, "server failed");
+        let addr_str = addr.to_string();
+        let err_str = e.to_string();
+        tidb_base::log_error!(
+            "server failed",
+            "addr" => addr_str.as_str(),
+            "error" => err_str.as_str(),
+        );
         let _ = tidb_log::sync();
         std::process::exit(1);
     }
@@ -611,7 +651,7 @@ fn tls_config(args: &Args) -> std::io::Result<Option<TlsConfig>> {
         return Ok(Some(config));
     }
     if !args.auto_tls {
-        info!("TLS is disabled (no --ssl-cert/--ssl-key and --auto-tls=false)");
+        tidb_base::log_info!("TLS is disabled (no --ssl-cert/--ssl-key and --auto-tls=false)",);
         return Ok(None);
     }
     let mut names = vec!["localhost"];

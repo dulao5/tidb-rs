@@ -88,6 +88,11 @@ pub trait Notifier: Send + Sync {
     /// A warning Go logs.
     // glue: logutil.BgLogger().Warn
     fn warn(&self, msg: &str, err: &Error);
+    /// An error Go logs (e.g. `rebuilding sysvar cache failed`, `domain.go:3076`).
+    // glue: logutil.BgLogger().Error
+    fn error(&self, msg: &str, err: &Error) {
+        self.warn(msg, err);
+    }
 }
 
 /// Writes and reads `mysql.global_variables` and `mysql.tidb` like the Go session does.
@@ -274,7 +279,7 @@ pub fn notify_update_sys_var_cache(
     }
     // update locally
     if update_local && let Err(e) = rebuild() {
-        notifier.warn("rebuilding sysvar cache failed", &e);
+        notifier.error("rebuilding sysvar cache failed", &e);
     }
 }
 
