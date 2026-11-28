@@ -7,7 +7,7 @@ name: Weekly build
 #   scenarios, lock resolution, TPC-H, TiDB's integration tests; the report is uploaded, posted
 #   on #54 and the commit is tagged weekly-YYYY-Www.
 # - nightly (18:00 UTC = 03:00 JST): result comparison and lock resolution only; report
-#   uploaded, not posted.
+#   uploaded, not posted (only a short notice on #54 when a scheduled run turns red).
 # - manual: choose the mode; `publish` (comment + tag) is off unless asked for.
 #
 # Outcome: red if any part found a wrong result or a new inconsistency; a warning (yellow step,
@@ -170,26 +170,37 @@ jobs:
         with:
           pattern: part-*
           path: results
-      - name: Baseline
-        # The newest `<mode>-baseline` artifact of an earlier run on this branch: uploaded only by
-        # GREEN runs (or accepted by hand), so a regression stays reported until it is fixed or
-        # accepted, instead of becoming next week's normal (#140 review). Looked up by name, not
-        # as "the last successful run": before Friday's weekly that is Thursday's nightly.
+      - name: Previous run and baseline
+        # The previous run: the newest `<mode>-results` artifact of an earlier run on this
+        # branch, whatever its verdict ("Against the last run", the "last run" columns; #510).
+        # The baseline: the newest `<mode>-baseline` artifact, uploaded only by GREEN runs (or
+        # accepted by hand), so a regression stays reported until it is fixed or accepted,
+        # instead of becoming next week's normal (#140 review). Both looked up by name, not as
+        # "the last successful run": before Friday's weekly that is Thursday's nightly. The
+        # report names each by its own report.md and run id.
+        id: earlier
         env:
           GH_TOKEN: ${{ github.token }}
-          NAME: ${{ needs.plan.outputs.mode }}-baseline
+          MODE: ${{ needs.plan.outputs.mode }}
         run: |
-          prev=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=$NAME&per_page=100" \
-            --jq '.artifacts[] | select(.expired | not)
-                  | select(.workflow_run.id != ${{ github.run_id }})
-                  | select(.workflow_run.head_branch == "${{ github.ref_name }}")
-                  | .workflow_run.id' | head -1)
-          if [ -n "$prev" ]; then
-            echo "comparing with run $prev"
-            gh run download "$prev" -n "$NAME" -D previous
-          else
-            echo "no earlier $NAME on ${{ github.ref_name }}"
-          fi
+          newest() {
+            gh api "repos/${{ github.repository }}/actions/artifacts?name=$1&per_page=100" \
+              --jq '.artifacts[] | select(.expired | not)
+                    | select(.workflow_run.id != ${{ github.run_id }})
+                    | select(.workflow_run.head_branch == "${{ github.ref_name }}")
+                    | .workflow_run.id' | head -1
+          }
+          for kind in results baseline; do
+            dir=previous; [ "$kind" = baseline ] && dir=baseline
+            id=$(newest "$MODE-$kind")
+            if [ -n "$id" ]; then
+              echo "$kind: run $id"
+              gh run download "$id" -n "$MODE-$kind" -D "$dir"
+              echo "${kind}_run=$id" >> "$GITHUB_OUTPUT"
+            else
+              echo "no earlier $MODE-$kind on ${{ github.ref_name }}"
+            fi
+          done
       - name: Rulings history
         # The hit audit of the divergence ledger (#262, docs/testing/rulings.md) looks at the
         # last N full runs ([audit] runs): this one plus the `weekly-rulings-hits` artifacts of
@@ -214,10 +225,11 @@ jobs:
         run: |
           week=$(date -u +%G-W%V)
           title="tidb-rs ${{ needs.plan.outputs.mode }} build $week ($(date -u +%F))"
-          prev=; [ -d previous ] && prev="--previous previous"
+          prev=; [ -d previous ] && prev="--previous previous --previous-run ${{ steps.earlier.outputs.results_run }}"
+          base=; [ -d baseline ] && base="--baseline baseline --baseline-run ${{ steps.earlier.outputs.baseline_run }}"
           parts=$(echo '${{ needs.plan.outputs.parts }}' | tr -d '[]" ')
           rc=0
-          python3 tools/weekly/report.py --in results $prev --parts "$parts" --title "$title" \
+          python3 tools/weekly/report.py --in results $prev $base --parts "$parts" --title "$title" \
             --commit "${{ github.sha }}" --rulings-history rulings-history --out report.md || rc=$?
           cat report.md >> "$GITHUB_STEP_SUMMARY"
           { echo "rc=$rc"; echo "week=$week"; echo "verdict=$(cat verdict.txt)"; } >> "$GITHUB_OUTPUT"
@@ -260,6 +272,22 @@ jobs:
             echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } > comment.md
           gh issue comment 54 --body-file comment.md
+      # A scheduled run that is not posted in full (the nightly) and turned RED: a short notice
+      # on #54, so a red run does not go unnoticed (#510; nightlies were red from 11-21 on
+      # without anyone seeing it). report.py writes turned-red.md only when this run is RED and
+      # the previous run of the same mode was not. Same token and permission as the post above
+      # (`issues: write`).
+      - name: Notice on #54 (scheduled run turned red)
+        if: github.event_name == 'schedule' && needs.plan.outputs.publish != 'true' && hashFiles('turned-red.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            cat turned-red.md
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > notice.md
+          gh issue comment 54 --body-file notice.md
       # weekly-YYYY-Www only for a GREEN week; an INCOMPLETE or REGRESSED week gets a suffixed
       # tag, a RED one none (#140 review).
       - name: Tag

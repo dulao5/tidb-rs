@@ -85,10 +85,15 @@ replace them.
    | `crates/query-smoke/tests/smoke.rs` | `RpnExpressionBuilder` (spike test only) | removed with the crate (point 3) |
    | `crates/query-smoke/tests/copr_eval_oracle.rs` | `RpnExpressionBuilder`, `EvalConfig`, chunk encoder (test only) | kept, dev-dependency only (point 3, test-only exception) |
 
-6. **Branch policy is unchanged.** Changes to the vendored crates are made on the TiKV branch
-   `rust-tidb/stable-rpn-fn` and re-synced. Differences between TiKV and Go found while porting
-   (the A4 §4 table is the first list) are reported upstream as TiKV issues, because they may
-   also be pushdown bugs.
+6. **Branch policy (updated by owner decision, zhigang-du, 2026-11-28, #530).** The vendored
+   crates model **TiKV v8.5.8** (tag `v8.5.8`, `a1fdd6a59`), matching the cluster target and
+   constitution baseline rather than upstream master. Changes to the vendored crates are made on
+   the TiKV fork branch `rust-tidb/v8.5.8-stable-rpn-fn` (which replays the stable-Rust build
+   commits and the panic fixes #523/#524 onto `v8.5.8`) and re-synced with
+   `tools/sync-tikv-query.sh`; master-based fork branches (`rust-tidb/stable-rpn-fn`,
+   `rust-tidb/stable-rpn-fn-78aedc1-fixes`) are kept only as upstream reference. Differences
+   between TiKV and Go found while porting (the A4 §4 table is the first list) are reported
+   upstream as TiKV issues, because they may also be pushdown bugs.
 
 ## Consequences
 

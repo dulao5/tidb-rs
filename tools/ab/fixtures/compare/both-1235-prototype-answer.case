@@ -1,0 +1,10 @@
+# T1: Go refuses the statement with its own 1235 (collation_agg_func of the integration tests)
+# and B refuses it with one of the prototype's fixed answers: neither side runs it.
+sql: select min(b collate utf8mb4_bin) from tt
+tolerance: T1
+class: unordered
+verdict: unsupported
+[a_error]
+1235|42000|This version of TiDB doesn't yet support 'use collate clause for enum or set'
+[b_error]
+1235|42000|This version of TiDB doesn't yet support 'this expression'
