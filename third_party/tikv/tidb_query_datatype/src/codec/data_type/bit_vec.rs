@@ -113,7 +113,7 @@ impl Iterator for BitAndIterator<'_> {
         if self.cnt == self.output_rows {
             return None;
         }
-        if self.cnt.is_multiple_of(BITS) {
+        if self.cnt % BITS == 0 {
             let mut result: u64 = 0xffffffffffffffff;
             let idx = self.cnt / BITS;
             for i in self.vecs {

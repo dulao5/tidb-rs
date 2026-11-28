@@ -227,15 +227,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c59bdb34bc650a32731b31bd8f0829cc15d24a708ee31559e0bb34f2bc320cba"
 
 [[package]]
-name = "atomic"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89cbf775b137e9b968e67227ef7f775587cde3fd31b0d8599dbd0f598a48340"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2138,7 +2129,7 @@ dependencies = [
  "sha1 0.10.7",
  "sha2",
  "thiserror 2.0.21",
- "uuid",
+ "uuid 1.28.0",
 ]
 
 [[package]]
@@ -2541,7 +2532,7 @@ dependencies = [
  "tidb-types",
  "tikv-client",
  "tokio",
- "uuid",
+ "uuid 1.28.0",
 ]
 
 [[package]]
@@ -2780,7 +2771,7 @@ name = "protobuf"
 version = "2.8.0"
 source = "git+https://github.com/pingcap/rust-protobuf?branch=v2.8#de31a47f395c2f46dbfea2545517ea1b27ad0096"
 dependencies = [
- "atomic 0.5.3",
+ "atomic",
  "bytes",
  "heck 0.3.3",
  "hex 0.3.2",
@@ -4359,7 +4350,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tikv_util",
  "time 0.2.27",
- "tracker",
  "yatp",
 ]
 
@@ -4414,7 +4404,6 @@ dependencies = [
  "bstr",
  "byteorder",
  "chrono",
- "chrono-tz",
  "codec",
  "crypto",
  "file_system",
@@ -4429,7 +4418,6 @@ dependencies = [
  "panic_hook",
  "profiler",
  "protobuf",
- "rand 0.8.8",
  "regex",
  "serde",
  "serde_json",
@@ -4441,7 +4429,7 @@ dependencies = [
  "time 0.2.27",
  "tipb",
  "tipb_helper",
- "uuid",
+ "uuid 0.8.2",
 ]
 
 [[package]]
@@ -4909,11 +4897,19 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc5cf98d8186244414c848017f0e2676b3fcb46807f6668a97dfe67359a3c4b7"
+dependencies = [
+ "getrandom 0.2.17",
+]
+
+[[package]]
+name = "uuid"
 version = "1.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
 dependencies = [
- "atomic 0.6.1",
  "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
