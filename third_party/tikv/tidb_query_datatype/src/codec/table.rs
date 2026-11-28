@@ -1,6 +1,6 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp, convert::TryInto, fmt::Debug, io::Write, mem, sync::Arc};
+use std::{cmp, convert::TryInto, fmt::Debug, io::Write, mem, sync::Arc, u8};
 
 #[cfg(feature = "coprocessor")]
 use api_version::KvFormat;
@@ -334,7 +334,7 @@ pub fn decode_row(
     cols: &HashMap<i64, ColumnInfo>,
 ) -> Result<HashMap<i64, Datum>> {
     let mut values = datum::decode(data)?;
-    if values.first().is_none_or(|d| *d == Datum::Null) {
+    if values.first().map_or(true, |d| *d == Datum::Null) {
         return Ok(HashMap::default());
     }
     if values.len() & 1 == 1 {
@@ -546,8 +546,7 @@ pub fn generate_index_data_for_test(
         .map(|(cid, value)| {
             expect_row.insert(
                 *cid,
-                datum::encode_key(&mut EvalContext::default(), std::slice::from_ref(value))
-                    .unwrap(),
+                datum::encode_key(&mut EvalContext::default(), &[value.clone()]).unwrap(),
             );
             value.clone()
         })
@@ -733,7 +732,7 @@ impl RowHandle for CommonHandle {
 
 #[cfg(test)]
 mod tests {
-    use std::iter::FromIterator;
+    use std::{i64, iter::FromIterator};
 
     #[cfg(feature = "coprocessor")]
     use api_version::ApiV1;

@@ -32,7 +32,12 @@ The parts run in parallel jobs, each against its own cluster (`run.sh <part> <ou
   because of them, the top `unsupported` reasons and tidb-rs errors, and the tests
   with the most mismatches / unsupported statements.
 
-It compares with the **baseline** of the same mode: the `<mode>-baseline` artifact, uploaded only by GREEN runs (or by a manual run with `accept_baseline`, never a RED one), kept 90 days. A regression therefore stays reported until it is fixed or accepted. Every run also keeps its own `<mode>-results`.
+It compares with two earlier runs of the same mode, and names each (title, verdict and run id, from its own `report.md`):
+
+- the **last run**: the previous run's `<mode>-results` artifact, whatever its verdict. Every run keeps its own, 90 days. "Against the last run" and the "last run" columns use it (#510: they used to compare with the baseline, so the week-48 report compared with week 46, the last GREEN week, not with week 47);
+- the **baseline**: the `<mode>-baseline` artifact, uploaded only by GREEN runs (or by a manual run with `accept_baseline`, never a RED one), kept 90 days. What is still worse than it is listed under "Against the baseline" and keeps the run REGRESSED, so a regression stays reported until it is fixed or accepted, even when the last run was already as bad.
+
+A scheduled run that is not posted in full (the nightly) and turned RED (the last run of the same mode was not RED, or there is none) posts a short notice on #54 with the failing parts and the run's link (`turned-red.md`, written by `report.py`).
 
 A wrong result in the raw data (a mismatch, a wrong fault-scenario read, a lock case that differs) makes the run RED whatever the part's exit status; `test_report.py` covers the verdicts and runs in CI.
 
@@ -40,7 +45,7 @@ A wrong result in the raw data (a mismatch, a wrong fault-scenario read, a lock 
 
 - **RED:** a wrong result, a mismatch (also of an integration test, unless accepted in `integrationtest-expected.json`), a new inconsistency, or a failed coverage census (incomplete, a negative control that passed or did not run, a missing census, unknown layer names; `docs/testing/coverage-census.md`). The run fails and no tag is pushed.
 - **INCOMPLETE:** a part did not run fully: skipped, failed to set up, missing, or with too few results (an empty `ab` workload, a sysbench workload × thread count without both sides, fewer than 18 lock cases). This is not a pass.
-- **REGRESSED:** compared with the last run, an operator is no longer executable on tidb-rs, `unsupported` statements increased (for the integration tests: over the tests both runs ran; there also the reads skipped as `session diverged`), the new stack executed fewer statements of a workload both runs ran (strict round, `ab-strict-new.tsv`), or a sysbench B/A ratio dropped by more than 15%.
+- **REGRESSED:** compared with the last run or the baseline, an operator is no longer executable on tidb-rs, `unsupported` statements increased (for the integration tests: over the tests both runs ran; there also the reads skipped as `session diverged`), the new stack executed fewer statements of a workload both runs ran (strict round, `ab-strict-new.tsv`), or a sysbench B/A ratio dropped by more than 15%.
 - **GREEN:** otherwise.
 
 INCOMPLETE and REGRESSED show as a warning (a failed `continue-on-error` step). The weekly tag gets a `-incomplete` / `-regressed` suffix.
@@ -77,7 +82,9 @@ whose session diverged (tidb-rs rejected a result-affecting `SET` / `USE`; `tool
 Those skips must not hide defects, so the report counts them, lists the rejected session
 statements with the reads skipped after each (statements not rejected in the previous run are
 marked **new**), and an increase over the tests both runs ran is REGRESSED. A rejected `USE`
-also counts as a tidb-rs error.
+also counts as a tidb-rs error. Plan-source reads (`@@last_plan_from_cache`,
+`@@last_plan_from_binding`) skipped after a session binding that ran on A only are counted on a
+line of their own: that statement was not rejected.
 
 `ddl/index_modify` turns `tidb_ddl_enable_fast_reorg` on, and Go TiDB then refuses `ADD INDEX`
 (8256, "no enough space") when the disk under its `temp-dir` has less than 10% free; the reads

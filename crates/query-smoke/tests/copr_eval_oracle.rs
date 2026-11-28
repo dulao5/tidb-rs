@@ -3,8 +3,9 @@
 //! tidb-rs evaluates an expression locally (constant folding, root-side evaluation) or pushes
 //! it down to TiKV. Under CONSTITUTION art. 1.2 / 9.3 tidb-rs fixes some Go bugs while TiKV
 //! keeps its own behaviour, so a function that stays pushable could give a different answer
-//! depending on where it runs. This test runs every case both ways. (The vendored TiKV is
-//! TiKV master plus a fork branch, `third_party/tikv/PROVENANCE.md`, not a v8.5.x release.)
+//! depending on where it runs. This test runs every case both ways. The vendored TiKV is
+//! TiKV v8.5.8 (`a1fdd6a59`) plus the fork's stable-Rust build commits and the two panic
+//! fixes (#523, #524); see `third_party/tikv/PROVENANCE.md`.
 //!
 //! 1. tidb-rs builds the expression with `new_function` / `build_cast_function` over columns of
 //!    the argument types (the signature is the one tidb-rs's own type inference picks);
@@ -167,6 +168,9 @@ const KNOWN_MISMATCHES: &[(&str, &str, &str)] = &[
     ("Pow", "value", "#491"),
     ("Pow", "warning", "#493"),
     ("RightShift", "warning", "#493"),
+    // On v8.5.8, TiKV also rounds RoundReal (and signed CastRealAsInt) half away from zero,
+    // unlike Go's math.RoundToEven (#498; later changed on TiKV master in PRs 17935 and 18009).
+    ("RoundReal", "value", "#498"),
     ("Sin", "value", "#491"),
 ];
 
