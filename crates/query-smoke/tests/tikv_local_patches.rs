@@ -1,12 +1,12 @@
-//! Regression tests for the local patches on the vendored TiKV query crates
-//! (`third_party/tikv/PROVENANCE.md`, "Local modifications").
+//! Regression tests for the two fixes that the vendored TiKV fork carries on top of its base
+//! (`third_party/tikv/PROVENANCE.md`, "Fixes for two upstream TiKV panics").
 //!
-//! Upstream TiKV panics on both inputs below. The vendored copy is patched to return what Go
+//! TiKV v8.5.8 panics on both inputs below. The fork's fixes return what Go
 //! TiDB returns for the same expression: `MinInt64 % -1` is 0, and U+2CEA1 under
 //! `utf8mb4_0900_ai_ci` gets the implicit weight of a code point past the weight table, as in
 //! tidb-rs's collator (ruling R3 of `docs/testing/rulings.toml`, the upstream fix of Go's
 //! off-by-one). The coprocessor evaluation oracle (`copr_eval_oracle.rs`) covers the same
-//! inputs end to end; these tests name the two patched functions directly.
+//! inputs end to end; these tests name the two fixed functions directly.
 
 use std::cmp::Ordering;
 

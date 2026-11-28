@@ -28,8 +28,8 @@
 //! in the families the oracle covers, a pushable signature it does not reach must be listed in
 //! `NOT_COVERED` with the reason.
 //!
-//! The vendored TiKV carries local patches for two upstream TiKV panics (#523, #524); the
-//! inputs that reach them are listed, exactly, in `FORK_DIVERGENCES`.
+//! The vendored TiKV fork carries fixes for two TiKV panics that TiKV v8.5.8 still has (#523,
+//! #524); the inputs that reach them are listed, exactly, in `FORK_DIVERGENCES`.
 //!
 //! The second test (`go_bug_fixed_rulings_stay_off_pushdown_or_match_tikv`) is the rule of
 //! #476 part 2: every ruling of `docs/testing/rulings.toml` is classified in
@@ -175,17 +175,17 @@ const KNOWN_MISMATCHES: &[(&str, &str, &str)] = &[
 /// `math` package does not), so a listed row may not occur on every architecture.
 const PLATFORM_DEPENDENT_ISSUES: &[&str] = &["#491"];
 
-/// Inputs on which the vendored TiKV fork intentionally differs from upstream TiKV: the local
-/// patches listed in `third_party/tikv/PROVENANCE.md`. Upstream TiKV panics on these inputs, and
-/// the fork returns Go's result. On them the oracle therefore compares tidb-rs with the patched
-/// fork, not with the TiKV a cluster runs, which still panics.
+/// Inputs on which the vendored TiKV fork intentionally differs from TiKV v8.5.8, the TiKV a
+/// v8.5.8 cluster runs: the fixes for #523 and #524, fork commits listed in
+/// `third_party/tikv/PROVENANCE.md`. TiKV v8.5.8 panics on these inputs, and the fork returns
+/// Go's result. On them the oracle therefore compares tidb-rs with the fixed fork, not with the
+/// TiKV a cluster runs, which still panics.
 ///
 /// Rows are (issue, signature, the input). The (issue, signature) pairs must be exactly the
 /// ones on which the oracle evaluates such an input (a pushed call of that signature whose
-/// column argument holds it). Each issue's `tidb-rs local patch (#N)` marker must still be in
-/// the vendored source. A re-sync that drops a patch, an upstream fix that makes it redundant,
-/// or a new case that reaches a patched path fails the test, so that someone looks at this
-/// list.
+/// column argument holds it). Each issue's fixed line (`FORK_FIXES`) must still be in the
+/// vendored source. A re-sync from a commit without a fix, or a new case that reaches a fixed
+/// path, fails the test, so that someone looks at this list.
 const FORK_DIVERGENCES: &[(&str, &str, &str)] = &[
     ("#523", "ModIntSignedSigned", "BIGINT i64::MIN % -1"),
     ("#524", "EQString", "U+2CEA1 in a utf8mb4_0900_ai_ci column"),
@@ -201,14 +201,16 @@ const FORK_DIVERGENCES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// The vendored source of each local patch, where its `tidb-rs local patch (#N)` marker lives.
-const FORK_PATCH_SOURCES: &[(&str, &str)] = &[
+/// The fixed line of each fork fix and the vendored source that must contain it.
+const FORK_FIXES: &[(&str, &str, &str)] = &[
     (
         "#523",
+        "Ok(Some(lhs.wrapping_rem(*rhs)))",
         include_str!("../../../third_party/tikv/tidb_query_expr/src/impl_arithmetic.rs"),
     ),
     (
         "#524",
+        "if r >= UNICODE_CI_TABLE.len() {",
         include_str!(
             "../../../third_party/tikv/tidb_query_datatype/src/codec/collation/collator/utf8mb4_uca/data_0900.rs"
         ),
@@ -997,8 +999,8 @@ fn root_sig(e: &Expr) -> String {
 }
 
 /// Records the calls in `e` that take, on `row`, an input on which the vendored fork differs
-/// from upstream TiKV (its local patches, [`FORK_DIVERGENCES`]). Only column arguments are
-/// looked at: a patched input reached through another call (a CAST) is not seen.
+/// from TiKV v8.5.8 (its fixes, [`FORK_DIVERGENCES`]). Only column arguments are looked at: a
+/// fixed input reached through another call (a CAST) is not seen.
 fn note_fork_divergences(e: &Expr, row: &[Datum], out: &mut BTreeSet<(&'static str, String)>) {
     let Expr::ScalarFunction(sf) = e else {
         return;
@@ -1782,7 +1784,7 @@ fn local_and_tikv_evaluation_agree_on_pushable_signatures() {
     for (issue, sig) in &o.fork_divergences {
         if !declared.contains(&(*issue, sig.as_str())) {
             failures.push(format!(
-                "{sig} runs on an input of the vendored TiKV's local patch {issue}, on which the fork differs from upstream TiKV: add it to FORK_DIVERGENCES"
+                "{sig} runs on an input of the vendored TiKV's fix for {issue}, on which the fork differs from TiKV v8.5.8: add it to FORK_DIVERGENCES"
             ));
         }
     }
@@ -1795,11 +1797,13 @@ fn local_and_tikv_evaluation_agree_on_pushable_signatures() {
     }
     let issues: BTreeSet<&str> = FORK_DIVERGENCES.iter().map(|&(i, _, _)| i).collect();
     for issue in issues {
-        let marker = format!("tidb-rs local patch ({issue})");
-        match FORK_PATCH_SOURCES.iter().find(|&&(i, _)| i == issue) {
-            Some((_, src)) if src.contains(&marker) => {}
-            _ => failures.push(format!(
-                "the vendored TiKV no longer carries `{marker}` (a re-sync or an upstream fix?): check third_party/tikv/PROVENANCE.md and FORK_DIVERGENCES"
+        match FORK_FIXES.iter().find(|&&(i, _, _)| i == issue) {
+            Some((_, line, src)) if src.contains(line) => {}
+            Some((_, line, _)) => failures.push(format!(
+                "the vendored TiKV no longer contains the fix for {issue}, `{line}` (a re-sync from a commit without it?): check third_party/tikv/PROVENANCE.md and FORK_DIVERGENCES"
+            )),
+            None => failures.push(format!(
+                "FORK_DIVERGENCES lists {issue}, which has no row in FORK_FIXES"
             )),
         }
     }
