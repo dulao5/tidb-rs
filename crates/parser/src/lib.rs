@@ -97,22 +97,27 @@ pub const TABLE_STATS: &str = token_map::BUILD_REPORT;
 pub use ctx::Diagnostic;
 pub use restore::restore_window_spec_raw;
 pub use span::Span;
+pub use tidb_base::mysql::SQLMode;
 
 use ast::Stmt;
 use lexer::{Lexer, TokenTable};
 
-/// Parser settings (the subset of goyacc `Parser` configuration supported so far).
-#[derive(Debug, Clone)]
+/// Parser settings (Go `Parser.SetSQLMode` and `EnableWindowFunc`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseOptions {
     /// Treat window function names (`ROW_NUMBER`, `RANK`, ...) as keywords. TiDB's
     /// `parser.New()` enables this; default `true`.
     pub window_functions: bool,
+    /// MySQL/TiDB `sql_mode` flags controlling lexer and parser syntax rules (Go
+    /// `Parser.SetSQLMode`). Default `SQLMode(0)`.
+    pub sql_mode: SQLMode,
 }
 
 impl Default for ParseOptions {
     fn default() -> Self {
         ParseOptions {
             window_functions: true,
+            sql_mode: SQLMode(0),
         }
     }
 }
@@ -200,7 +205,7 @@ impl Parser {
     /// Parse `sql` (one or more `;`-separated statements). See [`parse`].
     pub fn parse(&mut self, sql: &str, opts: &ParseOptions) -> Result<ParseOutput, ParseError> {
         let tt = token_table();
-        let toks = Lexer::new(tt, sql, opts.window_functions)
+        let toks = Lexer::new(tt, sql, opts.window_functions, opts.sql_mode)
             .tokenize()
             .map_err(|e| ParseError::Lex {
                 pos: e.pos,
@@ -208,6 +213,7 @@ impl Parser {
             })?;
         let mut ctx = ctx::Ctx::new();
         ctx.window_funcs = opts.window_functions;
+        ctx.sql_mode = opts.sql_mode;
         match self.driver.parse(sql, &toks, &ctx) {
             driver::Outcome::Ok(stmts) => {
                 // goyacc: any AppendError fails the whole parse, even without `return 1`.

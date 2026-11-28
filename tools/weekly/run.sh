@@ -62,6 +62,8 @@ start_cluster() {
     trap cleanup EXIT
     "$root/scripts/playground.sh" start ${PLAYGROUND_EXTRA_CONFIG:+-c "$PLAYGROUND_EXTRA_CONFIG"} \
         >"$out/$part-playground.log" 2>&1 || return 2
+    "$root/tools/tikv-patched.sh" --inspect-pd "$pd" >"$out/tikv-build.json" \
+        2>>"$out/$part-playground.log" || return 2
     if [ "${LOAD_SBTEST:-1}" = 1 ]; then
         "$root/scripts/sysbench-prepare.sh" -P 27000 -t 1 -s 100000 -r 8 >>"$out/$part-playground.log" 2>&1 || return 2
     fi
@@ -99,10 +101,17 @@ start_strict() {
 
 # write_status <status> <json-object-of-details>
 write_status() {
-    python3 - "$out/$part.json" "$1" "$2" <<'EOF'
-import json, sys
-path, status, details = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
-json.dump({"part": path.rsplit("/", 1)[-1][:-5], "status": status, **details}, open(path, "w"), indent=1)
+    python3 - "$out/$part.json" "$1" "$2" "$out/tikv-build.json" "$out/faults-raw.json" <<'EOF'
+import json, os, sys
+path, status, details, tikv_path, faults_path = sys.argv[1], sys.argv[2], json.loads(sys.argv[3]), sys.argv[4], sys.argv[5]
+extra = {}
+if os.path.exists(tikv_path):
+    extra["tikv"] = json.load(open(tikv_path))
+elif os.path.exists(faults_path):
+    raw = json.load(open(faults_path))
+    if raw.get("tikv"):
+        extra["tikv"] = raw["tikv"]
+json.dump({"part": path.rsplit("/", 1)[-1][:-5], "status": status, **extra, **details}, open(path, "w"), indent=1)
 EOF
 }
 
@@ -190,7 +199,7 @@ sysbench)
     done
     # Rows: "A:host:port threads qps avg p95 errors status file" (scripts/sysbench-run.sh).
     python3 - "$out" "$rc" "${SYSBENCH_THREADS:-1 8}" <<'EOF' || rc=$?
-import glob, json, sys
+import glob, json, os, sys
 out, rc, threads = sys.argv[1], int(sys.argv[2]), sys.argv[3].replace(",", " ").split()
 res = {}
 for w in ("oltp_point_select", "oltp_read_only"):
@@ -207,8 +216,10 @@ bad = any(s.get("status") != "ok" or s.get("errors") not in ("0", None)
 # Every workload x thread count needs a result on both sides; anything less is incomplete.
 missing = [f"{w} t{t} {side}" for w in res for t in threads for side in "AB" if side not in res[w].get(t, {})]
 status = "fail" if bad else ("incomplete" if rc or missing else "ok")
-json.dump({"part": "sysbench", "status": status, "missing": missing, "results": res},
-          open(f"{out}/sysbench.json", "w"), indent=1)
+doc = {"part": "sysbench", "status": status, "missing": missing, "results": res}
+if os.path.exists(f"{out}/tikv-build.json"):
+    doc["tikv"] = json.load(open(f"{out}/tikv-build.json"))
+json.dump(doc, open(f"{out}/sysbench.json", "w"), indent=1)
 sys.exit({"ok": 0, "fail": 1, "incomplete": 2}[status])
 EOF
     exit "$rc"
@@ -216,7 +227,8 @@ EOF
 faults)
     rc=0
     # tidb-rs's and the cluster's logs (PD, TiKV, Go TiDB), to diagnose what the report shows.
-    (cd "$root" && FAULTS_LOG_DIR="$out/logs" tools/ab/faults/run.sh -b "$bin" -j "$out/faults-raw.json") \
+    (cd "$root" && FAULTS_LOG_DIR="$out/logs" FAULTS_TIKV_INFO="$out/tikv-build.json" \
+        tools/ab/faults/run.sh -b "$bin" -j "$out/faults-raw.json") \
         >"$out/faults.log" 2>&1 || rc=$?
     cp /tmp/tidb-rs-playground/maya-faults.log "$out/logs/playground.log" 2>/dev/null
     if [ ! -f "$out/faults-raw.json" ]; then

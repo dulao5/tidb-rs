@@ -76,10 +76,15 @@ impl PrepareExec {
             }
         }
         // params = vars.GetParseParams() (needReset) or the connection's charset and
-        // collation: the Rust parser has no charset parameters.
+        // collation: the Rust parser has no charset parameters, but reads sql_mode and
+        // parser config.
         let _ = self.need_reset;
-        let opts = ParseOptions {
-            window_functions: sctx.get_session_vars().enable_window_function,
+        let opts = {
+            let vars = sctx.get_session_vars();
+            ParseOptions {
+                window_functions: vars.enable_window_function,
+                sql_mode: tidb_base::mysql::SQLMode(vars.sql_mode),
+            }
         };
         let out = match parse(&self.sql_text, &opts) {
             Ok(out) => out,

@@ -832,6 +832,39 @@ def section_locks(raw, lines):
     lines.append("")
 
 
+def format_tikv_entry(info):
+    version = str(info.get("version", "")).lstrip("v") or "?"
+    commit = str(info.get("commit", ""))
+    tag = str(info.get("tag", ""))
+    parts = [f"`{commit}`"] if commit else []
+    if tag:
+        parts.append(f"`{tag}`")
+    detail = f" ({', '.join(parts)})" if parts else ""
+    return f"`{version}`{detail}"
+
+
+def tikv_header_line(base, expected, override=""):
+    """One-line summary of the TiKV build(s) recorded by the parts (or --tikv), or None."""
+    by_build = defaultdict(list)
+    for p in expected:
+        j = load(base, f"{p}.json")
+        t = j.get("tikv") if isinstance(j, dict) else None
+        if not t and p == "faults":
+            raw = load(base, "faults-raw.json")
+            t = raw.get("tikv") if isinstance(raw, dict) else None
+        if isinstance(t, dict) and (t.get("version") or t.get("commit") or t.get("tag")):
+            key = (str(t.get("version", "")).lstrip("v"), str(t.get("commit", "")), str(t.get("tag", "")))
+            by_build[key].append(p)
+    if not by_build:
+        return f"TiKV: {override}.\n" if override else None
+    if len(by_build) == 1:
+        ver, commit, tag = next(iter(by_build))
+        return f"TiKV: {format_tikv_entry({'version': ver, 'commit': commit, 'tag': tag})}.\n"
+    items = [f"{format_tikv_entry({'version': ver, 'commit': commit, 'tag': tag})} [{', '.join(ps)}]"
+             for (ver, commit, tag), ps in by_build.items()]
+    return "TiKV: " + "; ".join(items) + ".\n"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="inp", required=True)
@@ -841,6 +874,7 @@ def main():
     ap.add_argument("--baseline-run", help="its workflow run id, to name it")
     ap.add_argument("--title", default="tidb-rs weekly build")
     ap.add_argument("--commit", default="")
+    ap.add_argument("--tikv", default="", help="fallback TiKV build string if parts did not record it")
     ap.add_argument("--parts", default=",".join(PARTS), help="parts expected in this run")
     ap.add_argument("--out", required=True)
     ap.add_argument("--it-expected", help=f"accepted integration-test mismatches (default {IT_EXPECTED})")
@@ -949,6 +983,9 @@ def main():
     lines = [f"**{verdict}**: {meaning}.\n", f"# {args.title}\n"]
     if args.commit:
         lines.append(f"Commit `{args.commit}`.\n")
+    tikv_line = tikv_header_line(args.inp, expected, args.tikv)
+    if tikv_line:
+        lines.append(tikv_line)
     lines.append("| part | status |")
     lines.append("|---|---|")
     icon = {"ok": "ok", "fail": "**FAIL**", "incomplete": "**INCOMPLETE**", "missing": "**MISSING**"}

@@ -34,7 +34,15 @@ pub fn load() -> Vec<Case> {
         .collect()
 }
 
-/// Cases run with the default parser configuration (the only mode supported so far).
+/// Cases run with the default parser configuration.
 pub fn default_mode() -> Vec<Case> {
     load().into_iter().filter(|c| c.mode == "default").collect()
+}
+
+/// Cases from `TestBuiltin` / `TestDML` run under `REAL_AS_FLOAT`.
+pub fn real_as_float_mode() -> Vec<Case> {
+    load()
+        .into_iter()
+        .filter(|c| c.mode == "real_as_float")
+        .collect()
 }

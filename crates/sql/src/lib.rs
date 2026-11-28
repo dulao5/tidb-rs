@@ -13,7 +13,7 @@ pub mod types;
 pub use crate::ir::Lowered;
 pub use crate::ir::Statement;
 pub use crate::ir::parse_and_lower;
-pub use crate::ir::parse_and_lower_with_opts;
+pub use crate::ir::parse_and_lower_with;
 pub use crate::plan::Plan;
 pub use crate::plan::PlanContext;
 pub use crate::plan::plan_select;

@@ -215,7 +215,6 @@ PoC 连接循环（tidb-mysql-protocol：握手、包读写，C2 时保留）
    - `tidb_snapshot`、`tidb_read_staleness`、`tx_read_ts`、`tidb_txn_mode` 中任何一个取了非默认值；
    - 任何**不在 §4.1 同步白名单内**的系统变量取了非默认值。实现方法：路由器维护一个"已偏离默认值、但新会话不知道"的变量集合，集合非空就走 PoC。
    - schema 同步不允许新栈执行语句（#475）：schema lease 已过期、本节点未注册（或已注销）、或者 ported domain 最近一次 reload 失败且之后没有成功过（`Registry::new_stack_schema_version`）。新栈没有 schema validator，也不登记 `StmtGuard`，这几种情况下只有 PoC 的路径（synced 模式自带的检查，或 ADR 0003 按语句时间戳读 schema）是安全的。原因记为 `schema_lease`，每次切换写一行日志；
-   - 会话的 `sql_mode` 含有会改变 Go 解析结果的位（#509）：`ANSI_QUOTES`（双引号是标识符）、`PIPES_AS_CONCAT`（`||` 是 CONCAT 而不是 OR）、`HIGH_NOT_PRECEDENCE`（`NOT` 优先级高于 BETWEEN 和比较）、`NO_BACKSLASH_ESCAPES`（字符串里的反斜杠不转义）、`IGNORE_SPACE`（内建函数名后面可以有空格）、`REAL_AS_FLOAT`（`REAL` 是 FLOAT 而不是 DOUBLE）。Go 的会话每次解析前都把 `sql_mode` 交给解析器（`session.ParseSQL` → `parser.SetSQLMode`），解析器读的正是这六位（lexer.go `Scanner.Lex` / `scanString`、misc.go `isTokenIdentifier`、hintparserimpl.go、parser.y 的 `CastType` 和 `FloatingPointType`）；Rust 解析器不读 `sql_mode`（`ParseOptions` 里没有），带着这些位时它造出的语句和 Go 的不同，新栈会按错误的语句给出错误的结果。解析器另外只在非 UTF-8 客户端字符集的字面量解码失败时读 strict 模式（`convert2Connection`），那属于 Rust 词法器还没有做的客户端字符集解码，不在这一条里。原因记为 `sql_mode`。预处理语句只在 PREPARE 时检查：Go 只在 PREPARE 时按当时的 `sql_mode` 解析一次，之后的 EXECUTE 用同一个 AST；
    - 新旧 InfoSchema 版本不相等（§4.1）；
    - COM_STMT_EXECUTE 带游标标志（`CURSOR_TYPE_READ_ONLY`）：游标（D05.3 tasks P1-4）不在 VS1 内。
 1. **语句类型**：只有 `SelectStmt`（COM_QUERY，或预处理语句的 SELECT）是候选。
@@ -230,7 +229,7 @@ PoC 连接循环（tidb-mysql-protocol：握手、包读写，C2 时保留）
    - 新栈返回的其他错误（例如 1054 未知列）是按 Go 移植的错误，**直接返回给客户端，不回退**。
 4. **预处理语句**：见 §4.7。
 
-**度量**：指标 `tidbrs_route_total{engine="new|poc",reason="<block>|ast|kind|session|sql_mode|schema_lease|schema_version"}`。每周报告据此给出"新栈执行的语句数 / 按原因归类的回退数"，回应 #128 §二.1 的"新栈上能跑的查询形态"指标。
+**度量**：指标 `tidbrs_route_total{engine="new|poc",reason="<block>|ast|kind|session|schema_lease|schema_version"}`。每周报告据此给出"新栈执行的语句数 / 按原因归类的回退数"，回应 #128 §二.1 的"新栈上能跑的查询形态"指标。
 
 ### 4.5 "上一条语句"的状态
 

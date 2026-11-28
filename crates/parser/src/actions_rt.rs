@@ -77,34 +77,41 @@ default_from_node!(bool, i64, i32, u64, u32, u16, u8, f64, char, String, ());
 /// Source-text access used by actions (`$lexer.src_str(span)`).
 pub trait SrcText {
     fn src_str(&self, span: Span) -> &str;
+    /// Whether `NO_BACKSLASH_ESCAPES` is active in the current `sql_mode`.
+    fn no_backslash_escapes(&self) -> bool {
+        false
+    }
 }
 
 /// Token text as goyacc's `yylval.ident` would hold it: quotes stripped / unescaped.
 pub fn tok_text<L: SrcText + ?Sized>(l: &L, t: &Tok) -> String {
-    unquote_text(l.src_str(tok_span(t)))
+    unquote_text(l.src_str(tok_span(t)), l.no_backslash_escapes())
 }
 
 /// The lexer value of an identifier / string token text: back-quoted names and quoted strings
-/// are unquoted (and unescaped), anything else is returned as is.
-pub fn unquote_text(s: &str) -> String {
+/// are unquoted (and unescaped, respecting `NO_BACKSLASH_ESCAPES`), anything else is returned as
+/// is.
+pub fn unquote_text(s: &str, no_backslash_escapes: bool) -> String {
     let b = s.as_bytes();
     if b.len() >= 2 && b[0] == b'`' {
         return s[1..s.len() - 1].replace("``", "`");
     }
     if b.len() >= 2 && (b[0] == b'\'' || b[0] == b'"') {
-        return unquote_string(s);
+        return unquote_string(s, no_backslash_escapes);
     }
     s.to_string()
 }
 
-/// MySQL string literal unescaping (the subset needed by the ported actions so far).
-pub fn unquote_string(s: &str) -> String {
+/// MySQL string literal unescaping (the subset needed by the ported actions so far),
+/// treating `\` as a literal byte when `no_backslash_escapes` is set (matching Go
+/// `pkg/parser/lexer.go` `Scanner.scanString`).
+pub fn unquote_string(s: &str, no_backslash_escapes: bool) -> String {
     let q = s.as_bytes()[0] as char;
     let body = &s[1..s.len() - 1];
     let mut out = String::with_capacity(body.len());
     let mut it = body.chars().peekable();
     while let Some(c) = it.next() {
-        if c == '\\' {
+        if c == '\\' && !no_backslash_escapes {
             match it.next() {
                 Some('n') => out.push('\n'),
                 Some('t') => out.push('\t'),

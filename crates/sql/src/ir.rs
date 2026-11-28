@@ -320,14 +320,15 @@ fn unsupported(what: impl std::fmt::Display) -> SqlError {
     SqlError::not_supported(what)
 }
 
-/// Parse `sql` and lower its single statement using default parse options. Several
-/// statements, empty input and parse errors are reported like TiDB (1064 for syntax errors).
+/// Parse `sql` and lower its single statement with default [`tidb_parser::ParseOptions`].
+/// Several statements, empty input and parse errors are reported like TiDB (1064 for syntax
+/// errors).
 pub fn parse_and_lower(sql: &str) -> Result<Lowered, SqlError> {
-    parse_and_lower_with_opts(sql, &tidb_parser::ParseOptions::default())
+    parse_and_lower_with(sql, &tidb_parser::ParseOptions::default())
 }
 
-/// Parse `sql` and lower its single statement with explicit [`tidb_parser::ParseOptions`].
-pub fn parse_and_lower_with_opts(
+/// Like [`parse_and_lower`], using `opts` (e.g. session `sql_mode`).
+pub fn parse_and_lower_with(
     sql: &str,
     opts: &tidb_parser::ParseOptions,
 ) -> Result<Lowered, SqlError> {
@@ -340,17 +341,15 @@ pub fn parse_and_lower_with_opts(
     }
 }
 
-/// Parse `sql` into its single statement, with the errors of [`parse_and_lower`]. The VS1
-/// router (poc-session) looks at the AST before it lowers it with [`lower_statement`].
+/// Parse `sql` into its single statement with default [`tidb_parser::ParseOptions`], with the
+/// errors of [`parse_and_lower`].
 pub fn parse_one(sql: &str) -> Result<ast::Stmt, SqlError> {
-    parse_one_with_opts(sql, &tidb_parser::ParseOptions::default())
+    parse_one_with(sql, &tidb_parser::ParseOptions::default())
 }
 
-/// Parse `sql` into its single statement using explicit [`tidb_parser::ParseOptions`].
-pub fn parse_one_with_opts(
-    sql: &str,
-    opts: &tidb_parser::ParseOptions,
-) -> Result<ast::Stmt, SqlError> {
+/// Like [`parse_one`], using `opts` (e.g. session `sql_mode`). The VS1 router (`poc-session`)
+/// looks at the AST before it lowers it with [`lower_statement`].
+pub fn parse_one_with(sql: &str, opts: &tidb_parser::ParseOptions) -> Result<ast::Stmt, SqlError> {
     let out = tidb_parser::parse(sql, opts).map_err(|e| parse_error(sql, &e))?;
     let mut stmts = out.stmts;
     match stmts.len() {
@@ -1346,10 +1345,11 @@ mod tests {
         // `window_functions: false` allows window-function keywords like `rank` as aliases and rejects `OVER ()`.
         let wf_off = tidb_parser::ParseOptions {
             window_functions: false,
+            ..Default::default()
         };
-        assert!(parse_and_lower_with_opts("SELECT 1 AS rank", &wf_off).is_ok());
+        assert!(parse_and_lower_with("SELECT 1 AS rank", &wf_off).is_ok());
         assert_eq!(
-            parse_and_lower_with_opts("SELECT ROW_NUMBER() OVER ()", &wf_off)
+            parse_and_lower_with("SELECT ROW_NUMBER() OVER ()", &wf_off)
                 .unwrap_err()
                 .code,
             1064

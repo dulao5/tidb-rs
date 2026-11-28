@@ -48,6 +48,8 @@ struct FakePoc {
     prepare_fails: bool,
     prepared: HashMap<u32, Lowered>,
     log: Vec<String>,
+    /// The last SELECT lowered & passed into `FakePoc::run`.
+    last_run: Option<Lowered>,
     /// The schema sync's registry: when set, the schema version is the real PoC's
     /// computation over it, and `schema_version` is ignored.
     registry: Option<Arc<poc_domain::Registry>>,
@@ -118,6 +120,7 @@ impl PocEngine for FakePoc {
             match &lowered.stmt {
                 Statement::Select(_) => {
                     self.log.push("run select".into());
+                    self.last_run = Some(lowered.clone());
                     Ok(self.result_set())
                 }
                 Statement::Set(assignments) => {
@@ -452,6 +455,48 @@ fn parse(sql: &str) -> ast::Stmt {
     tidb_sql::ir::parse_one(sql).unwrap()
 }
 
+fn parse_with(sql: &str, r: &Router) -> ast::Stmt {
+    tidb_sql::ir::parse_one_with(sql, &r.parse_options()).unwrap()
+}
+
+/// Decodes one MySQL text-protocol result row from [`EncodedResultSet`] into column byte slices.
+fn decode_text_row(mut packet: &[u8], ncols: usize) -> Vec<Option<Vec<u8>>> {
+    let mut out = Vec::with_capacity(ncols);
+    for _ in 0..ncols {
+        let (&first, rest) = packet.split_first().expect("truncated text row");
+        if first == 0xfb {
+            out.push(None);
+            packet = rest;
+            continue;
+        }
+        let (len, rest) = match first {
+            0..=250 => (usize::from(first), rest),
+            0xfc => {
+                let (b, r) = rest.split_at(2);
+                (usize::from(u16::from_le_bytes([b[0], b[1]])), r)
+            }
+            other => panic!("unexpected length-encoded prefix {other:#x}"),
+        };
+        let (val, next) = rest.split_at(len);
+        out.push(Some(val.to_vec()));
+        packet = next;
+    }
+    assert!(packet.is_empty(), "trailing bytes in row: {packet:?}");
+    out
+}
+
+fn encoded_cell(res: &Result<Response, SqlError>) -> Vec<u8> {
+    let Ok(Response::Encoded(enc)) = res else {
+        panic!("expected encoded response, got {res:?}");
+    };
+    assert_eq!(enc.rows.len(), 1, "expected 1 row, got {:?}", enc.rows);
+    decode_text_row(&enc.rows[0], enc.columns.len())
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("non-NULL cell")
+}
+
 fn rows(r: &Result<Response, SqlError>) -> Option<(usize, Vec<ColumnDef>)> {
     match r {
         Ok(Response::ResultSet(rs)) => Some((rs.rows.len(), rs.columns.clone())),
@@ -714,132 +759,451 @@ fn step0_comes_first() {
     );
 }
 
-/// The three statements of #509 (Go's integration test `types/const`, lines 13, 141 and 142):
-/// Go parses each differently under the mode, and the Rust parser, which reads no
-/// `sql_mode`, built the default-mode statement, which the new stack answered with the wrong
-/// rows (`0` for `helloworld`; 2 rows for none; `0` for `1`).
-const PARSE_MODE_CASES: [(&str, &str, &str); 3] = [
-    (
-        "PIPES_AS_CONCAT",
-        "PIPES_AS_CONCAT",
-        "SELECT 'hello' || 'world'",
-    ),
-    (
-        "high_not_precedence",
-        "HIGH_NOT_PRECEDENCE",
-        "SELECT * FROM t1 WHERE NOT a BETWEEN 2 AND 3",
-    ),
-    (
-        "high_not_precedence",
-        "HIGH_NOT_PRECEDENCE",
-        "SELECT NOT 1 BETWEEN -5 AND 5",
-    ),
-];
-
-/// Step 0 (#509): under a `sql_mode` that changes how Go parses, a candidate stays on the PoC
-/// (`sql_mode`), even in strict mode, and the new stack is not called. The PoC parses without
-/// `sql_mode` too, but lowers none of the three statements (`OR`, unary `NOT`): it answers
-/// 1235, not wrong rows. Without the mode (Go parses them as the Rust parser does) they are
-/// candidates again.
+/// #509 Step 2: every `sql_mode` bit Go's parser reads (alone or in combination `ANSI`) is now
+/// faithfully implemented in `tidb-parser`, so none of them triggers a step-0 PoC hold.
 #[test]
-fn step0_sql_mode_that_changes_parsing_goes_to_the_poc() {
-    super::trace::enable();
-    for (i, (set, bit, sql)) in PARSE_MODE_CASES.into_iter().enumerate() {
-        let conn = 7_000_100 + i as u64;
-        let mut p = poc();
-        let (mut r, script) = scripted(NewStackMode::Strict, &p);
-        r.set_connection_id(conn);
-        script.lock().unwrap().answer = Some(Answer::Rows);
-        assert_eq!(r.route(&parse(sql), &p, false), Route::New, "{sql}");
-        block_on(r.query(&mut p, &format!("SET sql_mode = '{set}'"))).unwrap();
-        assert_eq!(
-            r.route(&parse(sql), &p, false),
-            Route::Poc(Reason::SqlMode(bit)),
-            "{sql}"
-        );
-        let e = block_on(r.query(&mut p, sql)).unwrap_err();
-        assert_eq!(e.code, 1235, "{sql}: {}", e.message);
-        assert!(script.lock().unwrap().log.is_empty(), "{sql}");
-        assert_eq!(
-            super::trace::get(conn),
-            super::trace::Last {
-                seq: 2,
-                engine: "poc",
-                reason: "sql_mode".into()
-            },
-            "{sql}"
-        );
-        block_on(r.query(&mut p, "SET @@sql_mode = DEFAULT")).unwrap();
-        assert_eq!(r.route(&parse(sql), &p, false), Route::New, "{sql}");
-    }
-}
-
-/// Step 0 (#509): every `sql_mode` bit Go's parser reads keeps a candidate on the PoC, alone
-/// or inside a combination mode (`ANSI`); the other bits, the default mode and the empty mode
-/// do not.
-#[test]
-fn step0_sql_mode_bits_go_parser_reads() {
+fn step0_sql_mode_bits_route_with_session_sql_mode() {
     let mut p = poc();
     let (mut r, _) = scripted(NewStackMode::Fallback, &p);
-    for (mode, want) in [
-        ("ANSI_QUOTES", Some("ANSI_QUOTES")),
-        ("PIPES_AS_CONCAT", Some("PIPES_AS_CONCAT")),
-        ("HIGH_NOT_PRECEDENCE", Some("HIGH_NOT_PRECEDENCE")),
-        ("NO_BACKSLASH_ESCAPES", Some("NO_BACKSLASH_ESCAPES")),
-        ("IGNORE_SPACE", Some("IGNORE_SPACE")),
-        ("REAL_AS_FLOAT", Some("REAL_AS_FLOAT")),
-        ("STRICT_TRANS_TABLES,IGNORE_SPACE", Some("IGNORE_SPACE")),
-        // REAL_AS_FLOAT, PIPES_AS_CONCAT, ANSI_QUOTES, IGNORE_SPACE, ONLY_FULL_GROUP_BY.
-        ("ANSI", Some("ANSI_QUOTES")),
-        ("", None),
-        ("TRADITIONAL", None),
-        (
-            "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,\
-             ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
-            None,
-        ),
-        ("NO_UNSIGNED_SUBTRACTION,ALLOW_INVALID_DATES", None),
+    for mode in [
+        "ANSI_QUOTES",
+        "PIPES_AS_CONCAT",
+        "HIGH_NOT_PRECEDENCE",
+        "NO_BACKSLASH_ESCAPES",
+        "IGNORE_SPACE",
+        "REAL_AS_FLOAT",
+        "STRICT_TRANS_TABLES,IGNORE_SPACE",
+        "ANSI",
+        "",
+        "TRADITIONAL",
+        "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,\
+         ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
+        "NO_UNSIGNED_SUBTRACTION,ALLOW_INVALID_DATES",
     ] {
         block_on(r.query(&mut p, &format!("SET sql_mode = '{mode}'"))).unwrap();
         assert_eq!(r.session_condition(&p), None, "{mode}");
-        let route = r.route(&parse(POINT), &p, false);
-        match want {
-            Some(bit) => assert_eq!(route, Route::Poc(Reason::SqlMode(bit)), "{mode}"),
-            None => assert_eq!(route, Route::New, "{mode}"),
-        }
+        assert_eq!(
+            r.route(&parse_with(POINT, &r), &p, false),
+            Route::New,
+            "{mode}"
+        );
     }
 }
 
-/// Step 0 (#509) for prepared statements: Go parses the text once, at PREPARE, with the
-/// `sql_mode` of that moment. Prepared under such a mode, the PoC owns the statement; prepared
-/// without it, both sides have the AST Go has, and an EXECUTE after the mode changed still
-/// runs on the new stack.
+/// The three W48 statements of #509 (Go's integration test `types/const`, lines 13, 141 and
+/// 142) now parse with the active session `sql_mode`:
+/// 1. `SELECT 'hello' || 'world'` under `PIPES_AS_CONCAT` parses as `CONCAT(...)`, so precheck
+///    routes it to `Poc(Reason::Ast("function not ported"))` and it returns 1235 rather than
+///    wrong `0`.
+/// 2. `SELECT * FROM sbtest1 WHERE NOT id BETWEEN 2 AND 3` under `HIGH_NOT_PRECEDENCE` parses
+///    as `Between(Not2, ...)` and routes `Route::New` rather than falling behind a guard.
+/// 3. `SELECT NOT 1 BETWEEN -5 AND 5` executes on the real new stack and flips from `0`
+///    (default mode) to `1` (`HIGH_NOT_PRECEDENCE`) and back to `0` (`SET @@sql_mode = DEFAULT`).
 #[test]
-fn prepared_under_parse_sql_mode_is_poc_owned() {
+fn w48_sql_mode_cases_match_go() {
+    // Case 1: PIPES_AS_CONCAT
+    {
+        let mut p = poc();
+        let mut r = real(NewStackMode::Strict, &p);
+        assert_eq!(
+            encoded_cell(&block_on(r.query(&mut p, "SELECT 'hello' || 'world'"))),
+            b"0"
+        );
+        block_on(r.query(&mut p, "SET sql_mode = 'PIPES_AS_CONCAT'")).unwrap();
+        let stmt = parse_with("SELECT 'hello' || 'world'", &r);
+        assert_eq!(
+            r.route(&stmt, &p, false),
+            Route::Poc(Reason::Ast("function not ported"))
+        );
+        let e = block_on(r.query(&mut p, "SELECT 'hello' || 'world'")).unwrap_err();
+        assert_eq!(e.code, 1235, "{}", e.message);
+        block_on(r.query(&mut p, "SET @@sql_mode = DEFAULT")).unwrap();
+        assert_eq!(
+            encoded_cell(&block_on(r.query(&mut p, "SELECT 'hello' || 'world'"))),
+            b"0"
+        );
+    }
+
+    // Also verify scripted strict mode does not touch the new stack under PIPES_AS_CONCAT.
+    {
+        let mut p = poc();
+        let (mut r, script) = scripted(NewStackMode::Strict, &p);
+        block_on(r.query(&mut p, "SET sql_mode = 'PIPES_AS_CONCAT'")).unwrap();
+        let e = block_on(r.query(&mut p, "SELECT 'hello' || 'world'")).unwrap_err();
+        assert_eq!(e.code, 1235, "{}", e.message);
+        assert!(script.lock().unwrap().log.is_empty());
+    }
+
+    // Case 2: WHERE NOT id BETWEEN 2 AND 3
+    {
+        let mut p = poc();
+        let (mut r, _) = scripted(NewStackMode::Strict, &p);
+        let sql = "SELECT * FROM sbtest1 WHERE NOT id BETWEEN 2 AND 3";
+        let ast::Stmt::Select(def_sel) = parse_with(sql, &r) else {
+            panic!("expected SELECT");
+        };
+        assert!(matches!(
+            def_sel.where_.as_ref(),
+            Some(ast::Expr::Unary(u))
+                if u.op == ast::Op::Not && matches!(&u.v, ast::Expr::Between(_))
+        ));
+        assert_eq!(r.route(&ast::Stmt::Select(def_sel), &p, false), Route::New);
+
+        block_on(r.query(&mut p, "SET sql_mode = 'high_not_precedence'")).unwrap();
+        let high_stmt = parse_with(sql, &r);
+        let ast::Stmt::Select(high_sel) = &high_stmt else {
+            panic!("expected SELECT");
+        };
+        assert!(matches!(
+            high_sel.where_.as_ref(),
+            Some(ast::Expr::Between(b))
+                if !b.not
+                    && matches!(&b.expr, ast::Expr::Unary(u) if u.op == ast::Op::Not2)
+        ));
+        assert_eq!(r.route(&high_stmt, &p, false), Route::New);
+    }
+
+    // Case 3: SELECT NOT 1 BETWEEN -5 AND 5 executed end-to-end on real NewSession.
+    {
+        let mut p = poc();
+        let mut r = real(NewStackMode::Strict, &p);
+        assert_eq!(
+            encoded_cell(&block_on(r.query(&mut p, "SELECT NOT 1 BETWEEN -5 AND 5"))),
+            b"0"
+        );
+        block_on(r.query(&mut p, "SET sql_mode = 'high_not_precedence'")).unwrap();
+        assert_eq!(
+            encoded_cell(&block_on(r.query(&mut p, "SELECT NOT 1 BETWEEN -5 AND 5"))),
+            b"1"
+        );
+        block_on(r.query(&mut p, "SET @@sql_mode = DEFAULT")).unwrap();
+        assert_eq!(
+            encoded_cell(&block_on(r.query(&mut p, "SELECT NOT 1 BETWEEN -5 AND 5"))),
+            b"0"
+        );
+    }
+}
+
+/// #509 Step 2: real execution and fallback re-parse respect `ANSI_QUOTES`,
+/// `NO_BACKSLASH_ESCAPES`, `IGNORE_SPACE`, `REAL_AS_FLOAT`, and `ANSI`.
+#[test]
+fn all_sql_mode_bits_execute_and_fallback_reparse_with_session_mode() {
+    // ANSI_QUOTES: real NewSession execution (literal -> 1054 unknown column) + fallback re-parse.
+    {
+        let mut p = poc();
+        let mut r = real(NewStackMode::Strict, &p);
+        assert_eq!(
+            encoded_cell(&block_on(r.query(&mut p, r#"SELECT "x""#))),
+            b"x"
+        );
+        block_on(r.query(&mut p, "SET sql_mode = 'ANSI_QUOTES'")).unwrap();
+        let e = block_on(r.query(&mut p, r#"SELECT "x""#)).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (1054, "Unknown column 'x' in 'field list'")
+        );
+
+        // Fallback re-parse in Router::query_inner must pass opts (ANSI_QUOTES), so FakePoc
+        // sees `Expr::Column("c")`, NOT `Expr::Literal(Str("c"))`.
+        let mut p = poc();
+        p.values.current_db = Some("test".into());
+        let mut r = real(NewStackMode::Fallback, &p);
+        block_on(r.query(&mut p, "SET sql_mode = 'ANSI_QUOTES'")).unwrap();
+        let res = block_on(r.query(&mut p, r#"SELECT "c" FROM sbtest1 WHERE "id" = 1"#));
+        assert_eq!(rows(&res).map(|r| r.0), Some(3));
+        let lowered = p.last_run.take().expect("fallback ran on PoC");
+        let Statement::Select(sel) = lowered.stmt else {
+            panic!("expected Select");
+        };
+        assert!(matches!(
+            &sel.fields[0],
+            tidb_sql::ir::Field::Expr {
+                expr: tidb_sql::ir::Expr::Column(c),
+                ..
+            } if c.name == "c"
+        ));
+    }
+
+    // NO_BACKSLASH_ESCAPES: `'\n'` evaluates to two bytes (`\n`) vs one newline byte.
+    {
+        let mut p = poc();
+        let mut r = real(NewStackMode::Strict, &p);
+        assert_eq!(
+            encoded_cell(&block_on(r.query(&mut p, r"SELECT '\n'"))),
+            b"\n"
+        );
+        block_on(r.query(&mut p, "SET sql_mode = 'NO_BACKSLASH_ESCAPES'")).unwrap();
+        assert_eq!(
+            encoded_cell(&block_on(r.query(&mut p, r"SELECT '\n'"))),
+            br"\n"
+        );
+        let e = block_on(r.query(&mut p, r"SELECT '\'hello'")).unwrap_err();
+        assert_eq!(e.code, 1064, "{}", e.message);
+    }
+
+    // IGNORE_SPACE: `CAST (1 AS CHAR)` fails without the mode, succeeds with it;
+    // `COUNT (id)` switches from `function not ported` to `aggregate`.
+    {
+        let mut p = poc();
+        let mut r = real(NewStackMode::Strict, &p);
+        let e = block_on(r.query(&mut p, "SELECT CAST (1 AS CHAR)")).unwrap_err();
+        assert_eq!(e.code, 1064, "{}", e.message);
+        assert_eq!(
+            r.route(&parse_with("SELECT COUNT (id) FROM sbtest1", &r), &p, false),
+            Route::Poc(Reason::Ast("function not ported"))
+        );
+
+        block_on(r.query(&mut p, "SET sql_mode = 'IGNORE_SPACE'")).unwrap();
+        assert_eq!(
+            encoded_cell(&block_on(r.query(&mut p, "SELECT CAST (1 AS CHAR)"))),
+            b"1"
+        );
+        assert_eq!(
+            r.route(&parse_with("SELECT COUNT (id) FROM sbtest1", &r), &p, false),
+            Route::Poc(Reason::Ast("aggregate"))
+        );
+    }
+
+    // REAL_AS_FLOAT: `CAST(1.25 AS REAL)` reports Float instead of Double.
+    {
+        let mut p = poc();
+        let mut r = real(NewStackMode::Strict, &p);
+        let Ok(Response::Encoded(def_rs)) = block_on(r.query(&mut p, "SELECT CAST(1.25 AS REAL)"))
+        else {
+            panic!("expected Encoded response");
+        };
+        assert_eq!(def_rs.columns[0].column_type, ColumnType::Double);
+
+        block_on(r.query(&mut p, "SET sql_mode = 'REAL_AS_FLOAT'")).unwrap();
+        let Ok(Response::Encoded(flt_rs)) = block_on(r.query(&mut p, "SELECT CAST(1.25 AS REAL)"))
+        else {
+            panic!("expected Encoded response");
+        };
+        assert_eq!(flt_rs.columns[0].column_type, ColumnType::Float);
+    }
+
+    // ANSI combination mode: REAL_AS_FLOAT + PIPES_AS_CONCAT + ANSI_QUOTES + IGNORE_SPACE.
+    {
+        let mut p = poc();
+        let mut r = real(NewStackMode::Strict, &p);
+        block_on(r.query(&mut p, "SET sql_mode = 'ANSI'")).unwrap();
+        let Ok(Response::Encoded(rs)) = block_on(r.query(&mut p, "SELECT CAST (1.25 AS REAL)"))
+        else {
+            panic!("expected Encoded response");
+        };
+        assert_eq!(rs.columns[0].column_type, ColumnType::Float);
+        assert_eq!(
+            block_on(r.query(&mut p, r#"SELECT "x""#)).unwrap_err().code,
+            1054
+        );
+        assert_eq!(
+            block_on(r.query(&mut p, "SELECT 'a' || 'b'"))
+                .unwrap_err()
+                .code,
+            1235
+        );
+    }
+}
+
+/// #509 Step 2 for prepared statements: both sides parse with the `sql_mode` active at
+/// PREPARE (matching Go), and changing `sql_mode` before EXECUTE keeps the prepared AST
+/// and column metadata from PREPARE time.
+#[test]
+fn prepared_under_sql_mode_uses_prepare_time_mode() {
     let mut p = poc();
-    let (mut r, script) = scripted(NewStackMode::Strict, &p);
-    script.lock().unwrap().prepare = Some(Answer::Rows);
+    p.values.current_db = Some("test".into());
+    let mut r = real(NewStackMode::Fallback, &p);
+
+    // 1. ANSI_QUOTES: PREPARE succeeds on both sides with quoted identifiers, and EXECUTE
+    //    remains usable even after SET sql_mode = DEFAULT.
     block_on(r.query(&mut p, "SET sql_mode = 'ANSI_QUOTES'")).unwrap();
-    block_on(r.prepare(&mut p, 1, POINT)).unwrap();
-    assert_eq!(
-        r.owner(1),
-        Some(&Owner::Poc(Reason::SqlMode("ANSI_QUOTES")))
-    );
-    assert!(script.lock().unwrap().log.is_empty());
-    // Strict mode: not a boundary stub, so the PoC runs it.
-    assert_eq!(
-        rows(&block_on(r.execute(&mut p, 1, vec![]))).map(|r| r.0),
-        Some(3)
-    );
+    let info = block_on(r.prepare(&mut p, 1, r#"SELECT "c" FROM sbtest1 WHERE "id" = ?"#)).unwrap();
+    assert!(matches!(r.owner(1), Some(Owner::Both { .. })));
+    assert_eq!(info.columns.len(), 1);
+    assert_eq!(info.columns[0].name, "c");
+    p.columns = info.columns.clone();
+
     block_on(r.query(&mut p, "SET sql_mode = DEFAULT")).unwrap();
-    block_on(r.prepare(&mut p, 2, POINT)).unwrap();
-    assert!(matches!(r.owner(2), Some(Owner::Both { .. })));
+    r.set_execute_raw_params(RawParams {
+        null_bitmap: vec![0],
+        param_types: vec![tidb_base::mysql::TypeLonglong, 0],
+        param_values: 1i64.to_le_bytes().to_vec(),
+        bound: vec![None],
+    });
+    let res = block_on(r.execute(
+        &mut p,
+        1,
+        vec![Param {
+            ty: ColumnType::LongLong,
+            unsigned: false,
+            value: Value::Int(1),
+        }],
+    ));
+    assert_eq!(rows(&res).map(|r| r.0), Some(3));
+
+    // 2. REAL_AS_FLOAT: PREPARE column metadata is TypeFloat vs TypeDouble under DEFAULT,
+    //    and executing after SET sql_mode = DEFAULT preserves TypeFloat. (PoC IR does not lower
+    //    CAST, so the new stack owns stmt 2/3 alone: Owner::New.)
+    block_on(r.query(&mut p, "SET sql_mode = 'REAL_AS_FLOAT'")).unwrap();
+    let real_info = block_on(r.prepare(&mut p, 2, "SELECT CAST(? AS REAL)")).unwrap();
+    assert_eq!(real_info.columns[0].column_type, ColumnType::Float);
+    assert!(matches!(r.owner(2), Some(Owner::New { .. })));
+
+    block_on(r.query(&mut p, "SET sql_mode = DEFAULT")).unwrap();
+    r.set_execute_raw_params(RawParams {
+        null_bitmap: vec![0],
+        param_types: vec![tidb_base::mysql::TypeDouble, 0],
+        param_values: 1.25f64.to_le_bytes().to_vec(),
+        bound: vec![None],
+    });
+    let Ok(Response::Encoded(exec_rs)) = block_on(r.execute(
+        &mut p,
+        2,
+        vec![Param {
+            ty: ColumnType::Double,
+            unsigned: false,
+            value: Value::Float(1.25),
+        }],
+    )) else {
+        panic!("expected new-stack encoded execute result");
+    };
+    assert_eq!(exec_rs.columns[0].column_type, ColumnType::Float);
+
+    let def_info = block_on(r.prepare(&mut p, 3, "SELECT CAST(? AS REAL)")).unwrap();
+    assert_eq!(def_info.columns[0].column_type, ColumnType::Double);
+
+    // 3. PIPES_AS_CONCAT: `SELECT 'hello' || 'world'` parses as CONCAT -> PoC-owned at PREPARE.
     block_on(r.query(&mut p, "SET sql_mode = 'PIPES_AS_CONCAT'")).unwrap();
-    script.lock().unwrap().answer = Some(Answer::Rows);
-    assert_eq!(
-        rows(&block_on(r.execute(&mut p, 2, vec![]))).map(|r| r.0),
-        Some(1)
-    );
+    let e = block_on(r.prepare(&mut p, 4, "SELECT 'hello' || 'world'")).unwrap_err();
+    assert_eq!(e.code, 1235, "{}", e.message);
+}
+
+/// #509 / #555: `PREPARE -> EXECUTE -> SET sql_mode -> EXECUTE -> CLOSE -> re-PREPARE -> EXECUTE`
+/// with the instance plan cache enabled, in both `fallback` and `strict` modes.
+/// Verifies that executing a statement prepared under one `sql_mode` after `SET sql_mode = ''`
+/// keeps the prepare-time AST (matching Go) without poisoning the instance plan cache entry for
+/// a later `PREPARE` of the same SQL text under the new `sql_mode`.
+#[test]
+fn prepare_set_sql_mode_execute_reprepare_with_plan_cache() {
+    let extract_str = |res: Result<Response, SqlError>| -> Vec<u8> {
+        match res.expect("execute should succeed") {
+            Response::Encoded(rs) => {
+                // Binary protocol single VARCHAR column: 0x00 header, 1-byte null bitmap, lenenc string.
+                let row = &rs.rows[0];
+                let len = row[2] as usize;
+                row[3..3 + len].to_vec()
+            }
+            Response::ResultSet(rs) => match &rs.rows[0][0] {
+                Value::Bytes(b) => b.clone(),
+                other => panic!("unexpected cell: {other:?}"),
+            },
+            other => panic!("unexpected response: {other:?}"),
+        }
+    };
+
+    for mode in [NewStackMode::Fallback, NewStackMode::Strict] {
+        let mut p = poc();
+        p.values.current_db = Some("test".into());
+        let mut r = real(mode, &p);
+        let cache = Arc::new(
+            tidb_planner::core::plan_cache_instance::new_instance_plan_cache(90 << 20, 100 << 20),
+        );
+        r.new
+            .session_mut()
+            .set_instance_plan_cache(Some(cache as _));
+        r.new.session_mut().vars_mut().enable_prepared_plan_cache = true;
+
+        // 1. NO_BACKSLASH_ESCAPES: `SELECT '\n'` returns 2 bytes (`\n` literal) when prepared
+        //    under NO_BACKSLASH_ESCAPES, keeps returning 2 bytes when executed after
+        //    `SET sql_mode = ''`, and returns 1 byte (newline) after close + re-prepare under `''`.
+        block_on(r.query(&mut p, "SET sql_mode = 'NO_BACKSLASH_ESCAPES'")).unwrap();
+        let sql = r"SELECT '\n'";
+        let info1 = block_on(r.prepare(&mut p, 1, sql)).unwrap();
+        p.columns = info1.columns.clone();
+        assert_eq!(extract_str(block_on(r.execute(&mut p, 1, vec![]))), b"\\n");
+
+        block_on(r.query(&mut p, "SET sql_mode = ''")).unwrap();
+        assert_eq!(extract_str(block_on(r.execute(&mut p, 1, vec![]))), b"\\n");
+
+        r.close(&mut p, 1);
+        let info2 = block_on(r.prepare(&mut p, 2, sql)).unwrap();
+        p.columns = info2.columns.clone();
+        assert_eq!(
+            extract_str(block_on(r.execute(&mut p, 2, vec![]))),
+            b"\n",
+            "mode={mode:?}: re-prepared statement must not hit stale NO_BACKSLASH_ESCAPES plan"
+        );
+
+        // 2. ANSI_QUOTES: PREPARE under ANSI_QUOTES records ModeANSIQuotes in PlanCacheStmt,
+        //    whereas re-PREPARE under '' records 0, so their PlanCacheKeys do not collide even
+        //    when the first statement is executed after `SET sql_mode = ''`.
+        block_on(r.query(&mut p, "SET sql_mode = 'ANSI_QUOTES'")).unwrap();
+        let sql_aq = r#"SELECT id FROM sbtest1 WHERE "c" = 'x'"#;
+        let _ = block_on(r.prepare(&mut p, 3, sql_aq)).unwrap();
+        let Owner::Both { new_id: nid3, .. } = r.owner(3).cloned().unwrap() else {
+            panic!("expected Owner::Both for stmt 3");
+        };
+        {
+            let ps_any = r
+                .new
+                .session()
+                .vars()
+                .get_prepared_stmt_by_id(nid3)
+                .unwrap();
+            let ps = ps_any
+                .downcast_ref::<parking_lot::Mutex<tidb_planner::core::plan_cache_utils::PlanCacheStmt>>()
+                .unwrap()
+                .lock();
+            assert_eq!(ps.parse_sql_mode, tidb_base::mysql::ModeANSIQuotes.0);
+        }
+
+        block_on(r.query(&mut p, "SET sql_mode = ''")).unwrap();
+        r.close(&mut p, 3);
+        let _ = block_on(r.prepare(&mut p, 4, sql_aq)).unwrap();
+        let Owner::Both { new_id: nid4, .. } = r.owner(4).cloned().unwrap() else {
+            panic!("expected Owner::Both for stmt 4");
+        };
+        {
+            let ps_any = r
+                .new
+                .session()
+                .vars()
+                .get_prepared_stmt_by_id(nid4)
+                .unwrap();
+            let ps = ps_any
+                .downcast_ref::<parking_lot::Mutex<tidb_planner::core::plan_cache_utils::PlanCacheStmt>>()
+                .unwrap()
+                .lock();
+            assert_eq!(ps.parse_sql_mode, 0);
+        }
+
+        // 3. REAL_AS_FLOAT: PREPARE under REAL_AS_FLOAT -> EXECUTE -> SET '' -> EXECUTE ->
+        //    CLOSE -> re-PREPARE -> EXECUTE returns Float then Double (no stale plan cache hit).
+        block_on(r.query(&mut p, "SET sql_mode = 'REAL_AS_FLOAT'")).unwrap();
+        let sql_real = "SELECT CAST(1.25 AS REAL)";
+        let _ = block_on(r.prepare(&mut p, 5, sql_real)).unwrap();
+        let Ok(Response::Encoded(rs1)) = block_on(r.execute(&mut p, 5, vec![])) else {
+            panic!("expected encoded result");
+        };
+        assert_eq!(rs1.columns[0].column_type, ColumnType::Float);
+
+        block_on(r.query(&mut p, "SET sql_mode = ''")).unwrap();
+        let Ok(Response::Encoded(rs2)) = block_on(r.execute(&mut p, 5, vec![])) else {
+            panic!("expected encoded result");
+        };
+        assert_eq!(rs2.columns[0].column_type, ColumnType::Float);
+
+        r.close(&mut p, 5);
+        let _ = block_on(r.prepare(&mut p, 6, sql_real)).unwrap();
+        let Ok(Response::Encoded(rs3)) = block_on(r.execute(&mut p, 6, vec![])) else {
+            panic!("expected encoded result");
+        };
+        assert_eq!(
+            rs3.columns[0].column_type,
+            ColumnType::Double,
+            "mode={mode:?}: re-prepared CAST(1.25 AS REAL) under '' must be Double, not stale Float"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1273,9 +1637,9 @@ fn scripted_over(
 
 /// #521: after `SET GLOBAL sql_mode = 'ANSI_QUOTES'` (and the two SET validation switches)
 /// on Go TiDB, a new session starts with the cluster's values, not the compiled defaults:
-/// the `sql_mode` guard of step 0 keeps candidates on the PoC, and `SET sql_mode = DEFAULT`
-/// goes back to the cluster's global value (Go `SetExecutor.getVarValue` →
-/// `GetGlobalSystemVar`), not to the compiled default.
+/// parsing respects the cluster's `ANSI_QUOTES` mode (candidates route to the new stack),
+/// and `SET sql_mode = DEFAULT` goes back to the cluster's global value (Go
+/// `SetExecutor.getVarValue` → `GetGlobalSystemVar`), not to the compiled default.
 #[test]
 fn cluster_global_values_reach_a_new_session() {
     let mut p = poc();
@@ -1289,10 +1653,19 @@ fn cluster_global_values_reach_a_new_session() {
     assert_eq!(get(&mut r, "sql_mode"), "ANSI_QUOTES");
     assert_eq!(get(&mut r, "tidb_skip_isolation_level_check"), "ON");
     assert_eq!(get(&mut r, "tidb_enable_noop_functions"), "ON");
+    let quoted_point = r#"SELECT "c" FROM "sbtest1" WHERE "id" = 1"#;
     assert_eq!(
-        r.route(&parse(POINT), &p, false),
-        Route::Poc(Reason::SqlMode("ANSI_QUOTES"))
+        r.route(&parse_with(quoted_point, &r), &p, false),
+        Route::New
     );
+    let sel_x = parse_with(r#"SELECT "x""#, &r);
+    assert!(matches!(
+        &sel_x,
+        ast::Stmt::Select(s) if matches!(
+            s.fields.fields[0].expr.as_ref(),
+            Some(ast::Expr::Column(_))
+        )
+    ));
     // The global value as the new session reads it (`@@global.sql_mode`).
     assert_eq!(
         r.new
@@ -1302,18 +1675,28 @@ fn cluster_global_values_reach_a_new_session() {
             .unwrap(),
         "ANSI_QUOTES"
     );
-    // A session value without the bit: a candidate again.
+    // A session value without the bit: `"x"` parses as a string literal again.
     block_on(r.query(&mut p, "SET sql_mode = ''")).unwrap();
     assert_eq!(get(&mut r, "sql_mode"), "");
-    assert_eq!(r.route(&parse(POINT), &p, false), Route::New);
-    // DEFAULT is the cluster's global value.
+    assert_eq!(r.route(&parse_with(POINT, &r), &p, false), Route::New);
+    assert!(matches!(
+        parse_with(r#"SELECT "x""#, &r),
+        ast::Stmt::Select(s) if matches!(
+            s.fields.fields[0].expr.as_ref(),
+            Some(ast::Expr::Value(_))
+        )
+    ));
+    // DEFAULT is the cluster's global value (`ANSI_QUOTES`).
     block_on(r.query(&mut p, "SET sql_mode = DEFAULT")).unwrap();
     assert_eq!(get(&mut r, "sql_mode"), "ANSI_QUOTES");
     assert_eq!(r.session_condition(&p), None);
-    assert_eq!(
-        r.route(&parse(POINT), &p, false),
-        Route::Poc(Reason::SqlMode("ANSI_QUOTES"))
-    );
+    assert!(matches!(
+        parse_with(r#"SELECT "x""#, &r),
+        ast::Stmt::Select(s) if matches!(
+            s.fields.fields[0].expr.as_ref(),
+            Some(ast::Expr::Column(_))
+        )
+    ));
     assert!(script.lock().unwrap().log.is_empty());
 }
 
