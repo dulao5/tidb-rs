@@ -130,11 +130,20 @@ impl<F: SessionFactory> Server<F> {
                         }
                     };
                     tidb_base::log_debug!("accept new connection success");
+                    let mgr = self.factory.session_manager();
+                    if mgr
+                        .as_deref()
+                        .is_some_and(tidb_server::session_mgr::ServerSessionManager::is_lost_connection_to_pd)
+                    {
+                        tidb_base::log_warn!("reject connection due to lost connection to PD");
+                        drop(stream);
+                        continue;
+                    }
                     if let Err(e) = stream.set_nodelay(true) {
                         let err_str = e.to_string();
                         tidb_base::log_warn!("set TCP_NODELAY failed", "error" => err_str.as_str());
                     }
-                    let id = match self.factory.session_manager() {
+                    let id = match mgr {
                         Some(mgr) => mgr.next_conn_id(),
                         None => self.next_connection_id.fetch_add(1, Ordering::Relaxed),
                     };

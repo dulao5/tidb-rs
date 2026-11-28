@@ -110,8 +110,12 @@ impl LocalPool32 {
         true
     }
 
-    fn in_use_len(&self) -> usize {
-        self.in_use.len()
+    fn free_len(&self) -> usize {
+        (self.max_id as usize).saturating_sub(self.in_use.len())
+    }
+
+    fn cap(&self) -> usize {
+        self.max_id as usize
     }
 }
 
@@ -252,8 +256,9 @@ impl ConnIdAllocator for GlobalAllocator {
         } else {
             let mut pool = self.local32.lock();
             if pool.put(gcid.local_conn_id) {
-                if pool.in_use_len() < (pool.max_id as usize) / 2
-                    && self.is_64bits.swap(false, Ordering::SeqCst)
+                // Match Go `globalconn.go:310`: `g.local32.Len() < g.local32.Cap()/2`, where
+                // `LockFreeCircularPool.Len()` is the count of free (available) 32-bit slots.
+                if pool.free_len() < pool.cap() / 2 && self.is_64bits.swap(false, Ordering::SeqCst)
                 {
                     tidb_base::log_info!("GlobalAllocator downgrade to 32 bits");
                 }
@@ -331,5 +336,35 @@ mod tests {
         let (_, truncated) = parse_conn_id(truncated_val).unwrap();
         assert!(truncated);
         alloc.release(id64);
+    }
+
+    #[test]
+    fn upgrade_and_downgrade_match_go_free_slots_condition() {
+        // cap = 4: releasing 1 ID after exhaustion leaves free = 1 < 4/2 (2) -> downgrades to 32-bit.
+        let alloc = GlobalAllocator::with_32bit_limit(Arc::new(|| 1), true, 4);
+        let ids32: Vec<u64> = (0..4).map(|_| alloc.next_id()).collect();
+        for &id in &ids32 {
+            assert!(!parse_conn_id(id).unwrap().0.is_64bits);
+        }
+        let id64 = alloc.next_id();
+        assert!(parse_conn_id(id64).unwrap().0.is_64bits);
+        assert!(alloc.is_64bits.load(Ordering::SeqCst));
+
+        alloc.release(ids32[0]); // free = 1 < cap / 2 (2) => downgrade to 32-bit
+        assert!(!alloc.is_64bits.load(Ordering::SeqCst));
+        let next = alloc.next_id();
+        assert_eq!(next, ids32[0]);
+        assert!(!parse_conn_id(next).unwrap().0.is_64bits);
+
+        // Exhaust again -> upgrades back to 64-bit. Release 2 IDs where pool starts at cap = 2:
+        // releasing 1st makes free = 1 == cap / 2 (1), NOT < 1 => stays 64-bit.
+        let alloc2 = GlobalAllocator::with_32bit_limit(Arc::new(|| 1), true, 2);
+        let first = alloc2.next_id();
+        let _second = alloc2.next_id();
+        let extra64 = alloc2.next_id();
+        assert!(parse_conn_id(extra64).unwrap().0.is_64bits);
+        alloc2.release(first); // free = 1, cap / 2 = 1 => not < 1 => remains 64-bit
+        assert!(alloc2.is_64bits.load(Ordering::SeqCst));
+        assert!(parse_conn_id(alloc2.next_id()).unwrap().0.is_64bits);
     }
 }

@@ -611,6 +611,7 @@ mod tests {
         let addr = srv.addr;
 
         let req = crate::rpc::CopRequest {
+            context: Some(crate::rpc::CopContext::default()),
             tp: 103,
             data: dag(
                 vec![broadcast("FLUSH STATS_DELTA `a`.`t` CLUSTER")],
@@ -628,6 +629,7 @@ mod tests {
         assert!(select_response(&resp.data).get_chunks().is_empty());
 
         let req = crate::rpc::CopRequest {
+            context: Some(crate::rpc::CopContext::default()),
             tp: 103,
             data: dag(vec![table_scan(1)], EncodeType::TypeChunk, false),
         };
@@ -689,6 +691,7 @@ mod tests {
         kill_exec.mut_kill().set_conn_id(c1.conn_id);
         kill_exec.mut_kill().set_query(true);
         let req = crate::rpc::CopRequest {
+            context: Some(crate::rpc::CopContext::default()),
             tp: 103,
             data: crate::rpc::testdata::dag(
                 vec![kill_exec],
@@ -715,6 +718,7 @@ mod tests {
         let srv = start().await;
         let addr = srv.addr;
         let req = crate::rpc::CopRequest {
+            context: Some(crate::rpc::CopContext::default()),
             tp: 103,
             data: dag(
                 vec![broadcast("FLUSH STATS_DELTA `a`.`t` CLUSTER")],

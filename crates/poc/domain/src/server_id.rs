@@ -70,15 +70,16 @@ pub enum KeeperAction {
 /// Pure timeout state machine for Go's `Domain.serverIDKeeper`.
 pub struct ServerIdWatchdog {
     lost_connection_to_pd: bool,
-    last_succeed: Instant,
+    last_succeed: Option<Instant>,
     lost_timeout: Duration,
 }
 
 impl ServerIdWatchdog {
-    pub fn new(now: Instant, lost_timeout: Duration) -> Self {
+    /// Initializes watchdog with zero `last_succeed` (matching Go `var lastSucceedTimestamp time.Time`).
+    pub fn new(lost_timeout: Duration, initially_lost: bool) -> Self {
         Self {
-            lost_connection_to_pd: false,
-            last_succeed: now,
+            lost_connection_to_pd: initially_lost,
+            last_succeed: None,
             lost_timeout,
         }
     }
@@ -92,17 +93,21 @@ impl ServerIdWatchdog {
         if self.lost_connection_to_pd {
             if ok {
                 self.lost_connection_to_pd = false;
-                self.last_succeed = now;
+                self.last_succeed = Some(now);
                 return KeeperAction::RestoredConnectionToPd;
             }
             return KeeperAction::TransientFailure;
         }
         if ok {
-            self.last_succeed = now;
+            self.last_succeed = Some(now);
             return KeeperAction::Healthy;
         }
+        // Match Go `time.Since(lastSucceedTimestamp) > lostConnectionToPDTimeout`: zero initial
+        // timestamp counts as older than any positive timeout.
         if !self.lost_timeout.is_zero()
-            && now.saturating_duration_since(self.last_succeed) > self.lost_timeout
+            && self
+                .last_succeed
+                .is_none_or(|t| now.saturating_duration_since(t) > self.lost_timeout)
         {
             self.lost_connection_to_pd = true;
             return KeeperAction::LostConnectionToPd;
@@ -113,7 +118,8 @@ impl ServerIdWatchdog {
 
 /// Chooses the next `server_id` candidate matching Go's `Domain.proposeServerID`.
 // go: Domain.proposeServerID L1
-pub fn propose_server_id_from_used(
+pub fn propose_server_id_from_state(
+    all_server_count: usize,
     used_32: &HashSet<u64>,
     conflict_cnt: usize,
     enable_32bits: bool,
@@ -122,7 +128,7 @@ pub fn propose_server_id_from_used(
         return random_u64_in(1, MAX_SERVER_ID_64);
     }
     if conflict_cnt < ACQUIRE_32BITS_SERVER_ID_RETRY_CNT {
-        if (used_32.len() as f32) <= 0.9 * (MAX_SERVER_ID_32 as f32) {
+        if (all_server_count as f32) <= 0.9 * (MAX_SERVER_ID_32 as f32) {
             for _ in 0..15 {
                 let candidate = random_u64_in(1, MAX_SERVER_ID_32);
                 if !used_32.contains(&candidate) {
@@ -132,7 +138,7 @@ pub fn propose_server_id_from_used(
         }
         tidb_base::log_info!(
             "upgrade to 64 bits server ID due to used up",
-            "len(allServerInfo)" => used_32.len(),
+            "len(allServerInfo)" => all_server_count,
         );
     } else {
         tidb_base::log_info!(
@@ -141,6 +147,15 @@ pub fn propose_server_id_from_used(
         );
     }
     random_u64_in(MAX_SERVER_ID_32 + 1, MAX_SERVER_ID_64)
+}
+
+/// Helper preserving call sites that only pass `used_32` (`all_server_count = used_32.len()`).
+pub fn propose_server_id_from_used(
+    used_32: &HashSet<u64>,
+    conflict_cnt: usize,
+    enable_32bits: bool,
+) -> u64 {
+    propose_server_id_from_state(used_32.len(), used_32, conflict_cnt, enable_32bits)
 }
 
 fn random_u64_in(min: u64, max: u64) -> u64 {
@@ -156,6 +171,7 @@ pub struct ServerIdLease {
     server_id: AtomicU64,
     lease_id: Mutex<Option<i64>>,
     lost_connection_to_pd: AtomicBool,
+    released: AtomicBool,
     enable_32bits: bool,
     timing: ServerIdTiming,
     on_server_id_change: Option<ServerIdChangeFn>,
@@ -188,6 +204,7 @@ impl ServerIdLease {
             server_id: AtomicU64::new(0),
             lease_id: Mutex::new(None),
             lost_connection_to_pd: AtomicBool::new(false),
+            released: AtomicBool::new(false),
             enable_32bits,
             timing,
             on_server_id_change,
@@ -201,6 +218,19 @@ impl ServerIdLease {
 
     pub fn is_lost_connection_to_pd(&self) -> bool {
         self.lost_connection_to_pd.load(Ordering::SeqCst)
+    }
+
+    /// Marks PD connectivity lost (used on startup `acquire_server_id` failure so accept loop
+    /// rejects connections while `run_keeper` retries acquisition in the background).
+    pub fn mark_lost_connection_to_pd(&self) {
+        self.server_id.store(0, Ordering::SeqCst);
+        self.lost_connection_to_pd.store(true, Ordering::SeqCst);
+        self.notify_change(0, false);
+    }
+
+    /// Returns the active etcd lease ID if one has been granted and not yet cleared/revoked.
+    pub async fn lease_id(&self) -> Option<i64> {
+        *self.lease_id.lock().await
     }
 
     fn notify_change(&self, id: u64, valid: bool) {
@@ -234,7 +264,8 @@ impl ServerIdLease {
         Ok(id)
     }
 
-    async fn collect_used_32bit_server_ids(&self) -> Result<HashSet<u64>> {
+    async fn collect_server_id_state(&self) -> Result<(usize, HashSet<u64>)> {
+        let mut all_server_count = 0usize;
         let mut used = HashSet::new();
         let info_resp = etcd_timeout(
             ACQUIRE_SERVER_ID_TIMEOUT,
@@ -245,11 +276,11 @@ impl ServerIdLease {
         )
         .await?;
         for kv in info_resp.kvs() {
-            if let Ok(info) = serde_json::from_slice::<ServerInfo>(kv.value())
-                && info.server_id > 0
-                && info.server_id <= MAX_SERVER_ID_32
-            {
-                used.insert(info.server_id);
+            if let Ok(info) = serde_json::from_slice::<ServerInfo>(kv.value()) {
+                all_server_count += 1;
+                if info.server_id > 0 && info.server_id <= MAX_SERVER_ID_32 {
+                    used.insert(info.server_id);
+                }
             }
         }
         let id_resp = etcd_timeout(
@@ -270,19 +301,25 @@ impl ServerIdLease {
                 used.insert(id);
             }
         }
-        Ok(used)
+        Ok((all_server_count, used))
     }
 
     /// Acquires a cluster-unique `server_id` in `/tidb/server_id/<id>` bound to the lease.
     // go: Domain.acquireServerID L1
     pub async fn acquire_server_id(&self) -> Result<u64> {
+        if self.released.load(Ordering::SeqCst) {
+            return Err(Error::Other("server_id lease already released".to_owned()));
+        }
         self.server_id.store(0, Ordering::SeqCst);
         let lease_id = self.retrieve_lease_id().await?;
         let mut conflict_cnt = 0usize;
         loop {
+            if self.released.load(Ordering::SeqCst) {
+                return Err(Error::Other("server_id lease already released".to_owned()));
+            }
             let propose_id = if self.enable_32bits {
-                let used = self.collect_used_32bit_server_ids().await?;
-                propose_server_id_from_used(&used, conflict_cnt, true)
+                let (all_server_count, used) = self.collect_server_id_state().await?;
+                propose_server_id_from_state(all_server_count, &used, conflict_cnt, true)
             } else {
                 random_u64_in(1, MAX_SERVER_ID_64)
             };
@@ -304,6 +341,16 @@ impl ServerIdLease {
                 conflict_cnt += 1;
                 continue;
             }
+            if self.released.load(Ordering::SeqCst) {
+                let _ = etcd_timeout(
+                    ACQUIRE_SERVER_ID_TIMEOUT,
+                    self.etcd
+                        .clone()
+                        .delete(keys::server_id_key(propose_id), None),
+                )
+                .await;
+                return Err(Error::Other("server_id lease already released".to_owned()));
+            }
             self.server_id.store(propose_id, Ordering::SeqCst);
             self.notify_change(propose_id, true);
             let lease_hex = format!("{lease_id:x}");
@@ -319,11 +366,26 @@ impl ServerIdLease {
     /// Refreshes `/tidb/server_id/<id>` TTL and sends a keepalive ping on the etcd lease.
     // go: Domain.refreshServerIDTTL L2 (also pings etcd lease keepalive)
     pub async fn refresh_server_id_ttl(&self) -> Result<()> {
+        let (res, _) = self.refresh_server_id_ttl_status().await;
+        res
+    }
+
+    async fn refresh_server_id_ttl_status(&self) -> (Result<()>, bool) {
+        if self.released.load(Ordering::SeqCst) {
+            return (
+                Err(Error::Other("server_id lease released".to_owned())),
+                false,
+            );
+        }
         let server_id = self.server_id();
         if server_id == 0 {
-            return Err(Error::Other("server_id is 0".to_owned()));
+            return (Err(Error::Other("server_id is 0".to_owned())), false);
         }
-        let lease_id = self.retrieve_lease_id().await?;
+        let lease_id = match self.retrieve_lease_id().await {
+            Ok(id) => id,
+            Err(e) => return (Err(e), false),
+        };
+        let mut session_ended = false;
         let res = async {
             let (mut keeper, mut stream) = etcd_timeout(
                 LEASE_KEEPALIVE_STREAM_TIMEOUT,
@@ -334,16 +396,25 @@ impl ServerIdLease {
             match tokio::time::timeout(LEASE_KEEPALIVE_STREAM_TIMEOUT, stream.message()).await {
                 Ok(Ok(Some(resp))) if resp.ttl() > 0 => {}
                 Ok(Ok(Some(_))) => {
+                    session_ended = true;
                     return Err(Error::Other("server_id etcd lease expired".to_owned()));
                 }
                 Ok(Ok(None)) => {
                     return Err(Error::Other("server_id keepalive stream ended".to_owned()));
                 }
-                Ok(Err(e)) => return Err(e.into()),
+                Ok(Err(e)) => {
+                    let err: Error = e.into();
+                    session_ended = is_session_ended_error(&err);
+                    return Err(err);
+                }
                 Err(_) => return Err(Error::Timeout),
             }
             let key = keys::server_id_key(server_id);
-            put_with_retry(&self.etcd, &key, "0", lease_id).await
+            if let Err(e) = put_with_retry(&self.etcd, &key, "0", lease_id).await {
+                session_ended = is_session_ended_error(&e);
+                return Err(e);
+            }
+            Ok(())
         }
         .await;
         match res {
@@ -354,7 +425,7 @@ impl ServerIdLease {
                     "serverID" => server_id,
                     "lease id" => lease_hex.as_str(),
                 );
-                Ok(())
+                (Ok(()), false)
             }
             Err(e) => {
                 let err_str = e.to_string();
@@ -363,7 +434,7 @@ impl ServerIdLease {
                     "serverID" => server_id,
                     "error" => err_str.as_str(),
                 );
-                Err(e)
+                (Err(e), session_ended)
             }
         }
     }
@@ -371,27 +442,37 @@ impl ServerIdLease {
     /// Releases `/tidb/server_id/<id>` and revokes its lease on clean shutdown.
     // go: Domain.releaseServerID L1
     pub async fn release_server_id(&self) {
+        self.released.store(true, Ordering::SeqCst);
         let server_id = self.server_id.swap(0, Ordering::SeqCst);
-        if server_id == 0 {
-            return;
-        }
-        self.notify_change(server_id, false);
-        let key = keys::server_id_key(server_id);
-        let mut last_err = None;
-        for _ in 0..REFRESH_SERVER_ID_RETRY_CNT {
-            match etcd_timeout(
-                ACQUIRE_SERVER_ID_TIMEOUT,
-                self.etcd.clone().delete(key.as_str(), None),
-            )
-            .await
-            {
-                Ok(_) => {
-                    last_err = None;
-                    break;
+        if server_id != 0 {
+            self.notify_change(server_id, false);
+            let key = keys::server_id_key(server_id);
+            let mut last_err = None;
+            for _ in 0..REFRESH_SERVER_ID_RETRY_CNT {
+                match etcd_timeout(
+                    ACQUIRE_SERVER_ID_TIMEOUT,
+                    self.etcd.clone().delete(key.as_str(), None),
+                )
+                .await
+                {
+                    Ok(_) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => last_err = Some(e),
                 }
-                Err(e) => last_err = Some(e),
+                tokio::time::sleep(ACQUIRE_SERVER_ID_RETRY_INTERVAL).await;
             }
-            tokio::time::sleep(ACQUIRE_SERVER_ID_RETRY_INTERVAL).await;
+            if let Some(e) = last_err {
+                let err_str = e.to_string();
+                tidb_base::log_error!(
+                    "releaseServerID fail",
+                    "serverID" => server_id,
+                    "error" => err_str.as_str(),
+                );
+            } else {
+                tidb_base::log_info!("releaseServerID succeed", "serverID" => server_id);
+            }
         }
         if let Some(lease) = self.lease_id.lock().await.take() {
             let _ = etcd_timeout(
@@ -399,16 +480,6 @@ impl ServerIdLease {
                 self.etcd.clone().lease_revoke(lease),
             )
             .await;
-        }
-        if let Some(e) = last_err {
-            let err_str = e.to_string();
-            tidb_base::log_error!(
-                "releaseServerID fail",
-                "serverID" => server_id,
-                "error" => err_str.as_str(),
-            );
-        } else {
-            tidb_base::log_info!("releaseServerID succeed", "serverID" => server_id);
         }
     }
 
@@ -420,14 +491,20 @@ impl ServerIdLease {
         on_restored: Arc<dyn Fn() + Send + Sync>,
     ) {
         // log-skip: Domain.serverIDKeeper recover (tokio task panics propagate to shutdown)
-        let mut watchdog =
-            ServerIdWatchdog::new(Instant::now(), self.timing.lost_connection_to_pd_timeout);
+        let mut watchdog = ServerIdWatchdog::new(
+            self.timing.lost_connection_to_pd_timeout,
+            self.is_lost_connection_to_pd(),
+        );
         let mut keepalive_tick = tokio::time::interval(self.timing.keepalive_interval);
         keepalive_tick.tick().await;
         let mut restored_tick = tokio::time::interval(self.timing.check_restored_interval);
         restored_tick.tick().await;
 
         loop {
+            if *stop.borrow() {
+                tidb_base::log_info!("serverIDKeeper exited.");
+                return;
+            }
             tokio::select! {
                 _ = stop.changed() => {
                     if *stop.borrow() {
@@ -437,8 +514,19 @@ impl ServerIdLease {
                 }
                 _ = keepalive_tick.tick() => {
                     if !self.is_lost_connection_to_pd() {
-                        let ok = self.refresh_server_id_ttl().await.is_ok();
-                        if !ok {
+                        let (res, session_ended) = tokio::select! {
+                            _ = stop.wait_for(|s| *s) => {
+                                tidb_base::log_info!("serverIDKeeper exited.");
+                                return;
+                            }
+                            out = self.refresh_server_id_ttl_status() => out,
+                        };
+                        let ok = res.is_ok();
+                        // Only drop/restart the etcd lease session when the lease actually ended
+                        // (Go `case <-sessionDone():` in domain.go:3405-3410), never on transient
+                        // network/timeout failures.
+                        if session_ended {
+                            tidb_base::log_info!("serverIDSession need restart");
                             *self.lease_id.lock().await = None;
                         }
                         if watchdog.on_keepalive_result(ok, Instant::now()) == KeeperAction::LostConnectionToPd {
@@ -453,18 +541,30 @@ impl ServerIdLease {
                     }
                 }
                 _ = restored_tick.tick() => {
-                    if self.is_lost_connection_to_pd()
-                        && let Ok(_new_id) = self.acquire_server_id().await
-                    {
-                        tidb_base::log_info!("restored connection to PD");
-                        self.lost_connection_to_pd.store(false, Ordering::SeqCst);
-                        let _ = watchdog.on_keepalive_result(true, Instant::now());
-                        on_restored();
+                    if self.is_lost_connection_to_pd() {
+                        let acq = tokio::select! {
+                            _ = stop.wait_for(|s| *s) => {
+                                tidb_base::log_info!("serverIDKeeper exited.");
+                                return;
+                            }
+                            r = self.acquire_server_id() => r,
+                        };
+                        if acq.is_ok() {
+                            tidb_base::log_info!("restored connection to PD");
+                            self.lost_connection_to_pd.store(false, Ordering::SeqCst);
+                            let _ = watchdog.on_keepalive_result(true, Instant::now());
+                            on_restored();
+                        }
                     }
                 }
             }
         }
     }
+}
+
+fn is_session_ended_error(err: &Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("requested lease not found") || msg.contains("server_id etcd lease expired")
 }
 
 async fn put_with_retry(etcd: &EtcdClient, key: &str, value: &str, lease_id: i64) -> Result<()> {
@@ -555,12 +655,37 @@ mod tests {
             (MAX_SERVER_ID_32 + 1..=MAX_SERVER_ID_64).contains(&upgraded_conflict),
             "upgraded_conflict={upgraded_conflict}"
         );
+
+        // High all_server_count (> 90% of MAX_SERVER_ID_32) triggers 64-bit upgrade even when
+        // few 32-bit server_ids are in used_32 (Go counts len(allServerInfo), domain.go:3295).
+        let upgraded_all_info = propose_server_id_from_state(1900, &used, 0, true);
+        assert!(
+            (MAX_SERVER_ID_32 + 1..=MAX_SERVER_ID_64).contains(&upgraded_all_info),
+            "upgraded_all_info={upgraded_all_info}"
+        );
     }
 
     #[test]
-    fn watchdog_triggers_kill_all_after_6h_disconnect_and_recovers() {
+    fn watchdog_zero_last_succeed_and_6h_disconnect_recovery() {
         let t0 = Instant::now();
-        let mut wd = ServerIdWatchdog::new(t0, LOST_CONNECTION_TO_PD_TIMEOUT);
+        // Before any keepalive succeeds, last_succeed is None (Go zero time.Time): a keepalive
+        // failure with positive lost_timeout triggers LostConnectionToPd immediately.
+        let mut wd_unprimed = ServerIdWatchdog::new(LOST_CONNECTION_TO_PD_TIMEOUT, false);
+        assert_eq!(
+            wd_unprimed.on_keepalive_result(false, t0),
+            KeeperAction::LostConnectionToPd
+        );
+        assert!(wd_unprimed.is_lost());
+        assert_eq!(
+            wd_unprimed.on_keepalive_result(true, t0 + Duration::from_secs(10)),
+            KeeperAction::RestoredConnectionToPd
+        );
+        assert!(!wd_unprimed.is_lost());
+
+        // Once primed by a successful keepalive (or startup restore), transient errors within
+        // 6h stay healthy; >6h triggers LostConnectionToPd, then recovers on ok.
+        let mut wd = ServerIdWatchdog::new(LOST_CONNECTION_TO_PD_TIMEOUT, false);
+        assert_eq!(wd.on_keepalive_result(true, t0), KeeperAction::Healthy);
         assert_eq!(
             wd.on_keepalive_result(false, t0 + Duration::from_secs(3600)),
             KeeperAction::TransientFailure
@@ -576,5 +701,19 @@ mod tests {
             KeeperAction::RestoredConnectionToPd
         );
         assert!(!wd.is_lost());
+    }
+
+    #[test]
+    fn lease_session_ended_detection_distinguishes_transient_errors() {
+        assert!(!is_session_ended_error(&Error::Timeout));
+        assert!(!is_session_ended_error(&Error::Other(
+            "server_id keepalive stream ended".to_owned()
+        )));
+        assert!(is_session_ended_error(&Error::Other(
+            "server_id etcd lease expired".to_owned()
+        )));
+        assert!(is_session_ended_error(&Error::Other(
+            "etcdserver: requested lease not found".to_owned()
+        )));
     }
 }

@@ -203,6 +203,9 @@ pub(crate) async fn run<S, F>(
         Ok((mut io, (handler, capability, user))) => {
             io.flush_counts();
             let ctrl = handler.conn_control();
+            if let Some(ctrl_ref) = &ctrl {
+                io.set_conn_shutdown(ctrl_ref.conn_shutdown.clone()).await;
+            }
             if let (Some(mgr), Some(ctrl_ref)) = (&mgr, &ctrl) {
                 mgr.register_conn(Arc::clone(ctrl_ref));
             }
@@ -1215,25 +1218,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static, H: SessionHandler> Conn
                         ctrl.killer.reset();
                     }
                     let ctrl_clone = self.ctrl.clone();
-                    let dispatch_res = {
+                    let catch_res = {
                         let _reset_guard = DispatchResetGuard {
                             ctrl: ctrl_clone.as_ref(),
                         };
-                        let mut fut = std::pin::pin!(tidb_base::panic_guard::catch_unwind_future(
-                            self.dispatch(cmd, body)
-                        ));
-                        tokio::select! {
-                            biased;
-                            _ = wait_conn_shutdown(ctrl_clone.as_deref()) => {
-                                None
-                            }
-                            r = &mut fut => Some(r),
-                        }
-                    };
-                    let Some(catch_res) = dispatch_res else {
-                        self.command_metrics(cmd, start, Some("query interrupted"));
-                        tidb_metrics::disconnected(tidb_metrics::Disconnect::Error);
-                        return;
+                        tidb_base::panic_guard::catch_unwind_future(self.dispatch(cmd, body)).await
                     };
                     match catch_res {
                         Ok(r) => r,

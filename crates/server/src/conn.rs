@@ -75,12 +75,11 @@ enum WriteChunkErr {
 /// by the connection afterwards (Go's `writePrepare` dumps column definitions with the
 /// encoder of the previous result set, or the default one before the first).
 ///
-/// Emits Go's `ERROR "write query result panic"` log on `1317/3024/8175/8176/8253`
-/// originating outside `rs.Next()` (errors from `rs.Next()` are already logged as
-/// `WARN "execute sql panic"` in `RecordSet::next`).
+/// Emits Go's `ERROR "write query result panic"` log on `1317/3024/8175/8176` originating
+/// outside `rs.Next()`.
 /// The cursor branch (`SERVER_STATUS_CURSOR_EXISTS`, `writeChunksWithFetchSize`) is never
 /// taken: the VS1 router keeps cursors on the PoC (plan §4.3 step 0).
-// go: clientConn.writeResultSet L2 (no cursor branch: cursors stay on the PoC; emits Go's write query result panic log on 1317/3024/8175/8176/8253 outside rs.Next, Decision 10)
+// go: clientConn.writeResultSet L2 (no cursor branch: cursors stay on the PoC; emits Go's write query result panic log on 1317/3024/8175/8176 outside rs.Next, Decision 10)
 pub async fn write_result_set(
     se: &mut Session,
     rs: &mut ResultSet,
@@ -186,17 +185,11 @@ async fn write_chunks_inner(
             }
             out.rows.push(data);
         }
-        se.sql_killer()
-            .handle_signal()
-            .map_err(WriteChunkErr::FromWrite)?;
     }
     // glue: the column definitions as sent, for the router (moved out of the result set,
     // whose `Columns` cache Go keeps until the result set is closed; nothing reads it after
     // the last `Next`).
     out.infos = rs.take_columns();
     rs.finish(se).await.map_err(WriteChunkErr::FromWrite)?;
-    se.sql_killer()
-        .handle_signal()
-        .map_err(WriteChunkErr::FromWrite)?;
     Ok(first_next)
 }

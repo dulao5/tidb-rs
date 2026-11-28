@@ -332,16 +332,15 @@ impl SqlKiller {
     }
 }
 
-/// Returns whether `err` is one of the 5 runtime kill / timeout / OOM / runaway errors
-/// (`1317`, `3024`, `8175`, `8176`, `8253`) that Go propagates via `panic` at statement
-/// boundaries and never trigger Router fallback.
-// glue: runtime kill/OOM/runaway classification shared across executor, server, and session
+/// Returns whether `err` is one of the 4 runtime kill / timeout / OOM errors
+/// (`1317`, `3024`, `8175`, `8176`) that Go recovers and logs at `Compiler.Compile`,
+/// `ExecStmt.Exec`, and `clientConn.writeResultSet`.
+// go-part: Compiler.Compile / ExecStmt.Exec / clientConn.writeResultSet recover guard (4 codes)
 pub fn is_runtime_kill_or_oom_error(err: &Error) -> bool {
     exeerrors::ErrQueryInterrupted.equal(err)
         || exeerrors::ErrMaxExecTimeExceeded.equal(err)
         || exeerrors::ErrMemoryExceedForQuery.equal(err)
         || exeerrors::ErrMemoryExceedForInstance.equal(err)
-        || exeerrors::ErrResourceGroupQueryRunawayInterrupted.equal(err)
 }
 
 #[cfg(test)]
@@ -462,5 +461,23 @@ mod tests {
         k.reset();
         assert_eq!(k.get_kill_signal(), UnspecifiedKillSignal);
         assert_eq!(reset_hits.load(SeqCst), 1);
+    }
+
+    #[test]
+    fn runtime_kill_or_oom_matches_go_four_panic_recover_codes_only() {
+        let mut runtime_codes = [
+            QueryInterrupted,
+            MaxExecTimeExceeded,
+            QueryMemoryExceeded,
+            ServerMemoryExceeded,
+        ]
+        .into_iter();
+        assert!(runtime_codes.all(|sig| {
+            let err = SqlKiller::error_for_signal(sig, 42).unwrap();
+            is_runtime_kill_or_oom_error(&err)
+        }));
+        let runaway = SqlKiller::error_for_signal(RunawayQueryExceeded, 42).unwrap();
+        assert_eq!(runaway.code(), 8253);
+        assert!(!is_runtime_kill_or_oom_error(&runaway));
     }
 }

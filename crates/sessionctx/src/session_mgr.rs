@@ -226,6 +226,13 @@ pub trait SessionManager: Send + Sync {
         true
     }
 
+    /// Returns `true` when global kill is active in cluster mode and the node has lost or
+    /// failed to acquire its `/tidb/server_id` PD lease (Go `Domain.IsLostConnectionToPD`).
+    // glue: Server.Run reject connection guard when PD connectivity is lost
+    fn is_lost_connection_to_pd(&self) -> bool {
+        false
+    }
+
     /// Sends a remote `KILL` RPC (`ExecType::TypeKill`) to `target_server_id`.
     // glue: remote kill RPC hook (SimpleExec::killRemoteConn)
     fn kill_remote_conn(

@@ -393,7 +393,9 @@ async fn executor_kill_and_panic_logs_match_go_whole_line() {
     };
 
     for (sig, err, err_text) in all_runtime_cases(42) {
-        // 2. Compiler::compile panic log (pkg/executor/compiler.go:62).
+        let expects_panic_log = sig != RunawayQueryExceeded;
+
+        // 2. Compiler::compile panic log (pkg/executor/compiler.go:62): 4 codes only (1317/3024/8175/8176).
         let mut s = KillLogSession::new(42, "alias1", Arc::clone(&is));
         s.advise_err = Some(err.clone());
         let _ = sink.take();
@@ -402,15 +404,22 @@ async fn executor_kill_and_panic_logs_match_go_whole_line() {
             .err()
             .unwrap();
         assert_eq!(compile_err.code(), err.code());
-        let line = String::from_utf8(sink.take()).unwrap();
-        assert_eq!(
-            normalize_stack_line(line.trim_end_matches('\n'), "compiler.rs"),
-            format!(
-                "[ERROR] [compiler.rs:<LINE>] [\"compile SQL panic\"] [conn=42] [session_alias=alias1] [SQL=\"SELECT 1\"] [stack=\"<STACK>\"] [recover=\"{err_text}\"]"
-            )
-        );
+        let raw_compile = String::from_utf8(sink.take()).unwrap();
+        if expects_panic_log {
+            assert_eq!(
+                normalize_stack_line(raw_compile.trim_end_matches('\n'), "compiler.rs"),
+                format!(
+                    "[ERROR] [compiler.rs:<LINE>] [\"compile SQL panic\"] [conn=42] [session_alias=alias1] [SQL=\"SELECT 1\"] [stack=\"<STACK>\"] [recover=\"{err_text}\"]"
+                )
+            );
+        } else {
+            assert!(
+                raw_compile.is_empty(),
+                "8253 must not emit compile SQL panic, got {raw_compile:?}"
+            );
+        }
 
-        // 3. ExecStmt::exec panic log (pkg/executor/adapter.go:539).
+        // 3. ExecStmt::exec panic log (pkg/executor/adapter.go:539): 4 codes only (1317/3024/8175/8176).
         let mut s = KillLogSession::new(42, "alias1", Arc::clone(&is));
         let mut stmt = Compiler
             .compile(&mut s, parse_select(), "SELECT 1")
@@ -419,13 +428,21 @@ async fn executor_kill_and_panic_logs_match_go_whole_line() {
         let _ = sink.take();
         let exec_err = stmt.exec(&mut s).await.err().unwrap();
         assert_eq!(exec_err.code(), err.code());
-        let line = String::from_utf8(sink.take()).unwrap();
-        assert_eq!(
-            normalize_stack_line(line.trim_end_matches('\n'), "adapter.rs"),
-            "[WARN] [adapter.rs:<LINE>] [\"execute sql panic\"] [conn=42] [session_alias=alias1] [sql=\"SELECT 1\"] [stack=\"<STACK>\"]"
-        );
+        let raw_exec = String::from_utf8(sink.take()).unwrap();
+        if expects_panic_log {
+            assert_eq!(
+                normalize_stack_line(raw_exec.trim_end_matches('\n'), "adapter.rs"),
+                "[WARN] [adapter.rs:<LINE>] [\"execute sql panic\"] [conn=42] [session_alias=alias1] [sql=\"SELECT 1\"] [stack=\"<STACK>\"]"
+            );
+        } else {
+            assert!(
+                raw_exec.is_empty(),
+                "8253 must not emit execute sql panic, got {raw_exec:?}"
+            );
+        }
 
-        // 4. RecordSet::next panic log (pkg/executor/adapter.go:164).
+        // 4. RecordSet::next top HandleSignal returns error directly without emitting "execute sql panic"
+        // (Go pkg/executor/adapter.go:166-168).
         let mut s = KillLogSession::new(42, "alias1", Arc::clone(&is));
         let mut stmt = Compiler
             .compile(&mut s, parse_select(), "SELECT 1")
@@ -440,13 +457,11 @@ async fn executor_kill_and_panic_logs_match_go_whole_line() {
             .unwrap()
             .lines()
             .filter(|l| !l.contains("global memory controller, NeedKill"))
-            .map(|l| normalize_stack_line(l, "adapter.rs"))
+            .map(ToOwned::to_owned)
             .collect();
-        assert_eq!(
-            lines,
-            vec![
-                "[WARN] [adapter.rs:<LINE>] [\"execute sql panic\"] [conn=42] [session_alias=alias1] [sql=\"SELECT 1\"] [stack=\"<STACK>\"]"
-            ]
+        assert!(
+            lines.is_empty(),
+            "RecordSet::next top HandleSignal must not emit execute sql panic (sig={sig}): {lines:?}"
         );
         rs.close(&mut stmt, &mut s).await.unwrap();
         s.killer.reset();

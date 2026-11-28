@@ -1,12 +1,14 @@
 //! Packet framing: 3-byte length + 1-byte sequence id, with payloads of 16 MiB - 1 or more split
 //! across several packets (TiDB `server/internal/packetio`).
 
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
+use tidb_runtime::cancel::ChildToken;
 use tokio::io::{
     AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter,
     ReadHalf, WriteHalf,
@@ -14,6 +16,29 @@ use tokio::io::{
 use tokio::sync::Mutex;
 
 use crate::constants::MAX_PAYLOAD_LEN;
+
+fn io_timeout_err() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "i/o timeout")
+}
+
+async fn io_with_shutdown<T, F>(shutdown: Option<&ChildToken>, fut: F) -> io::Result<T>
+where
+    F: Future<Output = io::Result<T>>,
+{
+    match shutdown {
+        Some(tok) => {
+            if tok.is_cancelled() {
+                return Err(io_timeout_err());
+            }
+            tokio::select! {
+                biased;
+                () = tok.cancelled() => Err(io_timeout_err()),
+                res = fut => res,
+            }
+        }
+        None => fut.await,
+    }
+}
 
 /// Errors from reading a packet.
 #[derive(Debug)]
@@ -112,6 +137,7 @@ pub struct PacketReader<R> {
     seq: Arc<AtomicU8>,
     max_allowed_packet: usize,
     counts: Arc<SharedIoCounts>,
+    conn_shutdown: Option<ChildToken>,
 }
 
 impl<R: AsyncRead + Unpin> PacketReader<R> {
@@ -127,6 +153,7 @@ impl<R: AsyncRead + Unpin> PacketReader<R> {
             seq,
             max_allowed_packet,
             counts,
+            conn_shutdown: None,
         }
     }
 
@@ -140,10 +167,12 @@ impl<R: AsyncRead + Unpin> PacketReader<R> {
     ///
     /// Sequence ID is incremented only after verifying `header[3] == expected`.
     pub async fn read_packet(&mut self) -> Result<Vec<u8>, PacketError> {
+        let shutdown = self.conn_shutdown.clone();
         let mut payload = Vec::new();
         loop {
             let mut header = [0u8; 4];
-            let first = self.stream.read(&mut header[..1]).await?;
+            let first =
+                io_with_shutdown(shutdown.as_ref(), self.stream.read(&mut header[..1])).await?;
             if first == 0 {
                 if payload.is_empty() {
                     return Err(PacketError::Eof);
@@ -153,8 +182,7 @@ impl<R: AsyncRead + Unpin> PacketReader<R> {
                     "unexpected EOF",
                 )));
             }
-            self.stream
-                .read_exact(&mut header[1..])
+            io_with_shutdown(shutdown.as_ref(), self.stream.read_exact(&mut header[1..]))
                 .await
                 .map_err(|e| {
                     if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -181,19 +209,21 @@ impl<R: AsyncRead + Unpin> PacketReader<R> {
             }
             let start = payload.len();
             payload.resize(start + len, 0);
-            self.stream
-                .read_exact(&mut payload[start..])
-                .await
-                .map_err(|e| {
-                    if e.kind() == io::ErrorKind::UnexpectedEof {
-                        PacketError::Io(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "unexpected EOF",
-                        ))
-                    } else {
-                        PacketError::Io(e)
-                    }
-                })?;
+            io_with_shutdown(
+                shutdown.as_ref(),
+                self.stream.read_exact(&mut payload[start..]),
+            )
+            .await
+            .map_err(|e| {
+                if e.kind() == io::ErrorKind::UnexpectedEof {
+                    PacketError::Io(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "unexpected EOF",
+                    ))
+                } else {
+                    PacketError::Io(e)
+                }
+            })?;
             if len < MAX_PAYLOAD_LEN {
                 // Go counts the payload of the logical packet, without headers.
                 self.counts
@@ -228,6 +258,7 @@ pub struct PacketWriter<W> {
     stream: BufWriter<W>,
     seq: Arc<AtomicU8>,
     counts: Arc<SharedIoCounts>,
+    conn_shutdown: Option<ChildToken>,
 }
 
 impl<W: AsyncWrite + Unpin> PacketWriter<W> {
@@ -237,6 +268,7 @@ impl<W: AsyncWrite + Unpin> PacketWriter<W> {
             stream: BufWriter::with_capacity(16 * 1024, stream),
             seq,
             counts,
+            conn_shutdown: None,
         }
     }
 
@@ -248,6 +280,10 @@ impl<W: AsyncWrite + Unpin> PacketWriter<W> {
     /// Buffers one logical packet, splitting it if needed. A payload whose length is a multiple
     /// of `MAX_PAYLOAD_LEN` is terminated by an empty packet.
     pub async fn write_packet(&mut self, payload: &[u8]) -> io::Result<()> {
+        let shutdown = self.conn_shutdown.clone();
+        if shutdown.as_ref().is_some_and(ChildToken::is_cancelled) {
+            return Err(io_timeout_err());
+        }
         // Go counts the logical packet with one 4-byte header.
         self.counts
             .written
@@ -257,10 +293,12 @@ impl<W: AsyncWrite + Unpin> PacketWriter<W> {
             let n = rest.len().min(MAX_PAYLOAD_LEN);
             let len = (n as u32).to_le_bytes();
             let seq = self.seq.fetch_add(1, Ordering::SeqCst);
-            self.stream
-                .write_all(&[len[0], len[1], len[2], seq])
-                .await?;
-            self.stream.write_all(&rest[..n]).await?;
+            io_with_shutdown(
+                shutdown.as_ref(),
+                self.stream.write_all(&[len[0], len[1], len[2], seq]),
+            )
+            .await?;
+            io_with_shutdown(shutdown.as_ref(), self.stream.write_all(&rest[..n])).await?;
             rest = &rest[n..];
             if n < MAX_PAYLOAD_LEN {
                 return Ok(());
@@ -269,7 +307,8 @@ impl<W: AsyncWrite + Unpin> PacketWriter<W> {
     }
 
     pub async fn flush(&mut self) -> io::Result<()> {
-        self.stream.flush().await
+        let shutdown = self.conn_shutdown.clone();
+        io_with_shutdown(shutdown.as_ref(), self.stream.flush()).await
     }
 
     /// Shuts down the write side (best effort, used on connection close).
@@ -337,6 +376,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> PacketIo<S> {
     /// Continues with a given sequence id (after replacing the underlying stream).
     pub fn set_sequence(&mut self, seq: u8) {
         self.seq.store(seq, Ordering::SeqCst);
+    }
+
+    /// Attaches the per-connection `KILL CONNECTION` shutdown token so blocking packet I/O
+    /// aborts immediately when the connection is marked `WaitShutdown` (Go `SetReadDeadline` /
+    /// `SetWriteDeadline` in `server.go:942-947`).
+    pub async fn set_conn_shutdown(&mut self, shutdown: ChildToken) {
+        self.reader.lock().await.conn_shutdown = Some(shutdown.clone());
+        self.writer.conn_shutdown = Some(shutdown);
     }
 
     /// Returns the stream and the bytes already read from it but not consumed. Pending writes

@@ -66,7 +66,7 @@ impl CheckpointHook for KillCheckHook<'_> {
         if let Some(kc) = self.kill_cancel
             && kc.is_killed()
         {
-            return Err(SqlKiller::signal_to_error(kc.signal(), 0));
+            return Err(crate::driver::error::store_signal_to_error(kc.signal()));
         }
         Ok(())
     }

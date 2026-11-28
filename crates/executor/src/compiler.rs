@@ -139,7 +139,7 @@ impl Compiler {
     /// hands the same `Arc` to the transaction manager). An `Execute` plan of a point get
     /// takes the point plan short path when `IsSafeToReusePointGetExecutor` says so (D05.3
     /// spec §10).
-    // go: Compiler.Compile L2 (emits Go's compile SQL panic error log on 1317/3024/8175/8176/8253, N3 §3.4 & Decision 10)
+    // go: Compiler.Compile L2 (emits Go's compile SQL panic error log on 1317/3024/8175/8176, N3 §3.4 & Decision 10)
     pub fn compile(
         &self,
         sctx: &mut dyn SessionContext,

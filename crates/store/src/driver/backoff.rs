@@ -9,11 +9,10 @@ use std::future::Future;
 
 use tidb_base::Error;
 use tidb_kv::Context;
-use tidb_memory::sqlkiller::SqlKiller;
 use tidb_runtime::KillCancel;
 use tikv_client::metrics::BackoffType;
 
-use super::error::{TiKVError, to_tidb_err};
+use super::error::{TiKVError, store_signal_to_error, to_tidb_err};
 use crate::copr::tikv::Variables;
 
 /// Backoffer wraps tikv.Backoffer and converts the error which returns by the functions of
@@ -97,7 +96,7 @@ where
         Some(kc) => {
             tokio::select! {
                 biased;
-                _ = kc.cancelled() => Err(SqlKiller::signal_to_error(kc.signal(), 0)),
+                _ = kc.cancelled() => Err(store_signal_to_error(kc.signal())),
                 res = fut => res.map_err(|e| to_tidb_err(TiKVError::from(e))),
             }
         }
@@ -211,6 +210,7 @@ mod tests {
     #[tokio::test]
     async fn kill_cancel_aborts_backoff_sleep() {
         use std::sync::Arc;
+        use tidb_memory::sqlkiller::SqlKiller;
         let killer = SqlKiller::new();
         let kc = KillCancel::new(killer.signal_handle());
         let k2 = Arc::clone(&killer);
@@ -261,5 +261,45 @@ mod tests {
             .await
             .unwrap_err();
         assert!(super::super::error::ErrRegionUnavailable.equal(&err));
+    }
+
+    #[tokio::test]
+    async fn run_with_cancel_maps_all_five_signals_via_store_error() {
+        use std::sync::Arc;
+        use tidb_memory::sqlkiller::{
+            MaxExecTimeExceeded, QueryInterrupted, QueryMemoryExceeded, RunawayQueryExceeded,
+            ServerMemoryExceeded, SqlKiller,
+        };
+        let expected = [
+            (
+                QueryInterrupted,
+                "[tikv:1317]Query execution was interrupted",
+            ),
+            (
+                MaxExecTimeExceeded,
+                "[executor:3024]Query execution was interrupted, maximum statement execution time exceeded",
+            ),
+            (
+                QueryMemoryExceeded,
+                "[executor:8175]Your query has been cancelled due to exceeding the allowed memory limit for a single SQL query. Please try narrowing your query scope or increase the tidb_mem_quota_query limit and try again.[conn=-1]",
+            ),
+            (
+                ServerMemoryExceeded,
+                "[executor:8176]Your query has been cancelled due to exceeding the allowed memory limit for the tidb-server instance and this query is currently using the most memory. Please try narrowing your query scope or increase the tidb_server_memory_limit and try again.[conn=-1]",
+            ),
+            (
+                RunawayQueryExceeded,
+                "[executor:8253]Query execution was interrupted, identified as runaway query [exceed tidb side]",
+            ),
+        ];
+        for (sig, exp) in expected {
+            let killer = Arc::new(SqlKiller::new());
+            let kc = KillCancel::new(killer.signal_handle());
+            killer.send_kill_signal(sig);
+            let err = run_with_cancel(Some(&kc), std::future::pending())
+                .await
+                .unwrap_err();
+            assert_eq!(err.to_string(), exp, "signal {sig}");
+        }
     }
 }

@@ -90,49 +90,34 @@ impl RecordSet {
     /// indicating we already finished current query, we need prepare for next query.
     /// If stmt is not nil and chunk with some rows inside, we simply update last query found
     /// rows by the number of row in chunk.
-    // go: recordSet.Next L2 (emits Go's execute sql panic warning on 1317/3024/8175/8176/8253, N3 §3.4 & Decision 10)
+    // go: recordSet.Next L1
     pub async fn next(
         &mut self,
         stmt: &mut ExecStmt,
         sctx: &mut dyn SessionContext,
         req: &mut Chunk,
     ) -> Result<(), Error> {
-        let err = match sctx.sql_killer().handle_signal() {
-            Err(err) => err,
-            Ok(()) => {
-                let (Some(e), Some(ctx)) = (self.executor.as_deref_mut(), self.exec_ctx.as_ref())
-                else {
-                    return Err(Error::plain("the record set is closed"));
-                };
-                match stmt.next(ctx, e, req).await {
-                    Ok(()) => {
-                        let num_rows = req.num_rows();
-                        let vars = sctx.get_session_vars_mut();
-                        if num_rows == 0 {
-                            vars.last_found_rows = vars.stmt_ctx().found_rows();
-                            return Ok(());
-                        }
-                        vars.stmt_ctx().add_found_rows(num_rows as u64);
-                        return Ok(());
-                    }
-                    Err(err) => {
-                        self.last_errs.push(err.clone());
-                        err
-                    }
-                }
-            }
+        // log-skip: recordSet.Next:164 only recover() logs in Go; HandleSignal() returns directly
+        sctx.sql_killer().handle_signal()?;
+        let (Some(e), Some(ctx)) = (self.executor.as_deref_mut(), self.exec_ctx.as_ref()) else {
+            return Err(Error::plain("the record set is closed"));
         };
-        if tidb_memory::sqlkiller::is_runtime_kill_or_oom_error(&err) {
-            let (conn, session_alias, sql, stack) = execute_sql_panic_fields(stmt, sctx);
-            tidb_base::log_warn!(
-                "execute sql panic",
-                "conn" => conn,
-                "session_alias" => session_alias,
-                "sql" => sql.as_str(),
-                "stack" => stack.as_str(),
-            );
+        match stmt.next(ctx, e, req).await {
+            Ok(()) => {
+                let num_rows = req.num_rows();
+                let vars = sctx.get_session_vars_mut();
+                if num_rows == 0 {
+                    vars.last_found_rows = vars.stmt_ctx().found_rows();
+                } else {
+                    vars.stmt_ctx().add_found_rows(num_rows as u64);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.last_errs.push(err.clone());
+                Err(err)
+            }
         }
-        Err(err)
     }
 
     /// NewChunk create a chunk base on top-level executor's exec.NewFirstChunk().
@@ -576,7 +561,7 @@ impl ExecStmt {
     /// sqlexec.RecordSet Next method.
     ///
     /// `Ok(None)` is Go's nil record set (a statement without a result).
-    // go: ExecStmt.Exec L2 (emits Go's execute sql panic warning on 1317/3024/8175/8176/8253, N3 §3.4 & Decision 10)
+    // go: ExecStmt.Exec L2 (emits Go's execute sql panic warning on 1317/3024/8175/8176, N3 §3.4 & Decision 10)
     pub async fn exec(
         &mut self,
         sctx: &mut dyn SessionContext,

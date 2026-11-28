@@ -359,9 +359,7 @@ pub fn lower_statement(stmt: &ast::Stmt, sql: &str) -> Result<Lowered, SqlError>
         ast::Stmt::Kill(k) => {
             let (expr_name, expr_invalid) = match &k.expr {
                 None => (None, false),
-                Some(ast::Expr::FuncCall(fc)) if fc.args.is_empty() && fc.schema.o.is_empty() => {
-                    (Some(fc.fn_name.l()), false)
-                }
+                Some(ast::Expr::FuncCall(fc)) => (Some(fc.fn_name.l()), false),
                 Some(_) => (None, true),
             };
             Statement::Kill(KillIr {
@@ -1062,5 +1060,23 @@ mod tests {
             value("SET max_execution_time = -2e3"),
             SetValue::Literal(Literal::Float(-2000.0))
         );
+    }
+
+    #[test]
+    fn kill_connection_id_with_args_matches_go() {
+        for sql in [
+            "KILL CONNECTION_ID()",
+            "KILL CONNECTION_ID(1)",
+            "KILL TIDB CONNECTION_ID(1, 2)",
+        ] {
+            let lowered = parse_and_lower(sql).expect(sql);
+            match lowered.stmt {
+                Statement::Kill(k) => {
+                    assert_eq!(k.expr_name.as_deref(), Some("connection_id"), "{sql}");
+                    assert!(!k.expr_invalid, "{sql}");
+                }
+                other => panic!("expected KillIr for {sql}, got {other:?}"),
+            }
+        }
     }
 }

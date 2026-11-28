@@ -116,9 +116,15 @@ fn warn_unimplemented_tikv(path: &str) {
     }
 }
 
+/// kvproto `kvrpcpb.Context` (empty header; Go TiDB's `copHandlerCtx` dereferences `req.Context`).
+#[derive(Clone, PartialEq, prost::Message)]
+pub(crate) struct CopContext {}
+
 /// kvproto `coprocessor.Request`: the fields read here (prost skips the others).
 #[derive(Clone, PartialEq, prost::Message)]
 pub(crate) struct CopRequest {
+    #[prost(message, optional, tag = "1")]
+    pub context: Option<CopContext>,
     #[prost(int64, tag = "2")]
     pub tp: i64,
     #[prost(bytes = "vec", tag = "3")]
@@ -386,6 +392,8 @@ pub(crate) async fn send_remote_kill(
 
     let mut dag = DagRequest::default();
     dag.set_start_ts_fallback(u64::MAX);
+    dag.set_time_zone_name("UTC".to_owned());
+    dag.set_flags(0);
     dag.set_executors(vec![kill_exec].into());
     dag.set_encode_type(tipb::EncodeType::TypeDefault);
     let dag_bytes = dag
@@ -393,6 +401,7 @@ pub(crate) async fn send_remote_kill(
         .map_err(|e| tidb_base::errors::new(e.to_string()))?;
 
     let cop_req = CopRequest {
+        context: Some(CopContext::default()),
         tp: REQ_TYPE_DAG,
         data: dag_bytes,
     };
@@ -701,11 +710,22 @@ pub(crate) mod testdata {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::testdata::*;
     use super::*;
 
     async fn cop(tp: i64, data: Vec<u8>) -> CopResponse {
-        coprocessor_with_mgr(&CopRequest { tp, data }, None, "").await
+        coprocessor_with_mgr(
+            &CopRequest {
+                context: Some(CopContext::default()),
+                tp,
+                data,
+            },
+            None,
+            "",
+        )
+        .await
     }
 
     fn frame(flag: u8, msg: &[u8]) -> Bytes {
@@ -831,6 +851,7 @@ mod tests {
         kill_exec.mut_kill().set_conn_id(c1.conn_id);
         kill_exec.mut_kill().set_query(true);
         let req = CopRequest {
+            context: Some(CopContext::default()),
             tp: REQ_TYPE_DAG,
             data: dag(vec![kill_exec], EncodeType::TypeDefault, false),
         };
@@ -846,6 +867,7 @@ mod tests {
         kill_conn.mut_kill().set_conn_id(c1.conn_id);
         kill_conn.mut_kill().set_query(false);
         let req = CopRequest {
+            context: Some(CopContext::default()),
             tp: REQ_TYPE_DAG,
             data: dag(vec![kill_conn], EncodeType::TypeDefault, false),
         };
@@ -895,5 +917,77 @@ mod tests {
             "unknown method KvGet for service tikvpb.Tikv"
         );
         assert_eq!(unknown_method("/x.Y/Z"), "unknown service x.Y");
+    }
+
+    #[tokio::test]
+    async fn send_remote_kill_over_http2_coprocessor_against_real_etcd() {
+        let Ok(pd) = std::env::var("TIDB_RS_PD") else {
+            return;
+        };
+        if pd.is_empty() {
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let status_port = listener.local_addr().unwrap().port();
+        let mgr = ServerSessionManager::new_standalone();
+        let ctrl = mgr.register_new_conn();
+
+        let (stop_status, status_stopped) = tokio::sync::oneshot::channel::<()>();
+        let info = crate::status::StatusInfo {
+            version: poc_domain::serverinfo::version_string(),
+            git_hash: tidb_log::TIDB_GIT_HASH.to_owned(),
+            listen_host: format!("127.0.0.1:{status_port}"),
+            session_mgr: Some(Arc::clone(&mgr)),
+        };
+        let status_task = tokio::spawn(async move {
+            crate::status::serve(listener, info, async move {
+                let _ = status_stopped.await;
+            })
+            .await;
+        });
+
+        let kv = poc_kv::KvClient::connect(vec![pd.clone()])
+            .await
+            .expect("KvClient::connect");
+        let server_info = poc_domain::ServerInfo::new(
+            "127.0.0.1".to_owned(),
+            u32::from(status_port.saturating_add(1)),
+            u32::from(status_port),
+        )
+        .with_disable_rpc(false);
+        let mut cfg = poc_domain::SyncConfig::new(
+            vec![pd],
+            server_info,
+            tidb_distsql::DagContext::select_utc(),
+        );
+        cfg.acquire_server_id = true;
+        cfg.enable_32bits_conn_id = true;
+        let sync = poc_domain::SchemaSync::start(kv, cfg)
+            .await
+            .expect("SchemaSync::start");
+        let target_sid = sync.server_id();
+        assert!(target_sid > 0);
+        assert!(
+            sync.wait_admissible(std::time::Duration::from_secs(15))
+                .await
+        );
+
+        // 1. Remote KILL QUERY via /tikvpb.Tikv/Coprocessor (ExecType::TypeKill).
+        send_remote_kill(&sync, target_sid, ctrl.conn_id, true)
+            .await
+            .expect("remote KILL QUERY RPC must succeed");
+        assert!(ctrl.kill_cancel.is_killed());
+        assert!(!ctrl.is_wait_shutdown());
+
+        // 2. Remote KILL CONNECTION sets wait_shutdown too.
+        ctrl.killer.reset();
+        send_remote_kill(&sync, target_sid, ctrl.conn_id, false)
+            .await
+            .expect("remote KILL CONNECTION RPC must succeed");
+        assert!(ctrl.is_wait_shutdown());
+
+        sync.shutdown().await;
+        let _ = stop_status.send(());
+        let _ = status_task.await;
     }
 }

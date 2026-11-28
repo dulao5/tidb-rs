@@ -59,6 +59,12 @@ struct DistSqlKillHook<'a> {
     killer: &'a SqlKiller,
 }
 
+fn is_copr_kill_or_oom_error(err: &tidb_base::Error) -> bool {
+    is_runtime_kill_or_oom_error(err)
+        || tidb_base::dbterror::exeerrors::ErrResourceGroupQueryRunawayInterrupted.equal(err)
+        || u16::try_from(err.code()).ok() == Some(tidb_base::errno::ErrQueryInterrupted)
+}
+
 impl CheckpointHook for DistSqlKillHook<'_> {
     type Error = tidb_base::Error;
 
@@ -171,7 +177,7 @@ pub async fn select_with_killer(
         .coprocessor_with_cancel(req, killed_signal, kill_cancel)
         .await
         .map_err(|e| match e {
-            poc_kv::Error::Copr(err) if is_runtime_kill_or_oom_error(&err) => Error::Killed(err),
+            poc_kv::Error::Copr(err) if is_copr_kill_or_oom_error(&err) => Error::Killed(err),
             other => Error::Kv(other),
         })?;
     // Go `selectResult.fetchResp`: the time spent waiting for coprocessor responses, recorded

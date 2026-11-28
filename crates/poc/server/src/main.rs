@@ -463,7 +463,12 @@ fn main() {
         };
         let has_status_server = status_listener.is_some();
         let (session_mgr, sync) = if args.schema_sync {
-            let mgr = tidb_server::session_mgr::ServerSessionManager::new_with_server_id(0, false);
+            let mgr = tidb_server::session_mgr::ServerSessionManager::new_with_config(
+                0,
+                false,
+                tidb_cfg.enable_global_kill,
+                tidb_cfg.enable_32bits_connection_id,
+            );
             let ip = advertise_ip(&args, &effective_host);
             let info = ServerInfo::new(
                 ip.to_string(),
@@ -482,38 +487,42 @@ fn main() {
             cfg.ported_domain = new_stack.uses_ported_domain();
             cfg.acquire_server_id = tidb_cfg.enable_global_kill;
             cfg.enable_32bits_conn_id = tidb_cfg.enable_32bits_connection_id;
-            let mgr_for_sid = std::sync::Arc::clone(&mgr);
-            cfg.on_server_id_change = Some(std::sync::Arc::new(move |id, valid| {
-                mgr_for_sid.set_server_id(id, valid);
-            }));
-            let mgr_for_kill_all = std::sync::Arc::clone(&mgr);
-            cfg.kill_all_connections = Some(std::sync::Arc::new(move || {
-                mgr_for_kill_all.kill_all_connections();
-            }));
+            if tidb_cfg.enable_global_kill {
+                let mgr_for_sid = std::sync::Arc::clone(&mgr);
+                cfg.on_server_id_change = Some(std::sync::Arc::new(move |id, valid| {
+                    mgr_for_sid.set_server_id(id, valid);
+                }));
+                let mgr_for_kill_all = std::sync::Arc::clone(&mgr);
+                cfg.kill_all_connections = Some(std::sync::Arc::new(move || {
+                    mgr_for_kill_all.kill_all_connections();
+                }));
+            }
             let sync = SchemaSync::start(kv.clone(), cfg)
                 .await
                 .map_err(|e| std::io::Error::other(format!("start schema sync: {e}")))?;
             if tidb_cfg.enable_global_kill {
                 let sid = sync.server_id();
-                mgr.set_server_id(sid, sid != 0);
-            } else {
-                // Global kill disabled: fall back to local ID allocation cleanly.
-                mgr.set_server_id(1, true);
+                mgr.set_server_id(sid, sid != 0 && !sync.is_lost_connection_to_pd());
+                let sync_for_kill = sync.clone();
+                mgr.set_remote_kill_hook(std::sync::Arc::new(move |target_sid, conn_id, query| {
+                    let sync = sync_for_kill.clone();
+                    Box::pin(async move {
+                        rpc::send_remote_kill(&sync, target_sid, conn_id, query).await
+                    })
+                }));
             }
-            let sync_for_kill = sync.clone();
-            mgr.set_remote_kill_hook(std::sync::Arc::new(move |target_sid, conn_id, query| {
-                let sync = sync_for_kill.clone();
-                Box::pin(
-                    async move { rpc::send_remote_kill(&sync, target_sid, conn_id, query).await },
-                )
-            }));
             (mgr, Some(sync))
         } else {
             tidb_base::log_info!(
                 "schema sync is off: every statement checks the schema version (ADR 0003)",
             );
             (
-                tidb_server::session_mgr::ServerSessionManager::new_standalone(),
+                tidb_server::session_mgr::ServerSessionManager::new_with_config(
+                    1,
+                    true,
+                    tidb_cfg.enable_global_kill,
+                    tidb_cfg.enable_32bits_connection_id,
+                ),
                 None,
             )
         };

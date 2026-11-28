@@ -281,7 +281,50 @@ async fn dispatch_kill_logs_match_go_sequence_across_all_signals() {
         assert_eq!(lines, expected, "signal {sig} ({code})");
     }
 
+    // Also verify KILL CONNECTION lets active SQL fail cooperatively with 1317 (logging [kill]
+    // [query=false] -> "kill initiated" -> "kill finished" -> "command dispatched failed")
+    // before PacketWriter rejects the ERR packet and severs the client connection.
+    let _ = sink.take();
+    let mgr_task = Arc::clone(&mgr);
+    let entered = Arc::clone(&query_entered);
+    let trigger = tokio::spawn(async move {
+        entered.notified().await;
+        mgr_task.kill(conn_id, false, false, false);
+    });
+    let err = conn.query_drop("SELECT SLOW").await.unwrap_err();
+    trigger.await.unwrap();
+    assert!(
+        !matches!(err, mysql_async::Error::Server(_)),
+        "KILL CONNECTION must sever socket rather than sending 1317 ERR, got {err:?}"
+    );
     drop(conn);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while mgr.client_count() > 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(mgr.client_count(), 0);
+    let raw = String::from_utf8(sink.take()).unwrap();
+    let lines: Vec<String> = raw.lines().map(normalize_line).collect();
+    let err_prefix = "[executor:1317]Query execution was interrupted";
+    assert_eq!(
+        lines,
+        vec![
+            format!(
+                "[INFO] [session_mgr.rs:<LINE>] [kill] [conn={conn_id}] [query=false] [maxExecutionTime=false] [runawayExceed=false]"
+            ),
+            format!(
+                "[WARN] [sqlkiller.rs:<LINE>] [\"kill initiated\"] [\"connection ID\"={conn_id}] [reason=\"{err_prefix}\"]"
+            ),
+            format!("[WARN] [sqlkiller.rs:<LINE>] [\"kill finished\"] [conn={conn_id}]"),
+            format!(
+                "[INFO] [conn.rs:<LINE>] [\"command dispatched failed\"] [conn={conn_id}] [session_alias=] \
+                 [connInfo=\"id:{conn_id}, addr:127.0.0.1:<PORT> status:10, collation:utf8mb4_0900_ai_ci, user:root\"] \
+                 [command=Query] [status=\"inTxn:0, autocommit:1\"] [sql=\"SELECT SLOW\"] \
+                 [txn_mode=PESSIMISTIC] [timestamp=0] [err=\"{err_prefix}<STACK>\"]"
+            ),
+        ]
+    );
+
     let _ = stop_tx.send(());
     srv.await.unwrap();
 }

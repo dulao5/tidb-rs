@@ -2555,4 +2555,57 @@ async fn sorted_select_results_checks_sql_killer_during_merge() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), errno::ErrQueryInterrupted as isize);
+
+    // 4. KillCheckHook falls back to store_signal_to_error across all 5 signals when sql_killer is None.
+    let cases = [
+        (
+            tidb_memory::sqlkiller::QueryInterrupted,
+            "[tikv:1317]Query execution was interrupted",
+        ),
+        (
+            tidb_memory::sqlkiller::MaxExecTimeExceeded,
+            "[executor:3024]Query execution was interrupted, maximum statement execution time exceeded",
+        ),
+        (
+            tidb_memory::sqlkiller::QueryMemoryExceeded,
+            "[executor:8175]Your query has been cancelled due to exceeding the allowed memory limit for a single SQL query. Please try narrowing your query scope or increase the tidb_mem_quota_query limit and try again.[conn=-1]",
+        ),
+        (
+            tidb_memory::sqlkiller::ServerMemoryExceeded,
+            "[executor:8176]Your query has been cancelled due to exceeding the allowed memory limit for the tidb-server instance and this query is currently using the most memory. Please try narrowing your query scope or increase the tidb_server_memory_limit and try again.[conn=-1]",
+        ),
+        (
+            tidb_memory::sqlkiller::RunawayQueryExceeded,
+            "[executor:8253]Query execution was interrupted, identified as runaway query [exceed tidb side]",
+        ),
+    ];
+    for (sig, exp) in cases {
+        let killer = SqlKiller::new();
+        let kc = KillCancel::new(killer.signal_handle());
+        killer.send_kill_signal(sig);
+        let child: Box<dyn SelectResult> = Box::new(MockChildResult {
+            chunks: vec![vec![vec![new_int_datum(1)]]].into(),
+            close_err: None,
+            closed: Arc::new(AtomicBool::new(false)),
+        });
+        let mut ssr = new_sorted_select_results(
+            ectx.as_ref(),
+            vec![child],
+            None,
+            vec![ByItems {
+                expr: Expr::Column((*c0).clone()).into_ref(),
+                desc: false,
+            }],
+            None,
+            None,
+            Some(kc),
+        )
+        .unwrap();
+        let mut chk = new_chunk_with_capacity(&fts, 4);
+        let err = ssr
+            .next(&Context::background(), &mut chk)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), exp, "signal {sig}");
+    }
 }

@@ -1239,23 +1239,17 @@ async fn execute_poc_kill(
     killer: &tidb_memory::sqlkiller::SqlKiller,
     warnings: &mut Vec<SQLWarn>,
 ) -> Result<(), SqlError> {
-    // Match Go PlanBuilder.Build (*ast.KillStmt): privilege check only for explicit
-    // numeric target IDs belonging to a different login username.
-    if kill_ir.expr_name.is_none()
-        && !kill_ir.expr_invalid
-        && let Some(sm) = session_mgr
-        && let Some(pi) = sm.get_process_info(kill_ir.connection_id)
-        && pi.user != raw_user
-    {
-        let allowed = privilege_manager.is_some_and(|pm| {
-            pm.request_dynamic_verification(active_roles, "CONNECTION_ADMIN", false)
-        });
-        if !allowed {
-            let err = tidb_base::dbterror::plannererrors::ErrSpecificAccessDenied
-                .gen_with_stack_by_args(tidb_base::go_args!["SUPER or CONNECTION_ADMIN"]);
-            return Err(router::sql_error(&err));
-        }
-    }
+    // Match Go PlanBuilder.Build (*ast.KillStmt): shared privilege check helper (allows when
+    // privilege_manager is absent, matching new stack's check_build_privileges_and_mode).
+    tidb_planner::core::planbuilder::check_kill_privilege(
+        active_roles,
+        privilege_manager,
+        session_mgr,
+        Some(raw_user),
+        kill_ir.connection_id,
+        kill_ir.expr_name.is_some() || kill_ir.expr_invalid,
+    )
+    .map_err(|err| router::sql_error(&err))?;
     let sc = tidb_sessionctx::stmtctx::new_stmt_ctx();
     let simple_kill = SimpleKillStmt {
         query: kill_ir.query,
@@ -1780,8 +1774,11 @@ impl SessionHandler for Session {
     }
 
     fn should_install_connection_alive_during_execute(&self) -> bool {
-        // Read-only node executes no autocommit DML write statements.
-        false
+        // Until D03.1 streams RecordSet rows inside `write_result_set`, both the new stack
+        // (`Router::query`) and PoC (`PocState::query`) pull all chunks inside `query()` /
+        // `execute()`. Install the liveness probe here so slow SELECTs detect peer TCP
+        // disconnect at ~1s just like Go's `handleStmt` -> `setSQLKillerConnectionAlive()`.
+        true
     }
 
     fn set_process_info_command(&mut self, sql: &str, command: u8) {
@@ -3397,6 +3394,47 @@ mod kill_and_guard_tests {
             .unwrap_err();
         assert_eq!(err.code, 1105);
         assert!(err.message.contains("Invalid operation"));
+
+        // 7. When privilege_manager is absent (None), PoC matches new stack and allows cross-user KILL.
+        bob.killer.reset();
+        let mut w = Vec::new();
+        rt.block_on(execute_poc_kill(
+            &parse_kill(&format!("KILL QUERY {}", bob.conn_id)),
+            alice.conn_id,
+            "alice",
+            "127.0.0.1",
+            &[],
+            None,
+            Some(sm_dyn),
+            &alice.killer,
+            &mut w,
+        ))
+        .unwrap();
+        assert_eq!(
+            bob.killer.get_kill_signal(),
+            tidb_memory::sqlkiller::QueryInterrupted
+        );
+        bob.killer.reset();
+
+        // 8. KILL CONNECTION_ID(<args>) matches Go simple.go:2667 (kills caller's own conn).
+        alice.killer.reset();
+        let mut w = Vec::new();
+        let err = rt
+            .block_on(execute_poc_kill(
+                &parse_kill("KILL CONNECTION_ID(1)"),
+                alice.conn_id,
+                "alice",
+                "127.0.0.1",
+                &[],
+                Some(&alice_pm),
+                Some(sm_dyn),
+                &alice.killer,
+                &mut w,
+            ))
+            .unwrap_err();
+        assert_eq!(err.code, 1317);
+        assert!(alice.conn_shutdown.is_cancelled());
+        alice.killer.reset();
     }
 
     #[test]

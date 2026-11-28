@@ -304,6 +304,52 @@ pub fn new_plan_builder<'ast>(opts: &[&dyn PlanBuilderOpt]) -> PlanBuilder<'ast>
     builder
 }
 
+/// Collects `CONNECTION_ADMIN` dynamic privilege visit info for `KILL <id>` when targeting
+/// another user's session (matching Go `PlanBuilder.Build` `*ast.KillStmt`).
+// go-part: PlanBuilder.Build (KillStmt; auto-analyze & SEM checks omitted until ported)
+pub fn collect_kill_visit_info(
+    sm: Option<&dyn tidb_sessionctx::session_mgr::SessionManager>,
+    login_user: Option<&str>,
+    connection_id: u64,
+    has_expr: bool,
+) -> Vec<VisitInfo> {
+    let mut visit_info = Vec::new();
+    if let Some(sm) = sm
+        && !has_expr
+        && let Some(pi) = sm.get_process_info(connection_id)
+        && let Some(user) = login_user
+        && pi.user != user
+    {
+        let err = tidb_base::dbterror::plannererrors::ErrSpecificAccessDenied
+            .gen_with_stack_by_args(tidb_base::go_args!["SUPER or CONNECTION_ADMIN"]);
+        crate::core::logical_plan_builder::append_dynamic_visit_info(
+            &mut visit_info,
+            vec!["CONNECTION_ADMIN".to_owned()],
+            false,
+            Some(err),
+        );
+    }
+    visit_info
+}
+
+/// Shared `KILL` privilege check (allows when `privilege_manager` is `None`, matching the
+/// new stack's `check_build_privileges_and_mode`).
+// glue: shared Kill privilege check across new stack and PoC
+pub fn check_kill_privilege(
+    active_roles: &[tidb_parser::auth::RoleIdentity],
+    privilege_manager: Option<&dyn tidb_privilege::PrivilegeManager>,
+    session_manager: Option<&dyn tidb_sessionctx::session_mgr::SessionManager>,
+    login_user: Option<&str>,
+    connection_id: u64,
+    has_expr: bool,
+) -> Result<(), Error> {
+    let Some(pm) = privilege_manager else {
+        return Ok(());
+    };
+    let visit_info = collect_kill_visit_info(session_manager, login_user, connection_id, has_expr);
+    crate::core::optimizer::check_privilege(active_roles, pm, &visit_info)
+}
+
 impl<'ast> PlanBuilder<'ast> {
     /// Init initialize a PlanBuilder.
     /// Return the original PlannerSelectBlockAsName as well, callers decide if
@@ -376,21 +422,12 @@ impl<'ast> PlanBuilder<'ast> {
     /// Privilege-checked `KILL` builder (Go `PlanBuilder.Build` `*ast.KillStmt` arm).
     // go-part: PlanBuilder.Build (KillStmt; auto-analyze & SEM checks omitted until ported)
     pub fn build_kill(&mut self, ctx: &PlanCtx<'_>, raw: &KillStmt) -> Simple {
-        if let Some(sm) = ctx.session_manager.as_deref()
-            && raw.expr.is_none()
-            && let Some(pi) = sm.get_process_info(raw.connection_id)
-            && let Some(login_user) = &ctx.vars.user
-            && pi.user != login_user.username
-        {
-            let err = tidb_base::dbterror::plannererrors::ErrSpecificAccessDenied
-                .gen_with_stack_by_args(tidb_base::go_args!["SUPER or CONNECTION_ADMIN"]);
-            crate::core::logical_plan_builder::append_dynamic_visit_info(
-                &mut self.visit_info,
-                vec!["CONNECTION_ADMIN".to_owned()],
-                false,
-                Some(err),
-            );
-        }
+        self.visit_info.extend(collect_kill_visit_info(
+            ctx.session_manager.as_deref(),
+            ctx.vars.user.as_ref().map(|u| u.username.as_str()),
+            raw.connection_id,
+            raw.expr.is_some(),
+        ));
         let mut simple = Simple::from_kill(ctx, raw);
         simple.resolve_ctx = self.resolve_ctx.as_ref().map(Arc::clone);
         simple

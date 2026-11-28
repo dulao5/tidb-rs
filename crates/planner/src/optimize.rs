@@ -872,6 +872,7 @@ mod kill_privilege_tests {
         // Own connection, CONNECTION_ID(), and unknown ID require no extra privilege.
         run_kill_plan("KILL QUERY 101", "alice", &handle, Arc::clone(&sm)).unwrap();
         run_kill_plan("KILL CONNECTION_ID()", "alice", &handle, Arc::clone(&sm)).unwrap();
+        run_kill_plan("KILL CONNECTION_ID(1)", "alice", &handle, Arc::clone(&sm)).unwrap();
         run_kill_plan("KILL 99999", "alice", &handle, sm).unwrap();
     }
 }

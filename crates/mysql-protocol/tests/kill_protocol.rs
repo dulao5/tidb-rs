@@ -1,7 +1,6 @@
 //! Protocol-level integration tests for `KILL QUERY`, `KILL CONNECTION`, non-blocking client
 //! disconnect probing, and `ServerSessionManager` connection ID lifecycle.
 
-use std::future::pending;
 use std::net::Shutdown;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use mysql_async::prelude::*;
 use mysql_async::{Opts, OptsBuilder};
+use tidb_mysql_protocol::packet::PacketIo;
 use tidb_mysql_protocol::value::encode_text_row;
 use tidb_mysql_protocol::{
     ColumnDef, ColumnType, ConnectionInfo, Credential, EncodedResultSet, OkInfo, Param,
@@ -30,6 +30,7 @@ struct KillTestFactory {
 enum TestMode {
     SlowUntilKill {
         saw_probe_disconnect: Arc<AtomicBool>,
+        saw_cooperative_abort: Arc<AtomicBool>,
     },
     BigResultSet {
         rows: usize,
@@ -107,11 +108,8 @@ impl SessionHandler for KillTestSession {
         match &self.mode {
             TestMode::SlowUntilKill {
                 saw_probe_disconnect,
+                saw_cooperative_abort,
             } => {
-                if sql.eq_ignore_ascii_case("SLEEP FOREVER") {
-                    pending::<()>().await;
-                    unreachable!();
-                }
                 if sql.eq_ignore_ascii_case("CHECK ALIVE") {
                     loop {
                         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -121,16 +119,16 @@ impl SessionHandler for KillTestSession {
                         }
                     }
                 }
-                tokio::select! {
-                    () = self.ctrl.kill_cancel.cancelled() => {
-                        let err = self.ctrl.killer.handle_signal().expect_err("kill signal must be set");
-                        Err(SqlError::from_tidb_error(&err))
-                    }
-                    () = self.ctrl.conn_shutdown.cancelled() => {
-                        let err = self.ctrl.killer.handle_signal().expect_err("conn_shutdown kill signal");
-                        Err(SqlError::from_tidb_error(&err))
-                    }
+                self.ctrl.kill_cancel.cancelled().await;
+                let err = self
+                    .ctrl
+                    .killer
+                    .handle_signal()
+                    .expect_err("kill signal must be set");
+                if sql.eq_ignore_ascii_case("SLEEP FOREVER") {
+                    saw_cooperative_abort.store(true, Ordering::SeqCst);
                 }
+                Err(SqlError::from_tidb_error(&err))
             }
             TestMode::BigResultSet { rows, row_len } => {
                 let payload = vec![b'x'; *row_len];
@@ -185,6 +183,7 @@ async fn kill_query_returns_1317_and_keeps_conn_usable_and_recycles_id() {
         mgr: Arc::clone(&mgr),
         mode: TestMode::SlowUntilKill {
             saw_probe_disconnect: Arc::new(AtomicBool::new(false)),
+            saw_cooperative_abort: Arc::new(AtomicBool::new(false)),
         },
     };
     let srv = tokio::spawn(async move {
@@ -245,10 +244,12 @@ async fn kill_connection_aborts_idle_and_active_client() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let saw_cooperative_abort = Arc::new(AtomicBool::new(false));
     let factory = KillTestFactory {
         mgr: Arc::clone(&mgr),
         mode: TestMode::SlowUntilKill {
             saw_probe_disconnect: Arc::new(AtomicBool::new(false)),
+            saw_cooperative_abort: Arc::clone(&saw_cooperative_abort),
         },
     };
     let srv = tokio::spawn(async move {
@@ -294,6 +295,10 @@ async fn kill_connection_aborts_idle_and_active_client() {
         .query_drop("SLEEP FOREVER")
         .await
         .expect_err("KILL CONNECTION must sever active command");
+    assert!(
+        saw_cooperative_abort.load(Ordering::SeqCst),
+        "KILL CONNECTION must let dispatch finish cooperatively with 1317 before socket shutdown"
+    );
     assert!(
         !matches!(busy_err, mysql_async::Error::Server(_)),
         "expected transport disconnect, got {busy_err:?}"
@@ -410,6 +415,7 @@ async fn nonblocking_disconnect_probe_detects_client_shut_rdwr() {
         mgr: Arc::clone(&mgr),
         mode: TestMode::SlowUntilKill {
             saw_probe_disconnect: Arc::clone(&saw_probe_disconnect),
+            saw_cooperative_abort: Arc::new(AtomicBool::new(false)),
         },
     };
     let srv = tokio::spawn(async move {
@@ -487,4 +493,97 @@ async fn nonblocking_disconnect_probe_detects_client_shut_rdwr() {
 
     let _ = stop_tx.send(());
     srv.await.unwrap();
+}
+
+#[tokio::test]
+async fn server_rejects_connections_while_pd_lease_lost_and_accepts_once_restored() {
+    let mgr = ServerSessionManager::new_with_config(0, false, true, true);
+    assert!(mgr.is_lost_connection_to_pd());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let factory = KillTestFactory {
+        mgr: Arc::clone(&mgr),
+        mode: TestMode::SlowUntilKill {
+            saw_probe_disconnect: Arc::new(AtomicBool::new(false)),
+            saw_cooperative_abort: Arc::new(AtomicBool::new(false)),
+        },
+    };
+    let srv = tokio::spawn(async move {
+        Server::new(ServerConfig::default(), factory)
+            .serve(listener, async move {
+                let _ = stop_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    // While PD lease is lost, accept loop closes accepted sockets immediately without handshake
+    // or ConnID allocation.
+    let mut raw = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut buf = [0u8; 8];
+    let n = tokio::time::timeout(Duration::from_secs(2), raw.read(&mut buf))
+        .await
+        .expect("rejected connection must close promptly")
+        .unwrap();
+    assert_eq!(n, 0, "expected immediate EOF when PD lease is lost");
+    drop(raw);
+    assert_eq!(mgr.client_count(), 0);
+
+    // Restore server_id lease: first accepted connection receives local_conn_id=1 -> 2097154
+    // (proving rejected connection allocated zero IDs).
+    mgr.set_server_id(1, true);
+    assert!(!mgr.is_lost_connection_to_pd());
+    let opts = Opts::from(
+        OptsBuilder::default()
+            .ip_or_hostname("127.0.0.1")
+            .tcp_port(addr.port())
+            .user(Some("root"))
+            .prefer_socket(false),
+    );
+    let mut conn = mysql_async::Conn::new(opts).await.unwrap();
+    assert_eq!(u64::from(conn.id()), 2_097_154);
+    let v: Option<i64> = conn.query_first("SELECT 1").await.unwrap();
+    assert_eq!(v, Some(1));
+    drop(conn);
+
+    // Losing PD lease again causes subsequent connections to be rejected.
+    mgr.set_server_id(1, false);
+    assert!(mgr.is_lost_connection_to_pd());
+    let mut raw2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let n2 = tokio::time::timeout(Duration::from_secs(2), raw2.read(&mut buf))
+        .await
+        .expect("rejected connection after PD loss must close promptly")
+        .unwrap();
+    assert_eq!(n2, 0);
+
+    let _ = stop_tx.send(());
+    srv.await.unwrap();
+}
+
+#[tokio::test]
+async fn kill_connection_unblocks_stalled_packet_writer_with_timeout() {
+    let (_peer, server_stream) = tokio::io::duplex(64);
+    let mut io = PacketIo::new(server_stream, 16 * 1024 * 1024);
+    let tok = tidb_runtime::cancel::ChildToken::new();
+    io.set_conn_shutdown(tok.clone()).await;
+
+    let cancel_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        tok.cancel();
+    });
+
+    // Write enough bytes to fill both the 16 KiB BufWriter and the 64-byte duplex buffer so
+    // flush blocks until conn_shutdown interrupts it.
+    let big = vec![b'z'; 64 * 1024];
+    let err = tokio::time::timeout(Duration::from_secs(2), async {
+        io.write_packet(&big).await?;
+        io.flush().await
+    })
+    .await
+    .expect("blocked packet writer must unblock on conn_shutdown")
+    .unwrap_err();
+    cancel_task.await.unwrap();
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
 }

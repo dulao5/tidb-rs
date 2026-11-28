@@ -16,7 +16,7 @@ use tidb_memory::sqlkiller::{
 use tidb_runtime::cancel::{ChildToken, KillCancel};
 use tidb_sessionctx::session_mgr::{KillRemoteFuture, ProcessInfo, SessionManager};
 
-use crate::conn_id::{ConnIdAllocator, GlobalAllocator};
+use crate::conn_id::{ConnIdAllocator, GlobalAllocator, SimpleAllocator};
 
 /// Hook invoked by [`ServerSessionManager::kill_remote_conn`] to forward a global `KILL`
 /// over the status-port gRPC `Coprocessor` RPC to `target_server_id`.
@@ -112,6 +112,7 @@ impl ConnControl {
 pub struct ServerSessionManager {
     server_id: Arc<AtomicU64>,
     valid_server_id: Arc<AtomicBool>,
+    global_kill_enabled: bool,
     allocator: Arc<dyn ConnIdAllocator>,
     clients: RwLock<HashMap<u64, Arc<ConnControl>>>,
     remote_kill: ArcSwapOption<RemoteKillFn>,
@@ -121,21 +122,51 @@ impl ServerSessionManager {
     /// Creates a standalone [`ServerSessionManager`] with `server_id = 1` (first conn ID `2097154`).
     // glue: standalone global kill server_id=1
     pub fn new_standalone() -> Arc<Self> {
-        Self::new_with_server_id(1, true)
+        Self::new_with_config(1, true, true, true)
     }
 
-    /// Creates a [`ServerSessionManager`] initialized with `server_id` and lease validity flag.
+    /// Creates a [`ServerSessionManager`] with global kill disabled (`SimpleAllocator`: `1, 2, 3, ...`).
+    // glue: !enable-global-kill fallback matching Go domain.go:1487-1489
+    pub fn new_simple() -> Arc<Self> {
+        Arc::new(Self {
+            server_id: Arc::new(AtomicU64::new(0)),
+            valid_server_id: Arc::new(AtomicBool::new(false)),
+            global_kill_enabled: false,
+            allocator: Arc::new(SimpleAllocator::new()),
+            clients: RwLock::new(HashMap::new()),
+            remote_kill: ArcSwapOption::empty(),
+        })
+    }
+
+    /// Creates a [`ServerSessionManager`] initialized with `server_id` and lease validity flag
+    /// (with global kill & 32-bit connection IDs enabled).
     // glue: cluster / configured server_id initialization
     pub fn new_with_server_id(server_id: u64, valid: bool) -> Arc<Self> {
+        Self::new_with_config(server_id, valid, true, true)
+    }
+
+    /// Creates a [`ServerSessionManager`] honoring both `enable_global_kill` and
+    /// `enable_32bits_connection_id` (matching Go `domain.go:1469-1490`).
+    // go-part: Domain.InitGlobalKill / NewServerSessionManager L1
+    pub fn new_with_config(
+        server_id: u64,
+        valid: bool,
+        enable_global_kill: bool,
+        enable_32bits_conn_id: bool,
+    ) -> Arc<Self> {
+        if !enable_global_kill {
+            return Self::new_simple();
+        }
         let sid = Arc::new(AtomicU64::new(server_id));
         let sid_getter = Arc::clone(&sid);
         let allocator: Arc<dyn ConnIdAllocator> = Arc::new(GlobalAllocator::new(
             Arc::new(move || sid_getter.load(Ordering::SeqCst)),
-            true,
+            enable_32bits_conn_id,
         ));
         Arc::new(Self {
             server_id: sid,
             valid_server_id: Arc::new(AtomicBool::new(valid)),
+            global_kill_enabled: true,
             allocator,
             clients: RwLock::new(HashMap::new()),
             remote_kill: ArcSwapOption::empty(),
@@ -151,6 +182,7 @@ impl ServerSessionManager {
         Arc::new(Self {
             server_id: Arc::new(AtomicU64::new(server_id)),
             valid_server_id: Arc::new(AtomicBool::new(valid)),
+            global_kill_enabled: true,
             allocator,
             clients: RwLock::new(HashMap::new()),
             remote_kill: ArcSwapOption::empty(),
@@ -159,8 +191,17 @@ impl ServerSessionManager {
 
     /// Updates `server_id` and whether the node currently holds a valid `/tidb/server_id` lease.
     pub fn set_server_id(&self, id: u64, valid: bool) {
+        if !self.global_kill_enabled {
+            return;
+        }
         self.server_id.store(id, Ordering::SeqCst);
         self.valid_server_id.store(valid, Ordering::SeqCst);
+    }
+
+    /// Returns `true` when global kill is enabled and this node lacks a valid `/tidb/server_id`
+    /// lease (Go `Domain.IsLostConnectionToPD` + `Server.Run` reject-connection check).
+    pub fn is_lost_connection_to_pd(&self) -> bool {
+        self.global_kill_enabled && !self.valid_server_id.load(Ordering::SeqCst)
     }
 
     /// Installs the cross-node `KILL` RPC dispatcher (`killRemoteConn`).
@@ -294,6 +335,11 @@ impl SessionManager for ServerSessionManager {
         self.valid_server_id.load(Ordering::SeqCst)
     }
 
+    // glue: Server.Run reject connection guard when PD connectivity is lost
+    fn is_lost_connection_to_pd(&self) -> bool {
+        ServerSessionManager::is_lost_connection_to_pd(self)
+    }
+
     // go: SimpleExec.killRemoteConn L2 (hooked into status-port RPC client)
     fn kill_remote_conn(
         &self,
@@ -372,5 +418,45 @@ mod tests {
         c1.killer.reset();
         mgr.kill(c1.conn_id, true, false, true);
         assert_eq!(c1.killer.get_kill_signal(), RunawayQueryExceeded);
+    }
+
+    #[test]
+    fn allocator_honors_global_kill_and_32bits_config_switches() {
+        // 1. enable_global_kill = false -> SimpleAllocator (1, 2, 3), never lost to PD.
+        let simple = ServerSessionManager::new_with_config(1, true, false, true);
+        assert_eq!(simple.server_id(), 0);
+        assert!(!simple.is_lost_connection_to_pd());
+        simple.set_server_id(99, true); // no-op when global kill is off
+        assert_eq!(simple.server_id(), 0);
+        assert_eq!(simple.next_conn_id(), 1);
+        assert_eq!(simple.next_conn_id(), 2);
+        assert_eq!(simple.next_conn_id(), 3);
+
+        // 2. enable_global_kill = true, enable_32bits = true -> 32-bit 2097154, 2097156.
+        let g32 = ServerSessionManager::new_with_config(1, true, true, true);
+        assert_eq!(g32.server_id(), 1);
+        assert!(!g32.is_lost_connection_to_pd());
+        assert_eq!(g32.next_conn_id(), 2_097_154);
+        assert_eq!(g32.next_conn_id(), 2_097_156);
+
+        // 3. enable_global_kill = true, enable_32bits = false -> 64-bit odd IDs immediately.
+        let g64 = ServerSessionManager::new_with_config(1, true, true, false);
+        for expected_local in 1u64..=3 {
+            let id = g64.next_conn_id();
+            assert_eq!(id & 0x1, 1, "expected 64-bit odd ID, got {id}");
+            let (gcid, truncated) = tidb_sessionctx::globalconn::parse_conn_id(id).unwrap();
+            assert!(!truncated);
+            assert!(gcid.is_64bits);
+            assert_eq!(gcid.server_id, 1);
+            assert_eq!(gcid.local_conn_id, expected_local);
+        }
+
+        // Lost PD lease transition toggles is_lost_connection_to_pd().
+        let cluster = ServerSessionManager::new_with_config(0, false, true, true);
+        assert!(cluster.is_lost_connection_to_pd());
+        cluster.set_server_id(7, true);
+        assert!(!cluster.is_lost_connection_to_pd());
+        cluster.set_server_id(7, false);
+        assert!(cluster.is_lost_connection_to_pd());
     }
 }

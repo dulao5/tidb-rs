@@ -22,7 +22,6 @@ use tidb_base::kv::{StoreType, TiDB, TiKV};
 use tidb_kv::kv::{IsoLevel, PriorityHigh, PriorityLow, RC, RCCheckTS, ReqTypeDAG, Request, SI};
 use tidb_kv::option::ReplicaReadLeader;
 use tidb_kv::{Key, KeyRange};
-use tidb_memory::sqlkiller::SqlKiller;
 use tidb_runtime::KillCancel;
 use tikv_client::proto::{coprocessor, kvrpcpb, metapb};
 use tokio::sync::mpsc;
@@ -1327,7 +1326,6 @@ impl<S: TiKVStore> CopIterator<S> {
             .cloned()
             .or_else(|| self.shared.vars.kill_cancel.clone());
         let mut finish = self.shared.finish.clone();
-        let conn_id = self.shared.req.conn_id;
         let resp = match idx {
             Some(i) => {
                 let Some(rx) = self.task_rx[i].as_mut() else {
@@ -1343,7 +1341,7 @@ impl<S: TiKVStore> CopIterator<S> {
                         {
                             let _ = self.finish_tx.send(true);
                         }
-                        return Err(SqlKiller::signal_to_error(sig, conn_id));
+                        return Err(crate::driver::error::store_signal_to_error(sig));
                     }
                     r = rx.recv() => r.map(RespMsg::Resp),
                     _ = finish.wait_for(|d| *d) => return Ok((None, false, true)),
@@ -1364,7 +1362,7 @@ impl<S: TiKVStore> CopIterator<S> {
                         {
                             let _ = self.finish_tx.send(true);
                         }
-                        return Err(SqlKiller::signal_to_error(sig, conn_id));
+                        return Err(crate::driver::error::store_signal_to_error(sig));
                     }
                     r = rx.recv() => r,
                     _ = finish.wait_for(|d| *d) => return Ok((None, false, true)),
@@ -1442,10 +1440,7 @@ impl<S: TiKVStore> CopIterator<S> {
                 let _ = self.finish_tx.send(true);
             }
             self.action_on_exceed.close();
-            return Err(SqlKiller::signal_to_error(
-                kc.signal(),
-                self.shared.req.conn_id,
-            ));
+            return Err(crate::driver::error::store_signal_to_error(kc.signal()));
         }
 
         let mut resp: Box<CopResponse>;
@@ -1543,7 +1538,6 @@ impl<S: TiKVStore> CopIterator<S> {
         if let Some(r) = lite.batch_cop_resp_list.pop_front() {
             return Some(r);
         }
-        let conn_id = self.shared.req.conn_id;
         let mut backoffermap: HashMap<u64, S::Backoffer> = HashMap::new();
         while !self.tasks.is_empty() {
             let cur_task = self.tasks.remove(0);
@@ -1553,7 +1547,7 @@ impl<S: TiKVStore> CopIterator<S> {
                 biased;
                 sig = wait_kill_cancel(kill_cancel) => {
                     return Some(Box::new(CopResponse {
-                        err: Some(SqlKiller::signal_to_error(sig, conn_id)),
+                        err: Some(crate::driver::error::store_signal_to_error(sig)),
                         ..Default::default()
                     }));
                 }

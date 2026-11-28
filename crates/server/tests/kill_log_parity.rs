@@ -70,6 +70,7 @@ impl Response for HookCloseResponse {
     fn close(&mut self) -> Result<(), Error> {
         if let Some((killer, sig)) = self.hook.lock().take() {
             killer.send_kill_signal(sig);
+            return Err(SqlKiller::error_for_signal(sig, 2_097_154).expect("valid kill signal"));
         }
         Ok(())
     }
@@ -463,12 +464,19 @@ async fn server_kill_and_write_result_set_panic_logs_match_go_whole_line() {
             .filter(|l| l.contains("write query result panic"))
             .map(normalize_panic_line)
             .collect();
-        assert_eq!(
-            panic_lines,
-            vec![format!(
-                "[ERROR] [conn.rs:<LINE>] [\"write query result panic\"] [conn=2097154] [session_alias=alias1] [lastSQL=\"SELECT a FROM test.t\"] [stack=\"<STACK>\"] [recover=\"{err_text}\"]"
-            )]
-        );
+        if sig == RunawayQueryExceeded {
+            assert!(
+                panic_lines.is_empty(),
+                "8253 must not emit write query result panic, got {panic_lines:?}"
+            );
+        } else {
+            assert_eq!(
+                panic_lines,
+                vec![format!(
+                    "[ERROR] [conn.rs:<LINE>] [\"write query result panic\"] [conn=2097154] [session_alias=alias1] [lastSQL=\"SELECT a FROM test.t\"] [stack=\"<STACK>\"] [recover=\"{err_text}\"]"
+                )]
+            );
+        }
         rs.close(&mut se).await.unwrap();
         se.sql_killer().reset();
         let _ = sink.take();

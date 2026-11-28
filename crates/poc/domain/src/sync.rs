@@ -176,8 +176,19 @@ impl SchemaSync {
                 cfg.on_server_id_change.clone(),
                 cfg.kill_all_connections.clone(),
             ));
-            let id = lease.acquire_server_id().await?;
-            cfg.info.server_id = id;
+            match lease.acquire_server_id().await {
+                Ok(id) => {
+                    cfg.info.server_id = id;
+                }
+                Err(e) => {
+                    // Match Go domain.go:1474-1476: log ERROR, mark PD lost, and let the keeper
+                    // retry acquiring /tidb/server_id in the background instead of failing startup.
+                    let err_str = e.to_string();
+                    tidb_base::log_error!("acquire serverID failed", "error" => err_str.as_str());
+                    lease.mark_lost_connection_to_pd();
+                    cfg.info.server_id = 0;
+                }
+            }
             Some(lease)
         } else {
             None
@@ -247,6 +258,20 @@ impl SchemaSync {
         self.inner.server_id.load(Ordering::SeqCst)
     }
 
+    /// Returns `true` when cluster global-kill is enabled and PD lease connectivity is lost
+    /// or initial `/tidb/server_id` acquisition failed.
+    pub fn is_lost_connection_to_pd(&self) -> bool {
+        self.inner
+            .server_id_lease
+            .as_ref()
+            .is_some_and(|l| l.is_lost_connection_to_pd())
+    }
+
+    /// Returns the underlying [`ServerIdLease`] if cluster `server_id` tracking is enabled.
+    pub fn server_id_lease(&self) -> Option<&Arc<ServerIdLease>> {
+        self.inner.server_id_lease.as_ref()
+    }
+
     /// Resolves `target_server_id`'s status/RPC URL (`http://ip:status_port`) from etcd.
     pub async fn lookup_server_rpc_url(&self, target_server_id: u64) -> Result<Option<String>> {
         find_server_rpc_url(&self.inner.etcd(), target_server_id).await
@@ -276,8 +301,13 @@ impl SchemaSync {
         let started = Instant::now();
         self.inner.stop.send_replace(true);
         self.inner.wake.notify_one();
-        if let Some(handle) = self.inner.server_id_keeper_handle.lock().await.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        if let Some(mut handle) = self.inner.server_id_keeper_handle.lock().await.take()
+            && tokio::time::timeout(Duration::from_secs(5), &mut handle)
+                .await
+                .is_err()
+        {
+            handle.abort();
+            let _ = handle.await;
         }
         if let Some(lease) = &self.inner.server_id_lease {
             lease.release_server_id().await;
@@ -652,9 +682,7 @@ impl Inner {
     fn current_info(&self) -> ServerInfo {
         let sid = self.server_id.load(Ordering::SeqCst);
         let mut info = self.cfg.info.clone();
-        if sid != 0 {
-            info.server_id = sid;
-        }
+        info.server_id = sid;
         info
     }
 

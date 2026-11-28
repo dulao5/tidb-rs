@@ -16,10 +16,15 @@
 use std::sync::LazyLock;
 
 use tidb_base::Error;
-use tidb_base::dbterror::ClassTiKV;
+use tidb_base::dbterror::{ClassTiKV, exeerrors};
 use tidb_base::errno;
+use tidb_base::go_args;
 use tidb_base::gofmt::Arg;
 use tidb_base::terror;
+use tidb_memory::sqlkiller::{
+    KillSignal, MaxExecTimeExceeded, QueryInterrupted, QueryMemoryExceeded, RunawayQueryExceeded,
+    ServerMemoryExceeded,
+};
 use tikv_client::metrics::BackoffType;
 use tikv_client::proto::kvrpcpb;
 
@@ -218,6 +223,25 @@ fn extract_key_err(key_err: &kvrpcpb::KeyError) -> ClientGoError<'_> {
     ))
 }
 
+/// Translates a `SqlKiller` signal interrupted at the store/coprocessor boundary into Go's
+/// `store/driver/error/error.go:126-142` (`ToTiDBErr` for `tikverr.ErrQueryInterruptedWithSignal`).
+// go-part: ToTiDBErr L1 (ErrQueryInterruptedWithSignal arms)
+pub fn store_signal_to_error(signal: KillSignal) -> Error {
+    match signal {
+        QueryInterrupted => ErrQueryInterrupted.clone(),
+        MaxExecTimeExceeded => exeerrors::ErrMaxExecTimeExceeded.gen_with_stack_by_args(vec![]),
+        QueryMemoryExceeded => {
+            exeerrors::ErrMemoryExceedForQuery.gen_with_stack_by_args(go_args![-1i64])
+        }
+        ServerMemoryExceeded => {
+            exeerrors::ErrMemoryExceedForInstance.gen_with_stack_by_args(go_args![-1i64])
+        }
+        RunawayQueryExceeded => exeerrors::ErrResourceGroupQueryRunawayInterrupted
+            .fast_gen_by_args(go_args!["exceed tidb side"]),
+        _ => ErrQueryInterrupted.clone(),
+    }
+}
+
 /// ToTiDBErr checks and converts a tikv error to a tidb error.
 ///
 /// Go's checks in Go's order; the ones whose client-go error client-rust never returns are
@@ -370,5 +394,43 @@ mod tests {
         assert_eq!(e.to_string(), "txn 7 not found");
         let other = to_tidb_err(tikv_client::Error::StringError("plain".into()).into());
         assert_eq!(other.to_string(), "plain");
+    }
+
+    #[test]
+    fn store_signal_to_error_matches_go_driver_texts() {
+        let e1317 = store_signal_to_error(QueryInterrupted);
+        assert!(ErrQueryInterrupted.equal(&e1317));
+        assert_eq!(
+            e1317.to_string(),
+            "[tikv:1317]Query execution was interrupted"
+        );
+
+        let e3024 = store_signal_to_error(MaxExecTimeExceeded);
+        assert!(exeerrors::ErrMaxExecTimeExceeded.equal(&e3024));
+        assert_eq!(
+            e3024.to_string(),
+            "[executor:3024]Query execution was interrupted, maximum statement execution time exceeded"
+        );
+
+        let e8175 = store_signal_to_error(QueryMemoryExceeded);
+        assert!(exeerrors::ErrMemoryExceedForQuery.equal(&e8175));
+        assert_eq!(
+            e8175.to_string(),
+            "[executor:8175]Your query has been cancelled due to exceeding the allowed memory limit for a single SQL query. Please try narrowing your query scope or increase the tidb_mem_quota_query limit and try again.[conn=-1]"
+        );
+
+        let e8176 = store_signal_to_error(ServerMemoryExceeded);
+        assert!(exeerrors::ErrMemoryExceedForInstance.equal(&e8176));
+        assert_eq!(
+            e8176.to_string(),
+            "[executor:8176]Your query has been cancelled due to exceeding the allowed memory limit for the tidb-server instance and this query is currently using the most memory. Please try narrowing your query scope or increase the tidb_server_memory_limit and try again.[conn=-1]"
+        );
+
+        let e8253 = store_signal_to_error(RunawayQueryExceeded);
+        assert!(exeerrors::ErrResourceGroupQueryRunawayInterrupted.equal(&e8253));
+        assert_eq!(
+            e8253.to_string(),
+            "[executor:8253]Query execution was interrupted, identified as runaway query [exceed tidb side]"
+        );
     }
 }

@@ -34,7 +34,7 @@ pub struct SimpleKillStmt {
     pub query: bool,
     pub connection_id: u64,
     pub tidb_extension: bool,
-    /// `Some(lower_name)` when a zero-arg function expression (`CONNECTION_ID()`, etc.) was supplied.
+    /// `Some(lower_name)` when a function expression (`CONNECTION_ID()`, etc.) was supplied.
     pub expr_func_name: Option<String>,
     /// True when the `KILL` expression was not a zero-arg function call.
     pub expr_invalid: bool,
@@ -66,9 +66,7 @@ impl Simple {
     pub fn from_kill(ctx: &PlanCtx<'_>, raw: &KillStmt) -> Simple {
         let (expr_func_name, expr_invalid) = match &raw.expr {
             None => (None, false),
-            Some(ast::Expr::FuncCall(fc)) if fc.args.is_empty() && fc.schema.o.is_empty() => {
-                (Some(fc.fn_name.l()), false)
-            }
+            Some(ast::Expr::FuncCall(fc)) => (Some(fc.fn_name.l()), false),
             Some(_) => (None, true),
         };
         Simple {
