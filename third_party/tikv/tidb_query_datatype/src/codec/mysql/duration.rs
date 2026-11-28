@@ -1225,13 +1225,13 @@ mod tests {
 
             let r = Duration::from_i64(&mut ctx, input, fsp);
 
-            let expect_str = if let Ok(dur) = &expect {
-                format!("{}", dur)
+            let expect_str = if expect.is_ok() {
+                format!("{}", expect.as_ref().unwrap())
             } else {
                 format!("{:?}", &expect)
             };
-            let result_str = if let Ok(dur) = &r {
-                format!("{}", dur)
+            let result_str = if r.is_ok() {
+                format!("{}", r.as_ref().unwrap())
             } else {
                 format!("{:?}", &r)
             };

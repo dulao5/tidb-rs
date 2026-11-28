@@ -204,7 +204,7 @@ fn count_leading_zeroes(i: u8, word: u32) -> u8 {
 /// removed from fraction.
 fn count_trailing_zeroes(i: u8, word: u32) -> u8 {
     let (mut c, mut i) = (0, i as usize);
-    while word.is_multiple_of(TEN_POW[i]) {
+    while word % TEN_POW[i] == 0 {
         i += 1;
         c += 1;
     }

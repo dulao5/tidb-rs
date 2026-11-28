@@ -16,7 +16,6 @@ coprocessor = [
   "dep:prometheus",
   "dep:prometheus-static-metric",
   "dep:raft",
-  "dep:tracker",
   "dep:yatp",
 ]
 
@@ -37,7 +36,6 @@ serde_json = "1.0"
 thiserror = "1.0"
 tikv_util = { workspace = true }
 time = { workspace = true }
-tracker = { workspace = true, optional = true }
 yatp = { workspace = true, optional = true }
 
 [dev-dependencies]

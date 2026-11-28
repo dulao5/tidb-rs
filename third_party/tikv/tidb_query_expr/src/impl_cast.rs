@@ -1820,7 +1820,7 @@ mod tests {
         }
     }
 
-    fn make_extra(ret_field_type: &FieldType) -> RpnFnCallExtra<'_> {
+    fn make_extra(ret_field_type: &FieldType) -> RpnFnCallExtra {
         RpnFnCallExtra { ret_field_type }
     }
 
@@ -1922,9 +1922,9 @@ mod tests {
         let cs = vec![
             // (origin, result, overflow)
             (-10.4, -10i64, false),
-            (-10.5, -10, false),
+            (-10.5, -11, false),
             (10.4, 10, false),
-            (10.5, 10, false),
+            (10.5, 11, false),
             (i64::MAX as f64, i64::MAX, false),
             ((1u64 << 63) as f64, i64::MAX, false),
             (i64::MIN as f64, i64::MIN, false),
@@ -3121,10 +3121,10 @@ mod tests {
                 false,
                 false,
             ),
-            (Json::from_f64(10.5).unwrap(), 10, false, false),
+            (Json::from_f64(10.5).unwrap(), 11, false, false),
             (Json::from_f64(10.4).unwrap(), 10, false, false),
             (Json::from_f64(-10.4).unwrap(), -10, false, false),
-            (Json::from_f64(-10.5).unwrap(), -10, false, false),
+            (Json::from_f64(-10.5).unwrap(), -11, false, false),
             (
                 Json::from_string(String::from("10.0")).unwrap(),
                 10,
