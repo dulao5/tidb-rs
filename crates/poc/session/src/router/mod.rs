@@ -237,6 +237,10 @@ pub trait PocEngine: Send {
     fn in_txn(&self) -> bool;
     /// The state synced into the new session.
     fn values(&self) -> PocValues;
+    /// How many assignments of the `SET` it just ran the PoC applied: all of them when the
+    /// statement succeeded; when it failed, the ones before the failing assignment, which stay
+    /// applied as in Go's `SetExecutor.Next`.
+    fn set_applied(&self) -> usize;
     /// A command starts (statement timing, metadata lock).
     fn begin_command(&mut self);
     /// The statement's type is known (statement metrics; once per command).
@@ -1021,15 +1025,25 @@ impl Router {
         }
         poc.set_prev_stmt(&self.last);
         let result = poc.run(&lowered).await;
-        if result.is_ok() {
-            let vars = self.new.session_mut().vars_mut();
-            match &lowered.stmt {
-                Statement::Set(assignments) => {
-                    sync::sync_set(vars, &mut self.diverged, assignments, &poc.values())
-                }
-                Statement::Use(_) => sync::sync_db(vars, &poc.values()),
-                _ => {}
+        let vars = self.new.session_mut().vars_mut();
+        match &lowered.stmt {
+            // A failing SET keeps the assignments before the failing one (Go's
+            // `SetExecutor.Next`), so the new session gets those too.
+            Statement::Set(assignments) => {
+                let applied = if result.is_ok() {
+                    assignments.len()
+                } else {
+                    poc.set_applied().min(assignments.len())
+                };
+                sync::sync_set(
+                    vars,
+                    &mut self.diverged,
+                    &assignments[..applied],
+                    &poc.values(),
+                )
             }
+            Statement::Use(_) if result.is_ok() => sync::sync_db(vars, &poc.values()),
+            _ => {}
         }
         self.finish_poc(&result);
         result

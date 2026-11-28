@@ -37,6 +37,8 @@ use super::*;
 #[derive(Default)]
 struct FakePoc {
     values: PocValues,
+    /// Assignments the last SET applied.
+    set_applied: usize,
     schema_version: Option<i64>,
     in_txn: bool,
     /// Rows a SELECT returns.
@@ -97,6 +99,9 @@ impl PocEngine for FakePoc {
     fn values(&self) -> PocValues {
         self.values.clone()
     }
+    fn set_applied(&self) -> usize {
+        self.set_applied
+    }
     fn begin_command(&mut self) {}
     fn start_statement(&mut self, kind: StmtType, _parse: Duration) {
         self.log.push(format!("start {kind:?}"));
@@ -110,7 +115,16 @@ impl PocEngine for FakePoc {
                 }
                 Statement::Set(assignments) => {
                     self.log.push("run set".into());
+                    self.set_applied = 0;
                     for a in assignments {
+                        // Like the PoC: an assignment it rejects ends the statement, and the
+                        // ones before it stay applied.
+                        if let SetAssignment::SysVar { name, .. } = a
+                            && name == "sql_select_limit"
+                        {
+                            return Err(SqlError::not_supported("setting system variable"));
+                        }
+                        self.set_applied += 1;
                         if let SetAssignment::Names { charset, collation } = a {
                             let cs = charset.clone().unwrap_or_else(|| "utf8mb4".into());
                             self.values.collation =
@@ -949,6 +963,38 @@ fn fallback_restores_the_new_session() {
         assert_eq!(script.lock().unwrap().log.len(), 3, "{block}");
         assert!(cscript.lock().unwrap().log.is_empty());
     }
+}
+
+/// A SET that fails at its second assignment keeps the first one, in the PoC and in the new
+/// session (Go's `SetExecutor.Next` returns at the first error without undoing the others).
+#[test]
+fn failing_set_keeps_the_earlier_assignments_in_the_new_session() {
+    let mut p = poc();
+    let mut r = real(NewStackMode::Fallback, &p);
+    assert_eq!(get(&mut r, "character_set_client"), "utf8mb4");
+    let res = block_on(r.query(
+        &mut p,
+        "SET NAMES latin1, sql_select_limit = 5, NAMES ascii",
+    ));
+    assert_eq!(res.unwrap_err().code, 1235);
+    assert_eq!(p.set_applied, 1);
+    assert_eq!(p.values.charset, "latin1");
+    for v in [
+        "character_set_client",
+        "character_set_connection",
+        "character_set_results",
+    ] {
+        assert_eq!(get(&mut r, v), "latin1", "{v}");
+    }
+    assert_eq!(get(&mut r, "collation_connection"), "latin1_bin");
+    // A SET that fails at its first assignment changes nothing.
+    let res = block_on(r.query(&mut p, "SET sql_select_limit = 5, NAMES ascii"));
+    assert_eq!(res.unwrap_err().code, 1235);
+    assert_eq!(get(&mut r, "character_set_client"), "latin1");
+    // A variable only the new session models keeps its value too.
+    let res = block_on(r.query(&mut p, "SET time_zone = '+01:00', sql_select_limit = 5"));
+    assert_eq!(res.unwrap_err().code, 1235);
+    assert_eq!(get(&mut r, "time_zone"), "+01:00");
 }
 
 /// The route trace (#260): every routing decision of the connection, with its engine and

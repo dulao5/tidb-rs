@@ -15,6 +15,9 @@ use tidb_sql::ir::Literal;
 use tidb_sql::ir::Select;
 use tidb_sql::ranges::eval_const;
 
+use crate::router::sql_error;
+use tidb_base::go_args;
+
 /// Comment returned for `@@version_comment` (shown by the `mysql` CLI banner).
 pub const VERSION_COMMENT: &str =
     "tidb-rs read-only prototype (Apache License 2.0), MySQL 8.0 compatible";
@@ -118,9 +121,19 @@ impl ConstEnv<'_> {
     fn item(&self, e: &Expr, params: &[Literal]) -> Result<(ColumnDef, Value), SqlError> {
         let unsupported = || SqlError::not_supported("this expression in a SELECT without FROM");
         match e {
-            Expr::SysVar { name, .. } => self
-                .sysvar(name)
-                .ok_or_else(|| SqlError::new(1193, format!("Unknown system variable '{name}'"))),
+            Expr::SysVar {
+                name,
+                global,
+                explicit_scope,
+            } => {
+                check_system_variable(name, *global, *explicit_scope)?;
+                self.sysvar(name).ok_or_else(|| {
+                    SqlError::not_supported(format!(
+                        "reading system variable '{name}' (the prototype answers only the \
+                         variables clients read while connecting)"
+                    ))
+                })
+            }
             Expr::Func { name } => self.func(name).ok_or_else(unsupported),
             Expr::Literal(_) | Expr::Param(_) | Expr::Neg(_) => {
                 Ok(literal_column(eval_const(e, params)?))
@@ -184,6 +197,49 @@ impl ConstEnv<'_> {
 }
 
 /// Column and value of a constant (Go: the literal's inferred type).
+/// The checks Go makes before it reads a system variable in an expression
+/// (`expressionRewriter.rewriteSystemVariable`, pkg/planner/core/expression_rewriter.go:1797),
+/// in its order, over the ported sysvar registry (D05.1): an unknown variable is
+/// `ErrUnknownSystemVar` (1193), or `ErrVariableNoLongerSupported` for a removed one; with an
+/// explicit scope, `@@global.` of a session-only variable and `@@session.` of a global-only one
+/// are `ErrIncorrectScope` (1238), except for a variable of no scope (read-only constants).
+/// Errors go to the client as Go's `writeError` sends them.
+///
+/// Not done here: the warning Go appends when reading a no-op variable while
+/// `tidb_enable_noop_variables` is off (the prototype keeps no warnings), and the
+/// `RESTRICTED_VARIABLES_ADMIN` check under security enhanced mode (no SEM on this node).
+// glue: the prototype's stand-in for the name and scope checks of expressionRewriter.rewriteSystemVariable (the function itself is the rewriter's part 2, D09.2, still a stub)
+pub(crate) fn check_system_variable(
+    name: &str,
+    is_global: bool,
+    explicit_scope: bool,
+) -> Result<(), SqlError> {
+    use tidb_sessionctx::variable::error::{ErrIncorrectScope, ErrUnknownSystemVar};
+    let Some(sys_var) = tidb_sessionctx::variable::get_sys_var(name) else {
+        let mut err = ErrUnknownSystemVar.fast_gen_by_args(go_args![name.to_owned()]);
+        if let Err(removed) = tidb_sessionctx::variable::removed::check_sys_var_is_removed(name) {
+            // Removed vars still return an error, but we customize it from
+            // "unknown" to an explanation of why it is not supported.
+            // This is important so users at least know they had the name correct.
+            err = removed;
+        }
+        return Err(sql_error(&err));
+    };
+    if explicit_scope && !sys_var.has_none_scope() {
+        if is_global && !(sys_var.has_global_scope() || sys_var.has_instance_scope()) {
+            return Err(sql_error(
+                &ErrIncorrectScope.gen_with_stack_by_args(go_args![name.to_owned(), "SESSION"]),
+            ));
+        }
+        if !is_global && !sys_var.has_session_scope() {
+            return Err(sql_error(
+                &ErrIncorrectScope.gen_with_stack_by_args(go_args![name.to_owned(), "GLOBAL"]),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn literal_column(l: Literal) -> (ColumnDef, Value) {
     let not_null = column_flag::NOT_NULL;
     match l {
@@ -294,6 +350,143 @@ mod tests {
         let r = run("SELECT @@collation_connection", &[]).unwrap();
         assert_eq!(r.rows[0][0], Value::from("utf8mb4_general_ci"));
         assert_eq!(run("SELECT @@no_such_var", &[]).unwrap_err().code, 1193);
+    }
+
+    /// The whole client error of a SELECT without FROM: code, SQLSTATE and message.
+    fn err(sql: &str) -> (u16, &'static str, String) {
+        let e = run(sql, &[]).unwrap_err();
+        (e.code, e.state, e.message)
+    }
+
+    /// Go's name and scope checks of `rewriteSystemVariable` (#489): `@@global.` of a
+    /// session-only variable and `@@session.` of a global-only one are 1238; a variable of no
+    /// scope is read with any scope; an unknown one is 1193, a removed one 8136.
+    #[test]
+    fn system_variable_name_and_scope_checks() {
+        assert_eq!(
+            err("SELECT @@global.warning_count"),
+            (
+                1238,
+                "HY000",
+                "Variable 'warning_count' is a SESSION variable".to_owned()
+            )
+        );
+        assert_eq!(
+            err("SELECT @@GLOBAL.Last_Plan_From_Cache"),
+            (
+                1238,
+                "HY000",
+                "Variable 'last_plan_from_cache' is a SESSION variable".to_owned()
+            )
+        );
+        assert_eq!(
+            err("SELECT @@session.tidb_gc_life_time"),
+            (
+                1238,
+                "HY000",
+                "Variable 'tidb_gc_life_time' is a GLOBAL variable".to_owned()
+            )
+        );
+        assert_eq!(
+            err("SELECT @@local.tidb_gc_life_time"),
+            (
+                1238,
+                "HY000",
+                "Variable 'tidb_gc_life_time' is a GLOBAL variable".to_owned()
+            )
+        );
+        assert_eq!(
+            err("SELECT @@no_such_var"),
+            (
+                1193,
+                "HY000",
+                "Unknown system variable 'no_such_var'".to_owned()
+            )
+        );
+        assert_eq!(
+            err("SELECT @@global.tidb_enable_streaming"),
+            (
+                8136,
+                "HY000",
+                "option 'tidb_enable_streaming' is no longer supported. Reason: streaming is \
+                 no longer supported"
+                    .to_owned()
+            )
+        );
+        // No scope (a constant): the scope written is not checked.
+        let r = run(
+            "SELECT @@global.version_comment, @@session.version_comment",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows[0],
+            vec![Value::from(VERSION_COMMENT), Value::from(VERSION_COMMENT)]
+        );
+        // Session-only without a scope, global and session with either.
+        let r = run(
+            "SELECT @@last_plan_from_cache, @@global.autocommit, @@session.autocommit",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(r.rows[0], vec![Value::Int(1), Value::Int(1), Value::Int(1)]);
+        // A known variable the prototype does not answer is not supported (it was 1193).
+        assert_eq!(
+            err("SELECT @@warning_count"),
+            (
+                1235,
+                "42000",
+                "This version of TiDB doesn't yet support 'reading system variable \
+                 'warning_count' (the prototype answers only the variables clients read \
+                 while connecting)'"
+                    .to_owned()
+            )
+        );
+    }
+
+    /// Every variable the prototype answers is a Go system variable, so the checks above
+    /// never reject one of them as unknown.
+    #[test]
+    fn answered_variables_are_go_system_variables() {
+        for name in [
+            "version_comment",
+            "version",
+            "max_allowed_packet",
+            "wait_timeout",
+            "interactive_timeout",
+            "net_write_timeout",
+            "net_read_timeout",
+            "auto_increment_increment",
+            "auto_increment_offset",
+            "autocommit",
+            "last_plan_from_cache",
+            "last_plan_from_binding",
+            "transaction_read_only",
+            "tx_read_only",
+            "lower_case_table_names",
+            "transaction_isolation",
+            "tx_isolation",
+            "character_set_client",
+            "character_set_connection",
+            "character_set_results",
+            "character_set_server",
+            "character_set_database",
+            "collation_connection",
+            "collation_server",
+            "collation_database",
+            "time_zone",
+            "system_time_zone",
+            "have_ssl",
+            "have_openssl",
+            "license",
+            "sql_mode",
+        ] {
+            assert!(env().sysvar(name).is_some(), "{name}");
+            assert!(
+                tidb_sessionctx::variable::get_sys_var(name).is_some(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

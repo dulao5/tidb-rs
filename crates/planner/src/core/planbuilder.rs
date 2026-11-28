@@ -17,11 +17,12 @@ use std::sync::Arc;
 use tidb_base::Error;
 use tidb_base::blocked::blocked;
 
-use tidb_base::dbterror::plannererrors::ErrInternal;
+use tidb_base::dbterror::plannererrors::{ErrInternal, ErrKeyDoesNotExist};
 use tidb_base::{go_args, kv, mysql};
 use tidb_model::{StatePublic, TableInfo};
 use tidb_parser::ast::{
-    ColumnName, ExecuteStmt, Expr, IndexHint, Op, SelectLockInfo, SelectLockType, SelectStmt, Stmt,
+    ColumnName, ExecuteStmt, Expr, IndexHint, IndexHintScope, IndexHintType, Op, SelectLockInfo,
+    SelectLockType, SelectStmt, Stmt,
 };
 use tidb_parser::model::CIStr;
 use tidb_sessionctx::variable::names::TiDBIsolationReadEngines;
@@ -701,12 +702,14 @@ fn check_auto_force_index_look_up_push_down(
 /// replica, and a path for each public index the optimizer may use (D09.1 spec §4).
 ///
 /// The planner has the table's meta (`tbl.Meta()`); a cluster table (`tbl.Type()
-/// .IsClusterTable()`) is a memory table, which the builder stops at before. Boundary stubs
-/// (D09.1 spec §5): index hints (`USE / FORCE / IGNORE INDEX`, and the comment-style hints
-/// of `tableHints`, D13.3) are `blocked-by:D13.3`; hypothetical indexes and TiFlash replicas
-/// (EXPLAIN only) and reading the newest index states from the domain (`check`: a
-/// connection reading for update or under READ COMMITTED) are `blocked-by:D10.2`.
-// go: getPossibleAccessPaths L2 (index hints, hypothetical indexes and the newest index states are boundary stubs)
+/// .IsClusterTable()`) is a memory table, which the builder stops at before. The index hints
+/// of the table name (`USE / FORCE / IGNORE INDEX`) are applied as Go applies them; the
+/// planner has no comment-style hints yet (`tableHints`, D13.3: `NO_INDEX_LOOKUP_PUSHDOWN`,
+/// `/*+ USE_INDEX(...) */` and the like). Boundary stubs (D09.1 spec §5): `HYPO_INDEX` hints
+/// are `blocked-by:D13.3`; hypothetical indexes and TiFlash replicas (EXPLAIN only) and
+/// reading the newest index states from the domain (`check`: a connection reading for update
+/// or under READ COMMITTED) are `blocked-by:D10.2`.
+// go: getPossibleAccessPaths L2 (no comment-style hints yet; hypothetical indexes and the newest index states are boundary stubs; the paths a hint picks are indexes into publicPaths instead of shared pointers)
 pub fn get_possible_access_paths(
     vars: &mut SessionVars,
     index_hints: &[IndexHint],
@@ -724,7 +727,7 @@ pub fn get_possible_access_paths(
         ..AccessPath::default()
     };
     fill_content_for_table_path(&mut table_path, tbl_info);
-    public_paths.push(table_path.clone_path());
+    public_paths.push(table_path);
 
     match &tbl_info.tiflash_replica {
         None => vars.raise_warning_when_mpp_enforced(&format!(
@@ -812,19 +815,107 @@ pub fn get_possible_access_paths(
         return Err(blocked("D13.3", "HYPO_INDEX hints"));
     }
 
-    // Extract comment-style index hint like /*+ INDEX(t, idx1, idx2) */ (tableHints, D13.3:
-    // none here) and the index hints of the table name.
-    if !index_hints.is_empty() {
-        // glue: blocked-by:D13.3 (index hints: USE / FORCE / IGNORE INDEX)
-        return Err(blocked("D13.3", "index hints (USE / FORCE / IGNORE INDEX)"));
-    }
-    let (has_scan_hint, has_use_or_force) = (false, false);
-    let ignored: Vec<AccessPath> = Vec::new();
-    let mut available: Vec<AccessPath> = Vec::new();
+    // Go's `available` / `ignored` hold pointers into `publicPaths`, and a hint sets `Forced`
+    // (and the keep-order flags) on the shared path; here they hold indexes into
+    // `public_paths`, and the paths are taken out after the loop, with every flag set.
+    let mut has_scan_hint = false;
+    let mut has_use_or_force = false;
+    let mut available_idx: Vec<usize> = Vec::with_capacity(public_paths.len());
+    let mut ignored_idx: Vec<usize> = Vec::with_capacity(public_paths.len());
 
-    if !has_scan_hint || !has_use_or_force {
-        available = public_paths;
+    // Extract comment-style index hint like /*+ INDEX(t, idx1, idx2) */: the planner has no
+    // table hints yet (tableHints, D13.3), so nothing is appended to the index hints of the
+    // table name and `i < index_hints_len` holds for every hint below.
+    let index_hints_len = index_hints.len();
+
+    let isolation_read_engines_has_tikv = vars.get_isolation_read_engines().contains(&kv::TiKV);
+    for (i, hint) in index_hints.iter().enumerate() {
+        if hint.hint_scope != IndexHintScope::ForScan {
+            continue;
+        }
+
+        has_scan_hint = true;
+
+        // It is syntactically valid to omit index_list for USE INDEX, which means “use no indexes”.
+        // Omitting index_list for FORCE INDEX or IGNORE INDEX is a syntax error.
+        // See https://dev.mysql.com/doc/refman/8.0/en/index-hints.html.
+        // (Go's `hint.IndexNames == nil`: the parser gives an empty list for `()`.)
+        if !isolation_read_engines_has_tikv && hint.index_names.is_empty() {
+            continue;
+        }
+        if hint.index_names.is_empty()
+            && hint.hint_type != IndexHintType::Ignore
+            && let Some(p) = path_position(&public_paths, get_table_path(&public_paths))
+        {
+            has_use_or_force = true;
+            public_paths[p].forced = true;
+            available_idx.push(p);
+        }
+        for idx_name in &hint.index_names {
+            // The AST's name stand-in as a `model.CIStr` (its lower-case form is Go's).
+            let idx_name = CIStr::new(&idx_name.o);
+            let idx_name = &idx_name;
+            let found = get_path_by_index_name(&public_paths, &idx_name.l, tbl_info);
+            let Some(p) = path_position(&public_paths, found) else {
+                let err = ErrKeyDoesNotExist
+                    .fast_gen_by_args(go_args![idx_name.o.clone(), tbl_info.name.o.clone()]);
+                // if hint is from comment-style sql hints, we should throw a warning instead of error.
+                if i < index_hints_len {
+                    return Err(err);
+                }
+                vars.stmt_ctx().append_warning(err);
+                continue;
+            };
+            if hint.hint_type == IndexHintType::Ignore {
+                // Collect all the ignored index hints.
+                ignored_idx.push(p);
+                continue;
+            }
+            if is_tikv_index_by_name(idx_name, public_paths[p].index.as_deref(), tbl_info)
+                && !isolation_read_engines_has_tikv
+            {
+                let (engine_vals, _) = vars.get_system_var(TiDBIsolationReadEngines);
+                // fmt.Errorf: `%v` of a CIStr is its original text.
+                let err = tidb_base::errors::new(format!(
+                    "TiDB doesn't support index '{}' in the isolation read engines(value: '{}')",
+                    idx_name.o, engine_vals
+                ));
+                if i < index_hints_len {
+                    return Err(err);
+                }
+                vars.stmt_ctx().append_warning(err);
+                continue;
+            }
+            // Currently we don't distinguish between "FORCE" and "USE" because
+            // our cost estimation is not reliable.
+            has_use_or_force = true;
+            public_paths[p].forced = true;
+            if hint.hint_type == IndexHintType::OrderIndex {
+                public_paths[p].force_keep_order = true;
+            }
+            if hint.hint_type == IndexHintType::NoOrderIndex {
+                public_paths[p].force_no_keep_order = true;
+            }
+            // `if i >= indexHintsLen`: the INDEX_LOOKUP_PUSHDOWN hints exist only among the
+            // comment-style hints (D13.3), which are not here (see `index_hints_len`).
+            available_idx.push(p);
+        }
     }
+
+    // Go's `tablePath` is the first public path, with the flags a hint set on it.
+    let table_path = public_paths[0].clone();
+    let ignored: Vec<AccessPath> = ignored_idx
+        .iter()
+        .map(|&p| public_paths[p].clone())
+        .collect();
+    let mut available: Vec<AccessPath> = if !has_scan_hint || !has_use_or_force {
+        public_paths
+    } else {
+        available_idx
+            .iter()
+            .map(|&p| public_paths[p].clone())
+            .collect()
+    };
 
     available = remove_ignored_paths(available, &ignored, tbl_info);
 
@@ -837,7 +928,7 @@ pub fn get_possible_access_paths(
     // If we have got "FORCE" or "USE" index hint but got no available index,
     // we have to use table scan.
     if available.is_empty() {
-        available.push(table_path.clone_path());
+        available.push(table_path.clone());
     }
 
     // If all available paths are Multi-Valued Index, Partial index or other index that need to check its usability in later phase,
@@ -924,6 +1015,14 @@ pub fn filter_path_by_isolation_read(
         Some(e) => Err(e),
         None => Ok(paths),
     }
+}
+
+/// The position in `paths` of a path [`get_table_path`] / [`get_path_by_index_name`] found
+/// in it (Go keeps the pointer itself).
+// glue: Go's *AccessPath into publicPaths, as an index
+fn path_position(paths: &[AccessPath], found: Option<&AccessPath>) -> Option<usize> {
+    let found = found?;
+    paths.iter().position(|p| std::ptr::eq(p, found))
 }
 
 // go: removeIgnoredPaths L1

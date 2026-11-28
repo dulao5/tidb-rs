@@ -3614,20 +3614,10 @@ fn prepare_index_reader_column_metadata_matches_tidb_v858() {
     assert!(s.is_idle(), "{}", s.state_snapshot());
 }
 
-/// Executing a covering `IndexReader` query plans a `PhysicalIndexReader`, builds and runs
-/// `IndexReaderExecutor` end-to-end on the Rust stack, populates `StatementContext.is_tikv`
-/// and `index_names`, returns exact rows, and leaves the session idle.
-/// Unported double-read queries (`SELECT c FROM sbtest1 WHERE k BETWEEN 1 AND 100`) still
-/// stop before any executor opens without mutating `StatementContext`.
-#[test]
-fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
-    use std::sync::atomic::Ordering;
-    use tidb_planner::base::PhysicalKind;
+/// Seeds secondary index k_1 (index_id=1) entries and record rows for sbtest1 (table_id=110)
+/// of [`sbtest_with_secondary_index_info_schema`]: (id, k=10*id, c="row-{id}") for id 1..=5.
+fn seed_sbtest1_with_k_1(store: &MockStore) {
     use tidb_types::datum::new_int_datum;
-
-    let store = MockStore::new(10);
-    // Seed secondary index k_1 (index_id=1) entries and record rows for sbtest1 (table_id=110):
-    // (id, k=10*id, c="row-{id}").
     for id in 1..=5_i64 {
         let mut encoded = Vec::new();
         tidb_codec::codec::encode_key(
@@ -3656,6 +3646,21 @@ fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
         );
         store.rows.lock().insert(row_key.0, val);
     }
+}
+
+/// Executing a covering `IndexReader` query plans a `PhysicalIndexReader`, builds and runs
+/// `IndexReaderExecutor` end-to-end on the Rust stack, populates `StatementContext.is_tikv`
+/// and `index_names`, returns exact rows, and leaves the session idle.
+/// Unported double-read queries (`SELECT c FROM sbtest1 WHERE k BETWEEN 1 AND 100`) still
+/// stop before any executor opens without mutating `StatementContext`.
+#[test]
+fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
+    use std::sync::atomic::Ordering;
+    use tidb_planner::base::PhysicalKind;
+    use tidb_types::datum::new_int_datum;
+
+    let store = MockStore::new(10);
+    seed_sbtest1_with_k_1(&store);
 
     let cache = new_test_cache();
     let mut s = cached_session(&store, sbtest_with_secondary_index_info_schema(), &cache);
@@ -3916,6 +3921,138 @@ fn index_reader_executes_and_double_read_stops_without_mutating_stmt_ctx() {
         s.drop_prepared_stmt(info.stmt_id).unwrap();
         s.clean_closed_prepared_stmts();
         assert!(s.is_idle(), "{}", s.state_snapshot());
+    }
+}
+
+/// The kind of the top plan operator `sql` compiles to; the statement is not run and the
+/// session is left idle.
+fn compiled_plan_kind(s: &mut Session, sql: &str) -> tidb_planner::base::PhysicalKind {
+    block_on(s.finish_unfinished_stmt());
+    block_on(s.core.prepare_txn_ctx()).unwrap();
+    let node = parse(sql);
+    reset_context_of_stmt(&mut s.core, &node, sql).unwrap();
+    s.core
+        .txn_manager
+        .on_stmt_start(&mut s.core.sctx, Some(&node))
+        .unwrap();
+    let stmt = tidb_executor::compiler::Compiler
+        .compile(&mut s.core, node, sql)
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let kind = stmt.plan.as_ref().expect("compiled plan").kind();
+    s.core.rollback_on_error();
+    s.core.txn_manager.on_stmt_end();
+    assert!(s.is_idle(), "{}", s.state_snapshot());
+    kind
+}
+
+/// Index hints of the table name (`USE / FORCE / IGNORE INDEX`, #489) as Go's
+/// `getPossibleAccessPaths` applies them: a name no index of the table has (nor a unique
+/// prefix of one) is `ErrKeyDoesNotExist`, which the client gets as
+/// `1176 (42000) Key 'nosuch' doesn't exist in table 'sbtest1'` (the name as written, the
+/// table's own name even under an alias); `IGNORE INDEX (k_1)`, `USE INDEX ()` and
+/// `USE INDEX (PRIMARY)` leave only the table path, `USE / FORCE INDEX (k_1)` (or its unique
+/// prefix `k`) only the index. The statements run to the end with the hinted plan: the
+/// rows, the column name and type, and the session is idle after each.
+#[test]
+fn index_hints_pick_access_paths_and_unknown_index_is_1176() {
+    use tidb_planner::base::PhysicalKind;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _enter = rt.enter();
+    let store = MockStore::new(10);
+    seed_sbtest1_with_k_1(&store);
+    let cache = new_test_cache();
+    let mut s = cached_session(&store, sbtest_with_secondary_index_info_schema(), &cache);
+
+    for (sql, name) in [
+        ("SELECT * FROM sbtest1 USE INDEX (nosuch)", "nosuch"),
+        (
+            "SELECT k FROM sbtest1 AS t FORCE INDEX (NoSuch) WHERE k = 1",
+            "NoSuch",
+        ),
+        // The name is looked up before IGNORE is considered.
+        ("SELECT k FROM sbtest1 IGNORE INDEX (k_1, nosuch)", "nosuch"),
+        // `k_` would be a unique prefix of `k_1`; `k_12` is not.
+        ("SELECT k FROM sbtest1 USE INDEX (k_12)", "k_12"),
+    ] {
+        let err = match block_on(s.execute_stmt(parse(sql), sql)) {
+            Err(e) => e,
+            Ok(_) => panic!("{sql}: no error"),
+        };
+        let msg = format!("Key '{name}' doesn't exist in table 'sbtest1'");
+        assert!(err.is_normalized(), "{sql}: {err}");
+        assert_eq!(err.code(), 1176, "{sql}: {err}");
+        assert_eq!(String::from_utf8(err.get_msg()).unwrap(), msg, "{sql}");
+        let m = tidb_base::terror::to_sql_error(&err);
+        assert_eq!(
+            (
+                m.code,
+                m.state.as_str(),
+                String::from_utf8(m.message).unwrap()
+            ),
+            (1176, "42000", msg),
+            "{sql}"
+        );
+        assert!(s.is_idle(), "{sql}: {}", s.state_snapshot());
+    }
+
+    for (sql, kind) in [
+        (
+            "SELECT k FROM sbtest1 IGNORE INDEX (k_1)",
+            PhysicalKind::TableReader,
+        ),
+        (
+            "SELECT k FROM sbtest1 USE INDEX ()",
+            PhysicalKind::TableReader,
+        ),
+        (
+            "SELECT k FROM sbtest1 USE INDEX (PRIMARY)",
+            PhysicalKind::TableReader,
+        ),
+        (
+            "SELECT k FROM sbtest1 USE INDEX (k_1)",
+            PhysicalKind::IndexReader,
+        ),
+        (
+            "SELECT k FROM sbtest1 FORCE INDEX (k)",
+            PhysicalKind::IndexReader,
+        ),
+        (
+            "SELECT k FROM sbtest1 USE INDEX FOR ORDER BY (nosuch) USE INDEX (k_1)",
+            PhysicalKind::IndexReader,
+        ),
+    ] {
+        assert_eq!(compiled_plan_kind(&mut s, sql), kind, "{sql}");
+        let mut rs = block_on(s.execute_stmt(parse(sql), sql))
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+            .expect("a result set");
+        let fields = rs.fields(&s).unwrap();
+        assert_eq!(fields.len(), 1, "{sql}");
+        assert_eq!(fields[0].column_name.o, "k", "{sql}");
+        assert_eq!(fields[0].column_as_name.o, "k", "{sql}");
+        assert_eq!(fields[0].table_name.o, "sbtest1", "{sql}");
+        assert_eq!(fields[0].column_type.get_type(), 3, "{sql}");
+        assert_eq!(fields[0].column_type.get_flag(), 9, "{sql}");
+        assert_eq!(fields[0].column_type.get_flen(), 11, "{sql}");
+        let mut chk = rs.new_chunk().unwrap();
+        let mut got = Vec::new();
+        loop {
+            block_on(rs.next(&mut s, &mut chk)).unwrap();
+            if chk.num_rows() == 0 {
+                break;
+            }
+            for i in 0..chk.num_rows() {
+                got.push(chk.get_row(i).get_int64(0));
+            }
+        }
+        block_on(rs.close(&mut s)).unwrap();
+        got.sort_unstable();
+        assert_eq!(got, vec![10, 20, 30, 40, 50], "{sql}");
+        assert!(s.is_idle(), "{sql}: {}", s.state_snapshot());
     }
 }
 

@@ -53,21 +53,25 @@ fn set(vars: &mut SessionVars, diverged: &mut BTreeSet<String>, name: &str, valu
     }
 }
 
-/// The text Go's `SET` would store for a literal value; `None` when the router cannot tell
-/// (an expression), or when the global value of `SET x = DEFAULT` cannot be read: the
-/// variable diverges.
-fn value_text(vars: &mut SessionVars, name: &str, v: &SetValue) -> Option<String> {
+/// The text Go's `SetExecutor.getVarValue` (pkg/executor/set.go:304) makes of a session
+/// `SET` value: the literal's `Datum.ToString()` (`TRUE` is the integer 1; a bare identifier is
+/// its original text, `PlanBuilder.buildSet`), the empty string for `NULL`, and for `DEFAULT`
+/// the global value, read through `vars`'s accessor (the cluster's `mysql.global_variables`,
+/// the loader's sysvar cache, D06.5 spec §8). `None` when the prototype cannot tell (an
+/// expression, a float or decimal literal) or the global value cannot be read: the PoC does
+/// not validate it, and the variable diverges. Used for the PoC's validation of `SET`
+/// (`crate::validated_session_value`) and for the sync.
+// glue: getVarValue of the literal values the prototype's SET lowers (the SET executor is D12.12)
+pub(crate) fn value_text(vars: &mut SessionVars, name: &str, v: &SetValue) -> Option<String> {
     match v {
         SetValue::Literal(Literal::Int(i)) => Some(i.to_string()),
         SetValue::Literal(Literal::UInt(u)) => Some(u.to_string()),
         SetValue::Literal(Literal::Bool(b)) => Some(if *b { "1" } else { "0" }.to_owned()),
         SetValue::Literal(Literal::Str(s)) | SetValue::Ident(s) => Some(s.clone()),
-        // `SET character_set_results = NULL`: Go stores the empty string.
-        SetValue::Literal(Literal::Null) if name == "character_set_results" => Some(String::new()),
+        // `if err != nil || nativeVal.IsNull() { return "", err }`.
+        SetValue::Literal(Literal::Null) => Some(String::new()),
         // `SET x = DEFAULT` of a session variable: the global value (Go
-        // `SetExecutor.getVarValue` with no sysVar: `GetGlobalSystemVar`), read from the
-        // cluster's `mysql.global_variables` through the new session's accessor (the
-        // loader's sysvar cache, D06.5 spec §8).
+        // `SetExecutor.getVarValue` with no sysVar: `GetGlobalSystemVar`).
         SetValue::Default => vars.get_global_system_var(name).ok(),
         _ => None,
     }

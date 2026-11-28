@@ -93,8 +93,6 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D09.5", 4),
     // Subqueries.
     ("D09.6", 2),
-    // Index hints (USE / FORCE / IGNORE INDEX).
-    ("D13.3", 2),
 ];
 
 fn vectors() -> String {
@@ -1346,7 +1344,9 @@ fn run_winop(tables: &Arc<Tables>, args: &[Value]) -> Outcome {
 /// ruling `R29` (`specs/D04.1-privilege/spec.md` §5.1–§5.2, §6.1 D1 option A): `tidb-rs` registers
 /// table-read `SelectPriv` (`column = "*"`, error `1142`) at `build_data_source` and removes Go's
 /// case-sensitive `collectPrivsForCount` patch. Pinned so any unexpected drift fails CI.
-const EXPECTED_R29_NORMALIZED: usize = 2321;
+/// Includes the 2 records of `SELECT a FROM t2 USE INDEX (ia)`, which build now that the index
+/// hint loop of `getPossibleAccessPaths` is ported, and read a base table like the others.
+const EXPECTED_R29_NORMALIZED: usize = 2323;
 
 /// Checks whether `got` equals Go's `out` once the exact `R29` table-read `("*", 1142)` entries
 /// for the statement's resolved base tables (including those folded into `TableDual` by

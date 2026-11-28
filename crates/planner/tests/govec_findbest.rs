@@ -99,8 +99,6 @@ const EXPECTED_BLOCKED: &[(&str, usize)] = &[
     ("D10.7", 60),
     // BatchPointGet (several point ranges on a unique key).
     ("D10.8", 7),
-    // Index hints (USE / FORCE / IGNORE INDEX).
-    ("D13.3", 2),
 ];
 
 fn vectors() -> String {
